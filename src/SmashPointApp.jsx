@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -86,6 +86,35 @@ async function kvSet(key, value, accessToken) {
     body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
   });
   if (!res.ok) throw new Error(`No se pudo guardar "${key}".`);
+}
+
+/* Subida de imágenes (logos, publicidades, portadas de torneo) a Supabase Storage.
+   El bucket "images" tiene que existir y ser público (ver instrucciones de configuración). */
+const IMAGES_BUCKET = "images";
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+
+async function uploadImageToSupabase(file, accessToken, folder = "misc") {
+  if (!accessToken) throw new Error("Tenés que iniciar sesión de nuevo para subir imágenes.");
+  if (!file.type || !file.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+  if (file.size > MAX_IMAGE_BYTES) throw new Error("La imagen pesa demasiado (máximo 5 MB).");
+  const extMatch = /\.([a-zA-Z0-9]+)$/.exec(file.name || "");
+  const ext = (extMatch ? extMatch[1] : "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const path = `${folder}/${uid()}${Date.now().toString(36)}.${ext}`;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${IMAGES_BUCKET}/${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": file.type,
+      "x-upsert": "false",
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || data.error || "No se pudo subir la imagen.");
+  }
+  return `${SUPABASE_URL}/storage/v1/object/public/${IMAGES_BUCKET}/${path}`;
 }
 
 const STATUS = {
@@ -2167,7 +2196,66 @@ function Login({ onLogin, onBack }) {
 
 /* ---------- Panel organizador ---------- */
 
-function OrganizerRow({ o, count, onUpdateOrganizer }) {
+/* Campo de imagen: permite elegir un archivo desde la compu o la galería del celular
+   (el input type="file" con accept="image/*" abre la cámara/galería en mobile automáticamente),
+   lo sube a Supabase Storage y guarda la URL pública resultante mediante onChange. */
+function ImageUploadField({ label, value, onChange, accessToken, folder }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const inputRef = useRef(null);
+  const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+
+  const handleFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      const url = await uploadImageToSupabase(file, accessToken, folder);
+      onChange(url);
+    } catch (err) {
+      setError(err.message || "No se pudo subir la imagen.");
+    }
+    setUploading(false);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  return (
+    <div>
+      {label && <label className="block text-xs text-teal-400 mb-1" style={F.body}>{label}</label>}
+      <div className="flex flex-wrap gap-2 items-center">
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          disabled={uploading}
+          onChange={handleFile}
+          className="text-xs text-teal-300"
+          style={F.body}
+        />
+        {uploading && <span className="text-xs text-teal-400" style={F.body}>Subiendo…</span>}
+        {value && !uploading && (
+          <button type="button" onClick={() => onChange("")} className="text-xs text-teal-500 hover:text-red-400 underline" style={F.body}>
+            Quitar imagen
+          </button>
+        )}
+      </div>
+      {error && <p className="text-xs text-red-400 mt-1" style={F.body}>{error}</p>}
+      {value && (
+        <img src={value} alt="" className="mt-2 w-16 h-16 rounded object-cover border border-teal-700" />
+      )}
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="…o pegá una URL (https://...)"
+        className="mt-2 w-full px-3 py-2 rounded border outline-none focus:border-lime-400 text-xs"
+        style={inputStyle}
+      />
+    </div>
+  );
+}
+
+function OrganizerRow({ o, count, onUpdateOrganizer, accessToken }) {
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(o.name);
   const [profileLogo, setProfileLogo] = useState(o.logoUrl || "");
@@ -2213,10 +2301,8 @@ function OrganizerRow({ o, count, onUpdateOrganizer }) {
             <input value={profileName} onChange={(e) => setProfileName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
           </div>
           <div className="min-w-[220px]">
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>URL del logo (imgbb.com, etc.)</label>
-            <input value={profileLogo} onChange={(e) => setProfileLogo(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded border outline-none focus:border-lime-400 w-full" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={accessToken} folder="logos" />
           </div>
-          {profileLogo && <img src={profileLogo} alt="" className="w-12 h-12 rounded-full object-cover border border-teal-700" />}
           <button type="button" disabled={saving} onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: saving ? 0.6 : 1 }}>
             {saving ? "Guardando…" : "Guardar"}
           </button>
@@ -2227,7 +2313,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer }) {
   );
 }
 
-function AdRow({ ad, onUpdate, onDelete }) {
+function AdRow({ ad, onUpdate, onDelete, accessToken }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(ad.name);
   const [imageUrl, setImageUrl] = useState(ad.imageUrl);
@@ -2241,8 +2327,8 @@ function AdRow({ ad, onUpdate, onDelete }) {
       <div className="border border-lime-400 rounded-lg p-4 space-y-2">
         <label className="block text-xs text-teal-400" style={F.body}>Nombre / anunciante</label>
         <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} />
-        <label className="block text-xs text-teal-400" style={F.body}>URL de la imagen</label>
-        <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
+        <label className="block text-xs text-teal-400" style={F.body}>Imagen</label>
+        <ImageUploadField value={imageUrl} onChange={setImageUrl} accessToken={accessToken} folder="ads" />
         <label className="block text-xs text-teal-400" style={F.body}>URL de destino (a dónde va si lo tocan)</label>
         <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
         <div className="flex gap-2 pt-1">
@@ -2287,7 +2373,7 @@ function AdRow({ ad, onUpdate, onDelete }) {
   );
 }
 
-function AdManager({ ads, onAdd, onUpdate, onDelete }) {
+function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
   const [name, setName] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
@@ -2309,8 +2395,7 @@ function AdManager({ ads, onAdd, onUpdate, onDelete }) {
             <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="Ej: Wilson Padel" />
           </div>
           <div>
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>URL de la imagen</label>
-            <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
+            <ImageUploadField label="Imagen" value={imageUrl} onChange={setImageUrl} accessToken={accessToken} folder="ads" />
           </div>
           <div>
             <label className="block text-xs text-teal-400 mb-1" style={F.body}>URL de destino</label>
@@ -2323,7 +2408,7 @@ function AdManager({ ads, onAdd, onUpdate, onDelete }) {
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Anuncios cargados</h2>
       <div className="space-y-3">
-        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} />)}
+        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} accessToken={accessToken} />)}
         {ads.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no cargaste ningún anuncio.</p>}
       </div>
     </div>
@@ -2529,7 +2614,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
       </div>
 
       {tab === "publicidad" ? (
-        <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} />
+        <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
         <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} onRestore={onRestoreBackup} />
       ) : tab === "torneos" ? (
@@ -2569,6 +2654,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
                 o={o}
                 count={tournaments.filter((t) => t.organizerId === o.id).length}
                 onUpdateOrganizer={onUpdateOrganizer}
+                accessToken={creator.accessToken}
               />
             ))}
             {staff.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste cuentas de organizador.</p>}
@@ -2579,7 +2665,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
   );
 }
 
-function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete }) {
+function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(t.name);
   const [date, setDate] = useState(t.date);
@@ -2607,14 +2693,9 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete }) {
           placeholder="Ej: Complejo Los Sauces, Gualeguaychú"
           className="w-full mb-3 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
         />
-        <label className="block text-xs text-teal-400 mb-1" style={F.body}>URL de imagen de portada (se ve en la tarjeta pública)</label>
-        <div className="flex flex-wrap gap-2 items-end">
-          <input
-            value={coverImageUrl}
-            onChange={(e) => setCoverImageUrl(e.target.value)}
-            placeholder="https://..."
-            className="flex-1 min-w-[220px] px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-          />
+        <label className="block text-xs text-teal-400 mb-1" style={F.body}>Imagen de portada (se ve en la tarjeta pública)</label>
+        <ImageUploadField value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="tournaments" />
+        <div className="flex flex-wrap gap-2 items-end mt-3">
           <button
             type="button"
             onClick={() => { if (name.trim() && date) { onUpdate({ ...t, name: name.trim(), date, venue: venue.trim(), coverImageUrl: coverImageUrl.trim(), circuitId: circuitId || null }); setEditing(false); } }}
@@ -2624,9 +2705,6 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete }) {
           </button>
           <button type="button" onClick={() => { setName(t.name); setDate(t.date); setVenue(t.venue || ""); setCoverImageUrl(t.coverImageUrl || ""); setCircuitId(t.circuitId || ""); setEditing(false); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
         </div>
-        {coverImageUrl && (
-          <img src={coverImageUrl} alt="" className="mt-3 w-full max-h-32 object-cover rounded border border-teal-800" />
-        )}
       </div>
     );
   }
@@ -2904,10 +2982,8 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
             <input value={profileName} onChange={(e) => setProfileName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
           </div>
           <div className="min-w-[220px]">
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>URL del logo (imgbb.com, etc.)</label>
-            <input value={profileLogo} onChange={(e) => setProfileLogo(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded border outline-none focus:border-lime-400 w-full" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={organizer.accessToken} folder="logos" />
           </div>
-          {profileLogo && <img src={profileLogo} alt="" className="w-12 h-12 rounded-full object-cover border border-teal-700" />}
           <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
             Guardar
           </button>
@@ -2953,7 +3029,7 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
           <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
           <div className="space-y-2">
             {tournaments.map((t) => (
-              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} />
+              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} />
             ))}
             {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
           </div>
