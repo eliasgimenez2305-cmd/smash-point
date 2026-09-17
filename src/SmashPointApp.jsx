@@ -63,6 +63,24 @@ async function updateOrganizerProfileRemote(id, accessToken, patch) {
   if (!res.ok) throw new Error("No se pudo guardar el perfil.");
 }
 
+/* Crear/borrar cuentas de organizador de verdad: pasa por una Edge Function de Supabase
+   (admin-organizers) porque esto requiere la service_role key, que nunca debe estar en el
+   navegador. Solo funciona si el que llama está logueado como "creador". */
+async function callAdminOrganizers(accessToken, payload) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/admin-organizers`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "No se pudo completar la operación.");
+  return data;
+}
+
 /* Guardado genérico (torneos, anuncios, circuitos) en la tabla app_data de Supabase.
    Reemplaza a window.storage, que solo existe dentro del sandbox de Claude. */
 async function kvGet(key) {
@@ -2255,12 +2273,75 @@ function ImageUploadField({ label, value, onChange, accessToken, folder }) {
   );
 }
 
-function OrganizerRow({ o, count, onUpdateOrganizer, accessToken }) {
+/* Formulario para crear una cuenta de organizador real (usuario + fila en la tabla organizers) */
+function NewOrganizerForm({ onCreate }) {
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [okMsg, setOkMsg] = useState("");
+  const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+
+  const submit = async () => {
+    if (!name.trim() || !username.trim() || !email.trim() || password.length < 6) {
+      setError("Completá todos los campos (la contraseña necesita al menos 6 caracteres).");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setOkMsg("");
+    try {
+      await onCreate({ name: name.trim(), username: username.trim(), email: email.trim(), password });
+      setOkMsg(`Cuenta creada para ${name.trim()}. Pasale el email y la contraseña.`);
+      setName(""); setUsername(""); setEmail(""); setPassword("");
+    } catch (e) {
+      setError(e.message || "No se pudo crear la cuenta.");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="border border-teal-800 rounded-lg p-4 mb-8">
+      <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Nueva cuenta de organizador</h2>
+      <div className="grid gap-3 sm:grid-cols-2 mb-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Nombre del organizador</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="Ej: Club Los Sauces" />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Usuario (para mostrar)</label>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="clublossauces" />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Email de acceso</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="organizador@email.com" />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Contraseña inicial</label>
+          <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="Mínimo 6 caracteres" />
+        </div>
+      </div>
+      <button type="button" disabled={saving} onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: saving ? 0.6 : 1 }}>
+        {saving ? "Creando…" : "Crear organizador"}
+      </button>
+      {error && <p className="text-xs text-red-400 mt-2" style={F.body}>{error}</p>}
+      {okMsg && <p className="text-xs text-lime-400 mt-2" style={F.body}>{okMsg}</p>}
+      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "¿Olvidaste tu contraseña?" en el login.</p>
+    </div>
+  );
+}
+
+function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessToken }) {
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(o.name);
   const [profileLogo, setProfileLogo] = useState(o.logoUrl || "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   const saveProfile = async () => {
     setSaving(true);
@@ -2272,6 +2353,17 @@ function OrganizerRow({ o, count, onUpdateOrganizer, accessToken }) {
       setSaveError(e.message || "No se pudo guardar.");
     }
     setSaving(false);
+  };
+
+  const doDelete = async () => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await onDeleteOrganizer(o.id);
+    } catch (e) {
+      setDeleteError(e.message || "No se pudo eliminar.");
+      setDeleting(false);
+    }
   };
 
   return (
@@ -2290,10 +2382,24 @@ function OrganizerRow({ o, count, onUpdateOrganizer, accessToken }) {
             <p className="text-xs text-teal-400" style={F.body}>@{o.username} · {count} torneo{count !== 1 ? "s" : ""}</p>
           </div>
         </div>
-        <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
-          Nombre y logo
-        </button>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
+            Nombre y logo
+          </button>
+          {!confirmingDelete ? (
+            <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
+          ) : (
+            <span className="text-sm whitespace-nowrap">
+              <button type="button" disabled={deleting} onClick={doDelete} className="text-red-400 font-semibold mr-2" style={F.body}>{deleting ? "Eliminando…" : "Confirmar"}</button>
+              <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400" style={F.body}>Cancelar</button>
+            </span>
+          )}
+        </div>
       </div>
+      {confirmingDelete && (
+        <p className="text-xs text-teal-500 mt-2" style={F.body}>Se borra la cuenta de acceso; sus torneos ya cargados van a quedar en la plataforma pero sin organizador asignado.</p>
+      )}
+      {deleteError && <p className="text-xs text-red-400 mt-1" style={F.body}>{deleteError}</p>}
       {editingProfile && (
         <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-teal-900">
           <div>
@@ -2587,7 +2693,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdateOrganizer, onDeleteTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onRestoreBackup, onLogout }) {
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onRestoreBackup, onLogout }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | circuitos | respaldo
 
   const staff = organizers.filter((o) => o.role !== "creador");
@@ -2639,12 +2745,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
         </div>
       ) : (
         <>
-          <div className="border border-teal-800 rounded-lg p-4 mb-8">
-            <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Nueva cuenta de organizador</h2>
-            <p className="text-xs text-teal-400" style={F.body}>
-              Por seguridad, las cuentas nuevas (y el resetear o borrar una existente) se crean por ahora desde el panel de Supabase, no desde acá. Avisale al desarrollador el nombre y email del organizador para darlo de alta.
-            </p>
-          </div>
+          <NewOrganizerForm onCreate={onCreateOrganizer} />
 
           <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Organizadores</h2>
           <div className="space-y-2">
@@ -2654,6 +2755,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
                 o={o}
                 count={tournaments.filter((t) => t.organizerId === o.id).length}
                 onUpdateOrganizer={onUpdateOrganizer}
+                onDeleteOrganizer={onDeleteOrganizer}
                 accessToken={creator.accessToken}
               />
             ))}
@@ -3643,6 +3745,16 @@ function SmashPointAppInner() {
     setSession((s) => (s && s.id === id ? { ...s, ...patch } : s));
   };
 
+  const createOrganizer = async ({ name, username, email, password }) => {
+    const data = await callAdminOrganizers(session.accessToken, { action: "create", name, username, email, password });
+    setOrganizers((orgs) => [...orgs, data.organizer]);
+  };
+
+  const deleteOrganizer = async (id) => {
+    await callAdminOrganizers(session.accessToken, { action: "delete", id });
+    setOrganizers((orgs) => orgs.filter((o) => o.id !== id));
+  };
+
   const addAd = (ad) => {
     persistAds([...ads, { id: uid(), ...ad }]);
   };
@@ -3698,6 +3810,8 @@ function SmashPointAppInner() {
         circuits={circuits}
         ads={ads}
         onUpdateOrganizer={updateOrganizerProfile}
+        onCreateOrganizer={createOrganizer}
+        onDeleteOrganizer={deleteOrganizer}
         onDeleteTournament={deleteTournament}
         onDeleteCircuit={deleteCircuit}
         onAddAd={addAd}
