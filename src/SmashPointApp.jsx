@@ -1703,13 +1703,7 @@ function CircuitsPublicView({ circuits, tournaments, organizers, ads }) {
 }
 
 function OrganizerSelectScreen({ organizers, tournaments, circuits, ads, onSelect, onGoLogin }) {
-  const orgIdsWithContent = useMemo(() => {
-    const ids = new Set();
-    tournaments.forEach((t) => t.organizerId && ids.add(t.organizerId));
-    circuits.forEach((c) => c.organizerId && ids.add(c.organizerId));
-    return ids;
-  }, [tournaments, circuits]);
-  const visible = organizers.filter((o) => orgIdsWithContent.has(o.id));
+  const visible = organizers.filter((o) => o.role !== "creador");
 
   return (
     <div>
@@ -3747,6 +3741,7 @@ function SmashPointAppInner() {
 
   const createOrganizer = async ({ name, username, email, password }) => {
     const data = await callAdminOrganizers(session.accessToken, { action: "create", name, username, email, password });
+    if (!data.organizer || !data.organizer.id) throw new Error("La función respondió pero sin los datos esperados. Revisá que el código de admin-organizers esté bien pegado en Supabase.");
     setOrganizers((orgs) => [...orgs, data.organizer]);
   };
 
