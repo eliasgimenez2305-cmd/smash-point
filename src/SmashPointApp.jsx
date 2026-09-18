@@ -40,6 +40,7 @@ async function supabaseRequestPasswordReset(email) {
 async function fetchOrganizers() {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/organizers?select=*`, {
     headers: { apikey: SUPABASE_ANON_KEY },
+    cache: "no-store",
   });
   if (!res.ok) throw new Error("No se pudo cargar la lista de organizadores.");
   const rows = await res.json();
@@ -86,6 +87,7 @@ async function callAdminOrganizers(accessToken, payload) {
 async function kvGet(key) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?key=eq.${encodeURIComponent(key)}&select=value`, {
     headers: { apikey: SUPABASE_ANON_KEY },
+    cache: "no-store",
   });
   if (!res.ok) throw new Error(`No se pudo leer "${key}".`);
   const rows = await res.json();
