@@ -202,6 +202,25 @@ function buildRoundRobin(pairIds) {
 /* Arma los partidos de un grupo. Con 3 parejas (o cualquier tamaño distinto de 4) es todos contra
    todos. Con 4 parejas, se sortean los rivales (A vs B, C vs D) y recién cuando esos dos resultados
    están cargados se arman solos los cruces de ganadores y de perdedores. */
+/* Mueve una pareja de un grupo de zona a otro (edición manual post-sorteo) y reconstruye los
+   partidos de ambos grupos afectados desde cero (se pierden los resultados ya cargados en esos
+   dos grupos, por eso esto solo debe ofrecerse mientras ningún partido de esos grupos esté jugado). */
+function moveGroupPair(groups, pairId, fromGroupId, toGroupId) {
+  return groups.map((g) => {
+    if (g.id === fromGroupId) {
+      const pairIds = g.pairIds.filter((id) => id !== pairId);
+      const built = buildGroupMatches(pairIds);
+      return { ...g, pairIds, format: built.format, matches: built.matches };
+    }
+    if (g.id === toGroupId) {
+      const pairIds = [...g.pairIds, pairId];
+      const built = buildGroupMatches(pairIds);
+      return { ...g, pairIds, format: built.format, matches: built.matches };
+    }
+    return g;
+  });
+}
+
 function buildGroupMatches(pairIds) {
   if (pairIds.length === 4) {
     const shuffled = [...pairIds].sort(() => Math.random() - 0.5);
@@ -674,12 +693,20 @@ const GROUP_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
    `pairs` son objetos {id, availability}. */
 function autoFormGroups(pairs, playDates) {
   const TARGET_SIZE = 3;
-  const MAX_SIZE = 4;
+  const total = pairs.length;
+  // Cantidad de grupos fija segun el total de parejas: siempre se arman en base a grupos de 3.
+  // Lo que sobra al dividir por 3 (0, 1 o 2 parejas) se reparte como cuarto integrante en esa
+  // cantidad de grupos. Ej: 12 parejas -> 4 grupos de 3. 13 parejas -> 3 grupos de 3 + 1 de 4.
+  // 14 parejas -> 2 grupos de 3 + 2 de 4. Nunca se arman grupos de menos de 3.
+  const numGroups = Math.max(1, Math.floor(total / TARGET_SIZE));
+  const remainder = total - numGroups * TARGET_SIZE; // 0, 1 o 2
+  const groupSizes = Array.from({ length: numGroups }, (_, i) => TARGET_SIZE + (i < remainder ? 1 : 0));
+
   const pairsById = Object.fromEntries(pairs.map((p) => [p.id, p]));
   const allDates = (playDates || []).map((d) => d.date);
 
   // Ventanas horarias por pareja y fecha, en minutos: { fecha: { from, to } }.
-  // Sin disponibilidad cargada = disponible todos los días del torneo, en el horario general.
+  // Sin disponibilidad cargada = disponible todos los dias del torneo, en el horario general.
   const windowsById = Object.fromEntries(pairs.map((p) => {
     const avail = (p.availability && p.availability.length > 0)
       ? p.availability
@@ -691,8 +718,8 @@ function autoFormGroups(pairs, playDates) {
     return [p.id, map];
   }));
 
-  // Intersección de ventanas horarias: solo quedan las fechas donde ambas partes coinciden
-  // Y el rango horario realmente se superpone (no alcanza con compartir el día).
+  // Interseccion de ventanas horarias: solo quedan las fechas donde ambas partes coinciden
+  // Y el rango horario realmente se superpone (no alcanza con compartir el dia).
   const intersectWindows = (winsA, winsB) => {
     const result = {};
     Object.keys(winsA).forEach((date) => {
@@ -707,15 +734,16 @@ function autoFormGroups(pairs, playDates) {
   };
   const overlapCount = (winsA, winsB) => Object.keys(intersectWindows(winsA, winsB)).length;
 
-  const groups = []; // { pairIds: [], commonWindows: {fecha: {from,to}} }
+  const groups = []; // { pairIds: [], commonWindows: {fecha: {from,to}}, targetSize }
+  const remainingSizes = [...groupSizes]; // cupos de grupo que todavia hay que llenar, se van consumiendo
 
-  // Fase 1: buscamos, entre todas las fechas del torneo, el franja horaria donde más parejas del
-  // pool coinciden realmente (no solo el día, sino el rango horario superpuesto entre todas ellas).
-  // Usamos un barrido de eventos (sweep line): en un mismo día, el punto del reloj donde más
-  // ventanas están simultáneamente abiertas nos da el grupo más grande de parejas mutuamente
-  // compatibles en ese horario.
+  // Fase 1: buscamos, entre todas las fechas del torneo, la franja horaria donde mas parejas del
+  // pool coinciden realmente (no solo el dia, sino el rango horario superpuesto entre todas ellas).
+  // Usamos un barrido de eventos (sweep line). El tamano de cada grupo ya esta fijado de antemano
+  // (3, salvo el resto que va a 4); aca solo elegimos QUE parejas entran juntas, respetando ese tamano.
   let pool = pairs.map((p) => p.id).sort(() => Math.random() - 0.5); // sorteo para desempatar
-  while (true) {
+  while (remainingSizes.length > 0 && pool.length >= TARGET_SIZE) {
+    const wantSize = remainingSizes[0];
     let best = null; // { date, ids: [...], from, to }
     allDates.forEach((date) => {
       const candidates = pool.filter((id) => windowsById[id][date]);
@@ -727,7 +755,7 @@ function autoFormGroups(pairs, playDates) {
         events.push({ t: w.to, type: -1, id });
       });
       // Los cierres se procesan antes que las aperturas en el mismo minuto exacto, para no
-      // contar como "simultáneas" a dos ventanas que solo se tocan en un punto (superposición nula).
+      // contar como "simultaneas" a dos ventanas que solo se tocan en un punto (superposicion nula).
       events.sort((a, b) => a.t - b.t || a.type - b.type);
       const active = new Set();
       events.forEach((ev) => {
@@ -742,47 +770,54 @@ function autoFormGroups(pairs, playDates) {
       });
     });
     if (!best) break;
-    // Si coinciden más parejas de las que entran en un grupo, tomamos hasta MAX_SIZE y el resto
-    // queda en el pool (sigue siendo mutuamente compatible, se podrá formar otro grupo con ellas).
-    const chunkIds = best.ids.slice(0, Math.min(best.ids.length, MAX_SIZE));
-    const chunkSize = chunkIds.length > TARGET_SIZE && chunkIds.length < MAX_SIZE ? TARGET_SIZE : chunkIds.length;
-    const finalIds = chunkIds.slice(0, chunkSize);
+    // Tomamos hasta el tamano de grupo pedido; si sobran parejas compatibles, quedan en el pool
+    // para el proximo grupo (sigue siendo mutuamente compatible, se podra usar despues).
+    const chunkIds = best.ids.slice(0, Math.min(best.ids.length, wantSize));
+    const finalIds = chunkIds;
     let commonWindows = null;
     finalIds.forEach((id) => {
       commonWindows = commonWindows ? intersectWindows(commonWindows, windowsById[id]) : windowsById[id];
     });
-    groups.push({ pairIds: finalIds, commonWindows: commonWindows || {} });
+    groups.push({ pairIds: finalIds, commonWindows: commonWindows || {}, targetSize: wantSize });
     pool = pool.filter((id) => !finalIds.includes(id));
+    remainingSizes.shift();
   }
 
-  // Fase 2: lo que sobró no alcanza para llenar un grupo de 3 con horario realmente compatible.
-  // Se acomoda de a una pareja, buscando siempre la mejor coincidencia posible con lo ya armado.
+  // Fase 2: lo que sobro no alcanza para llenar un grupo con horario realmente compatible, o ya
+  // no quedan cupos de grupo "nuevo" por abrir. Se acomoda de a una pareja, completando primero
+  // los grupos ya armados que todavia no llegaron a su tamano objetivo, buscando siempre la mejor
+  // coincidencia posible con lo ya armado.
   pool.sort((a, b) => {
     const aEmpty = Object.keys(windowsById[a]).length === 0, bEmpty = Object.keys(windowsById[b]).length === 0;
     if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
     return Object.keys(windowsById[a]).length - Object.keys(windowsById[b]).length;
   });
+  // Si quedaron cupos de grupo sin abrir (no se encontro franja compatible), los abrimos vacios
+  // para que sigan existiendo como destino valido en esta fase.
+  remainingSizes.forEach((size) => {
+    groups.push({ pairIds: [], commonWindows: {}, targetSize: size });
+  });
   const leftover = [];
   pool.forEach((id) => {
     const wins = windowsById[id];
     let best = null, bestOverlap = -1;
-    leftover.forEach((g) => {
-      if (g.pairIds.length >= TARGET_SIZE) return;
-      const overlap = overlapCount(g.commonWindows, wins);
-      if (overlap > bestOverlap) { bestOverlap = overlap; best = g; }
+    groups.forEach((g) => {
+      if (g.pairIds.length >= g.targetSize) return;
+      const overlap = g.pairIds.length === 0 ? 0 : overlapCount(g.commonWindows, wins);
+      if (!best || overlap > bestOverlap) { bestOverlap = overlap; best = g; }
     });
-    if (best && bestOverlap > 0) {
+    if (best) {
       best.pairIds.push(id);
-      best.commonWindows = intersectWindows(best.commonWindows, wins);
+      best.commonWindows = best.pairIds.length === 1 ? wins : intersectWindows(best.commonWindows, wins);
     } else {
-      leftover.push({ pairIds: [id], commonWindows: wins });
+      leftover.push({ pairIds: [id], commonWindows: wins, targetSize: TARGET_SIZE });
     }
   });
   groups.push(...leftover);
 
-  // Ningún grupo puede quedar con menos de 3 parejas (en pádel se juega de a 3, con 4 solo para
-  // la que sobra). Cualquier grupo chico se desarma y sus parejas se reparten en los demás grupos,
-  // subiendo hasta un máximo de 4, priorizando siempre la mejor coincidencia horaria real.
+  // Ningun grupo puede quedar con menos de 3 parejas (en padel se juega de a 3, con 4 solo para
+  // la que sobra). Cualquier grupo chico se desarma y sus parejas se reparten en los demas grupos,
+  // subiendo hasta un maximo de 4, priorizando siempre la mejor coincidencia horaria real.
   const warnings = [];
   let orphans = [];
   for (let i = groups.length - 1; i >= 0; i--) {
@@ -794,7 +829,7 @@ function autoFormGroups(pairs, playDates) {
     const orphanWins = windowsById[orphanId];
     let best = null, bestOverlap = -1;
     groups.forEach((g) => {
-      if (g.pairIds.length >= MAX_SIZE) return;
+      if (g.pairIds.length >= 4) return;
       const overlap = overlapCount(g.commonWindows, orphanWins);
       if (overlap > bestOverlap) { bestOverlap = overlap; best = g; }
     });
@@ -803,15 +838,15 @@ function autoFormGroups(pairs, playDates) {
       best.pairIds.push(orphanId);
       best.commonWindows = intersectWindows(best.commonWindows, orphanWins);
     } else {
-      groups.push({ pairIds: [orphanId], commonWindows: orphanWins });
+      groups.push({ pairIds: [orphanId], commonWindows: orphanWins, targetSize: TARGET_SIZE });
     }
   });
-  // Último recurso: si quedaron grupos sueltos de menos de 3 (no había dónde meterlos), se
-  // combinan entre sí para no dejar a nadie sin grupo.
+  // Ultimo recurso: si quedaron grupos sueltos de menos de 3 (no habia donde meterlos), se
+  // combinan entre si para no dejar a nadie sin grupo.
   for (let i = groups.length - 1; i >= 0; i--) {
     if (groups[i].pairIds.length >= TARGET_SIZE || groups.length === 1) continue;
     const small = groups.splice(i, 1)[0];
-    const target = groups.find((g) => g.pairIds.length < MAX_SIZE) || groups[0];
+    const target = groups.find((g) => g.pairIds.length < 4) || groups[0];
     if (target) target.pairIds.push(...small.pairIds);
     else groups.push(small);
   }
@@ -822,7 +857,6 @@ function autoFormGroups(pairs, playDates) {
   });
   return { groups: formed, warnings };
 }
-
 /* Separa los nombres de jugadores de una pareja: "Gómez / Ibáñez" -> ["gómez", "ibáñez"] */
 function splitPlayers(pairName) {
   return pairName.split("/").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -1258,19 +1292,31 @@ function MatchSetsEditor({ sets, format, onSetScore }) {
             </span>
             <div className="flex items-center gap-1">
               <input
-                type="number" min="0"
+                type="number" min="0" max={isTiebreak ? undefined : 9}
+                maxLength={isTiebreak ? 2 : 1}
                 className="w-11 px-1 py-1 rounded border text-center text-sm"
                 style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
                 value={s.a ?? ""}
-                onChange={(e) => onSetScore(i, "a", e.target.value === "" ? null : Number(e.target.value))}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const limit = isTiebreak ? 2 : 1;
+                  if (raw.length > limit) return;
+                  onSetScore(i, "a", raw === "" ? null : Number(raw));
+                }}
               />
               <span className="text-xs text-teal-500">-</span>
               <input
-                type="number" min="0"
+                type="number" min="0" max={isTiebreak ? undefined : 9}
+                maxLength={isTiebreak ? 2 : 1}
                 className="w-11 px-1 py-1 rounded border text-center text-sm"
                 style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
                 value={s.b ?? ""}
-                onChange={(e) => onSetScore(i, "b", e.target.value === "" ? null : Number(e.target.value))}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const limit = isTiebreak ? 2 : 1;
+                  if (raw.length > limit) return;
+                  onSetScore(i, "b", raw === "" ? null : Number(raw));
+                }}
               />
             </div>
           </div>
@@ -1407,9 +1453,9 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
               <button type="button" onClick={() => removeDate(d.date)} className="text-red-400 text-xs">Quitar ✕</button>
             </div>
             <div className="flex items-center gap-2">
-              <input type="time" value={d.from} onChange={(e) => updateDateRange(d.date, "from", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+              <input type="time" lang="es-AR" value={d.from} onChange={(e) => updateDateRange(d.date, "from", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
               <span className="text-xs text-teal-500 shrink-0">a</span>
-              <input type="time" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+              <input type="time" lang="es-AR" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
             </div>
           </div>
         ))}
@@ -1428,11 +1474,11 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
         <div className="flex gap-2">
           <div className="flex-1 min-w-0">
             <label className="block text-xs text-teal-400 mb-1" style={F.body}>Desde</label>
-            <input type="time" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="w-full px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            <input type="time" lang="es-AR" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="w-full px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
           </div>
           <div className="flex-1 min-w-0">
             <label className="block text-xs text-teal-400 mb-1" style={F.body}>Hasta</label>
-            <input type="time" value={newTo} onChange={(e) => setNewTo(e.target.value)} className="w-full px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            <input type="time" lang="es-AR" value={newTo} onChange={(e) => setNewTo(e.target.value)} className="w-full px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
           </div>
         </div>
         <button type="button" onClick={addDate} className="w-full px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
@@ -1485,9 +1531,9 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
                 </label>
                 {a && (
                   <>
-                    <input type="time" value={a.from} onChange={(e) => updateRange(d.date, "from", e.target.value)} className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+                    <input type="time" lang="es-AR" value={a.from} onChange={(e) => updateRange(d.date, "from", e.target.value)} className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
                     <span className="text-xs text-teal-500">a</span>
-                    <input type="time" value={a.to} onChange={(e) => updateRange(d.date, "to", e.target.value)} className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+                    <input type="time" lang="es-AR" value={a.to} onChange={(e) => updateRange(d.date, "to", e.target.value)} className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
                   </>
                 )}
               </div>
@@ -1533,7 +1579,7 @@ function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear }) 
         {s?.date && (
           <>
             <input
-              type="time" value={s.time}
+              type="time" lang="es-AR" value={s.time}
               onChange={(e) => onEdit({ ...s, time: e.target.value })}
               className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
             />
@@ -3309,6 +3355,21 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [swapA, setSwapA] = useState("");
   const [swapB, setSwapB] = useState("");
 
+  const [editingGroups, setEditingGroups] = useState(false);
+  const [moveGroupPairId, setMoveGroupPairId] = useState("");
+  const [moveGroupTargetId, setMoveGroupTargetId] = useState("");
+
+  // Solo se puede editar la composición de los grupos mientras ningún partido de zona esté jugado.
+  const anyGroupHasResults = category.groups.some((g) => g.matches.some((m) => matchIsPlayed(m)));
+
+  const applyMoveGroupPair = () => {
+    if (!moveGroupPairId || !moveGroupTargetId) return;
+    const fromGroup = category.groups.find((g) => g.pairIds.includes(moveGroupPairId));
+    if (!fromGroup || fromGroup.id === moveGroupTargetId) return;
+    onUpdateCategory({ ...category, groups: moveGroupPair(category.groups, moveGroupPairId, fromGroup.id, moveGroupTargetId), bracket: null });
+    setMoveGroupPairId(""); setMoveGroupTargetId("");
+  };
+
   const round1HasResults = category.bracket && category.bracket[0].some((m) => matchIsPlayed(m));
 
   const applySwap = () => {
@@ -3461,6 +3522,46 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             );
           })}
           {category.groups.length > 0 && <StandingsLegend />}
+          {category.groups.length > 1 && !anyGroupHasResults && (
+            <div className="border border-teal-800 rounded-lg p-4 mt-4">
+              <button
+                type="button"
+                onClick={() => { setEditingGroups((v) => !v); setMoveGroupPairId(""); setMoveGroupTargetId(""); }}
+                className="text-sm text-teal-300 hover:text-lime-400"
+                style={F.body}
+              >
+                {editingGroups ? "Ocultar edición de grupos" : "Editar grupos manualmente"}
+              </button>
+              {editingGroups && (
+                <div className="mt-3 flex flex-wrap gap-3 items-end">
+                  <p className="w-full text-xs text-teal-500" style={F.body}>
+                    Elegí una pareja y el grupo al que se quiere mover.
+                  </p>
+                  <select value={moveGroupPairId} onChange={(e) => setMoveGroupPairId(e.target.value)} className="px-3 py-2 rounded border outline-none" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
+                    <option value="">Pareja…</option>
+                    {category.groups.flatMap((g) => g.pairIds.map((pid) => ({ pid, gname: g.name }))).map(({ pid, gname }) => (
+                      <option key={pid} value={pid}>{pairsById[pid]?.name || pid} ({gname})</option>
+                    ))}
+                  </select>
+                  <select value={moveGroupTargetId} onChange={(e) => setMoveGroupTargetId(e.target.value)} className="px-3 py-2 rounded border outline-none" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
+                    <option value="">Mover a grupo…</option>
+                    {category.groups.filter((g) => !g.pairIds.includes(moveGroupPairId)).map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={applyMoveGroupPair}
+                    disabled={!moveGroupPairId || !moveGroupTargetId}
+                    className="px-4 py-2 rounded text-sm font-semibold disabled:opacity-40"
+                    style={{ backgroundColor: "#a3e635", color: "#0f172a" }}
+                  >
+                    Mover pareja
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
