@@ -302,14 +302,84 @@ function computeStandings(group, pairsById, format) {
       if (px !== py) return px - py;
       // Todavía sin definir (partidos no jugados): dejamos la tabla de puntos como orden provisorio
       if (y.pts !== x.pts) return y.pts - x.pts;
-      return (y.setsF - y.setsC) - (x.setsF - x.setsC);
+      const setsDiff = (y.setsF - y.setsC) - (x.setsF - x.setsC);
+      if (setsDiff !== 0) return setsDiff;
+      return (y.gamesF - y.gamesC) - (x.gamesF - x.gamesC);
     });
   }
 
   return rows.sort((x, y) => {
     if (y.pts !== x.pts) return y.pts - x.pts;
-    return (y.setsF - y.setsC) - (x.setsF - x.setsC);
+    const setsDiff = (y.setsF - y.setsC) - (x.setsF - x.setsC);
+    if (setsDiff !== 0) return setsDiff;
+    // Desempate final: diferencia de games ganados (típico en grupos de 3 donde todos ganan 1 partido)
+    return (y.gamesF - y.gamesC) - (x.gamesF - x.gamesC);
   });
+}
+
+/* Arma el orden de clasificados para la llave final a partir de los grupos, evitando que el
+   1° y 2° de un mismo grupo se crucen en la primera ronda, y dejando a los mejores clasificados
+   (por diferencia de games) pasar directo cuando la cantidad no cierra en potencia de dos.
+
+   Cómo arma los cruces entre grupos:
+   - Si hay 2 o más grupos, se rota en cadena: el 2° del grupo 1 "viaja" a la llave del 1° del
+     grupo 2, el 2° del grupo 2 a la del 1° del grupo 3, ..., y el 2° del último grupo cierra el
+     círculo volviendo a la llave del 1° del grupo 1. Así ningún 1° se cruza con el 2° de su
+     propio grupo en primera ronda, sea cual sea la cantidad de grupos (par o impar).
+   - Si hay un solo grupo, no hay con quién rotar: se arma la llave con el orden normal de la tabla.
+
+   Cómo resuelve cuando el número de clasificados no es potencia de dos:
+   - Se ordenan todas las parejas clasificadas por mérito (puntos, luego diferencia de sets, luego
+     diferencia de games, igual que el desempate de grupo) para decidir cuáles son "mejores
+     clasificados".
+   - Los mejores clasificados (empezando por los que más méritos tienen) pasan directo a la ronda
+     siguiente (bye), hasta que la cantidad de parejas que sí juegan la primera ronda complete un
+     número par que, sumado a los que ya tienen bye, cierre en una potencia de dos. Es el sistema
+     habitual en pádel: con byes, los mejor ubicados saltan la primera ronda. */
+function buildKnockoutSeeding(groups, pairsById, format) {
+  const groupTables = groups.map((g) => computeStandings(g, pairsById, format));
+
+  // Mérito general de una fila de tabla, para comparar clasificados de distintos grupos entre sí.
+  const meritKey = (row) => [row.pts, row.setsF - row.setsC, row.gamesF - row.gamesC];
+  const compareMerit = (a, b) => {
+    const ka = meritKey(a), kb = meritKey(b);
+    for (let i = 0; i < ka.length; i++) {
+      if (kb[i] !== ka[i]) return kb[i] - ka[i];
+    }
+    return 0;
+  };
+
+  const firsts = groupTables.map((t) => t[0]).filter(Boolean);
+  const seconds = groupTables.map((t) => t[1]).filter(Boolean);
+
+  // Rotación en cadena de los 2dos puestos, para que cada uno caiga en la llave del 1° de OTRO grupo.
+  let crossedSeconds = seconds;
+  if (seconds.length >= 2) {
+    crossedSeconds = seconds.map((_, i) => seconds[(i + 1) % seconds.length]);
+  }
+
+  // Armamos los "duelos" 1° vs 2° cruzado, en el orden de los grupos.
+  const duels = firsts.map((f1, i) => [f1, crossedSeconds[i]].filter(Boolean));
+  let seeded = duels.flat();
+
+  // Si algún grupo no tiene 2do (grupos de 1 pareja, caso raro) igual quedan sueltos los 1ros.
+  if (seeded.length === 0) seeded = [...firsts, ...seconds];
+
+  // Orden de mérito general, para decidir quién pasa directo cuando el número no cierra.
+  const byMerit = [...seeded].sort((a, b) => compareMerit(a, b));
+
+  let size = 1;
+  while (size < seeded.length) size *= 2;
+  const byeCount = size - seeded.length; // cuántas parejas pasan directo a la ronda siguiente
+
+  const byePairIds = byMerit.slice(0, byeCount).map((r) => r.pairId);
+  const playFirstRound = seeded.filter((r) => !byePairIds.includes(r.pairId));
+
+  return {
+    order: seeded.map((r) => r.pairId),
+    byePairIds,
+    playFirstRoundIds: playFirstRound.map((r) => r.pairId),
+  };
 }
 
 /* Llave eliminación directa a partir de una lista ordenada de pairIds (o null = BYE) */
@@ -330,6 +400,18 @@ function buildBracket(pairIds) {
     rounds.push(Array.from({ length: count }, () => ({ id: uid(), pairA: null, pairB: null, sets: [] })));
   }
   return propagateBracket(rounds);
+}
+
+/* Como buildBracket, pero a partir del resultado de buildKnockoutSeeding: coloca en la ronda 1
+   primero los duelos reales entre parejas que juegan, y después las parejas con bye emparejadas
+   con un lugar vacío (pasan solas a la ronda siguiente sin jugar la ronda 1). */
+function buildSeededBracket(seeding) {
+  const { order, byePairIds } = seeding;
+  const byeSet = new Set(byePairIds);
+  const playing = order.filter((id) => !byeSet.has(id));
+  const slots = [...playing];
+  byePairIds.forEach((id) => { slots.push(id); slots.push(null); });
+  return buildBracket(slots);
 }
 
 function winnerOf(m) {
@@ -361,6 +443,21 @@ const ROUND_STAGE_NAMES = ["Final", "Semifinal", "Cuartos de Final", "Octavos de
 function roundStageLabel(totalRounds, roundIndex) {
   const fromEnd = totalRounds - 1 - roundIndex;
   return ROUND_STAGE_NAMES[fromEnd] || `Ronda ${roundIndex + 1}`;
+}
+
+/* Intercambia de lugar a dos parejas dentro de la ronda 1 de la llave ya generada (para forzar
+   manualmente un cruce distinto al automático). Solo tiene sentido antes de que esos partidos
+   se hayan jugado; si alguno de los dos ya tiene resultado cargado, no se debería ofrecer esta
+   opción en la interfaz. */
+function swapBracketPairs(bracket, pairIdA, pairIdB) {
+  const rounds = bracket.map((r) => r.map((m) => ({ ...m })));
+  rounds[0].forEach((m) => {
+    if (m.pairA === pairIdA) m.pairA = pairIdB;
+    else if (m.pairA === pairIdB) m.pairA = pairIdA;
+    if (m.pairB === pairIdA) m.pairB = pairIdB;
+    else if (m.pairB === pairIdB) m.pairB = pairIdA;
+  });
+  return propagateBracket(rounds);
 }
 
 function propagateBracket(rounds) {
@@ -3202,6 +3299,24 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory(autoScheduleBracket(tournament, withBracket));
   };
 
+  const generateBracketFromGroups = () => {
+    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
+    const withBracket = { ...category, bracket: buildSeededBracket(seeding) };
+    onUpdateCategory(autoScheduleBracket(tournament, withBracket));
+  };
+
+  const [editingCrosses, setEditingCrosses] = useState(false);
+  const [swapA, setSwapA] = useState("");
+  const [swapB, setSwapB] = useState("");
+
+  const round1HasResults = category.bracket && category.bracket[0].some((m) => matchIsPlayed(m));
+
+  const applySwap = () => {
+    if (!swapA || !swapB || swapA === swapB) return;
+    onUpdateCategory({ ...category, bracket: swapBracketPairs(category.bracket, swapA, swapB) });
+    setSwapA(""); setSwapB("");
+  };
+
   const setBracketSetScore = (matchId, setIndex, side, value) => {
     const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, sets: withSetScore(m.sets, setIndex, side, value) } : m));
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
@@ -3354,26 +3469,61 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           {!category.bracket && (
             <div className="border border-teal-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-teal-300 mb-3" style={F.body}>
-                Generá la llave final con el 1° y 2° puesto de cada grupo (si no hay grupos, se usan todas las parejas).
+                Generá la llave final con el 1° y 2° puesto de cada grupo (si no hay grupos, se usan todas las parejas). Los cruces se arman entre grupos distintos, para que un 1° nunca se enfrente con el 2° de su propio grupo en la primera ronda.
               </p>
               <button
                 onClick={() => {
-                  let ids = [];
                   if (category.groups.length > 0) {
-                    category.groups.forEach((g) => {
-                      const table = computeStandings(g, pairsById, format);
-                      ids.push(...table.slice(0, 2).map((r) => r.pairId));
-                    });
+                    generateBracketFromGroups();
                   } else {
-                    ids = category.pairs.map((p) => p.id);
+                    generateBracketFromPairs(category.pairs.map((p) => p.id));
                   }
-                  generateBracketFromPairs(ids);
                 }}
                 className="px-4 py-2 rounded font-semibold text-sm"
                 style={{ backgroundColor: "#9fe022", color: "#14181f" }}
               >
                 Generar llave final
               </button>
+            </div>
+          )}
+          {category.bracket && !round1HasResults && (
+            <div className="border border-teal-800 rounded-lg p-4 mb-6">
+              <button
+                type="button"
+                onClick={() => { setEditingCrosses((v) => !v); setSwapA(""); setSwapB(""); }}
+                className="text-sm text-teal-300 hover:text-lime-400"
+                style={F.body}
+              >
+                {editingCrosses ? "Ocultar edición de cruces" : "Editar cruces manualmente"}
+              </button>
+              {editingCrosses && (
+                <div className="mt-3 flex flex-wrap gap-3 items-end">
+                  <p className="w-full text-xs text-teal-500" style={F.body}>
+                    Elegí dos parejas para que intercambien de lugar en la primera ronda de la llave.
+                  </p>
+                  <select value={swapA} onChange={(e) => setSwapA(e.target.value)} className="px-3 py-2 rounded border outline-none" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
+                    <option value="">Pareja 1…</option>
+                    {category.bracket[0].flatMap((m) => [m.pairA, m.pairB]).filter(Boolean).map((pid) => (
+                      <option key={pid} value={pid}>{pairsById[pid]?.name || pid}</option>
+                    ))}
+                  </select>
+                  <select value={swapB} onChange={(e) => setSwapB(e.target.value)} className="px-3 py-2 rounded border outline-none" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
+                    <option value="">Pareja 2…</option>
+                    {category.bracket[0].flatMap((m) => [m.pairA, m.pairB]).filter(Boolean).map((pid) => (
+                      <option key={pid} value={pid}>{pairsById[pid]?.name || pid}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={!swapA || !swapB || swapA === swapB}
+                    onClick={applySwap}
+                    className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40"
+                    style={{ backgroundColor: "#9fe022", color: "#14181f" }}
+                  >
+                    Intercambiar
+                  </button>
+                </div>
+              )}
             </div>
           )}
           {category.bracket && (
