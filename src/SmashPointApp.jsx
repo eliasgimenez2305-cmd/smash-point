@@ -1099,38 +1099,46 @@ function Logo({ size = 40, withWordmark = false }) {
 
 /* Banner publicitario público: rota entre los anuncios activos. No renderiza nada si no hay anuncios. */
 function AdBanner({ ads }) {
+  const PAGE_SIZE = 4;
   const active = (ads || []).filter((a) => a.active);
-  const [index, setIndex] = useState(0);
+  const pages = [];
+  for (let i = 0; i < active.length; i += PAGE_SIZE) pages.push(active.slice(i, i + PAGE_SIZE));
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
-    if (active.length < 2) return;
-    const id = setInterval(() => setIndex((i) => (i + 1) % active.length), 5000);
+    if (pages.length < 2) return;
+    const id = setInterval(() => setPage((p) => (p + 1) % pages.length), 6000);
     return () => clearInterval(id);
-  }, [active.length]);
+  }, [pages.length]);
 
   if (active.length === 0) return null;
-  const ad = active[index % active.length];
+  const current = pages[page % pages.length] || [];
 
   return (
     <div className="mb-6">
-      <a
-        href={ad.linkUrl || "#"}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="block relative rounded-lg overflow-hidden border border-teal-800"
-      >
-        <img src={ad.imageUrl} alt={ad.name || "Publicidad"} className="w-full max-h-40 object-cover" />
-        <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded" style={{ backgroundColor: "rgba(20,24,31,0.8)", color: "#94a3b8" }}>
-          Publicidad
-        </span>
-      </a>
-      {active.length > 1 && (
+      <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
+        {current.map((ad) => (
+          <a
+            key={ad.id}
+            href={ad.linkUrl || "#"}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block relative rounded-lg overflow-hidden border border-teal-800"
+          >
+            <img src={ad.imageUrl} alt={ad.name || "Publicidad"} className="w-full h-24 sm:h-28 object-cover" />
+            <span className="absolute top-1 right-1 text-[9px] px-1.5 py-0.5 rounded" style={{ backgroundColor: "rgba(20,24,31,0.8)", color: "#94a3b8" }}>
+              Publicidad
+            </span>
+          </a>
+        ))}
+      </div>
+      {pages.length > 1 && (
         <div className="flex gap-1 justify-center mt-2">
-          {active.map((a, i) => (
+          {pages.map((_, i) => (
             <span
-              key={a.id}
+              key={i}
               className="w-1.5 h-1.5 rounded-full"
-              style={{ backgroundColor: i === index ? BRAND.lime : "#334155" }}
+              style={{ backgroundColor: i === page ? BRAND.lime : "#334155" }}
             />
           ))}
         </div>
@@ -1717,31 +1725,35 @@ function SchedulePublicView({ tournament }) {
     <div>
       {dateKeys.map((date, di) => {
         const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
-        const byCourt = {};
-        byDate[date].forEach((m) => { (byCourt[m.schedule.court] = byCourt[m.schedule.court] || []).push(m); });
-        const courts = Object.keys(byCourt).map(Number).sort((a, b) => a - b);
+        const byTime = {};
+        byDate[date].forEach((m) => { (byTime[m.schedule.time] = byTime[m.schedule.time] || []).push(m); });
+        const times = Object.keys(byTime).sort();
         return (
         <div key={date} className="mb-8">
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {courts.map((court) => (
-              <div key={court} className="rounded-xl overflow-hidden border min-w-0" style={{ borderColor: dateColor + "40" }}>
+          <div className="space-y-4">
+            {times.map((time) => (
+              <div key={time} className="rounded-xl overflow-hidden border min-w-0" style={{ borderColor: dateColor + "40" }}>
                 <div className="px-3 py-2 text-center font-extrabold text-sm uppercase tracking-wide" style={{ backgroundColor: dateColor, color: "#14181f" }}>
-                  Cancha {court}
+                  {time}hs
                 </div>
                 <div className="divide-y" style={{ borderColor: dateColor + "22" }}>
-                  {byCourt[court].map((m) => (
+                  {byTime[time]
+                    .slice()
+                    .sort((a, b) => a.schedule.court - b.schedule.court)
+                    .map((m) => (
                     <div key={m.key} className="px-3 py-2" style={{ backgroundColor: dateColor + "08" }}>
                       <div className="flex items-center gap-2 text-xs mb-1 flex-wrap" style={F.body}>
-                        <span className="font-bold" style={{ color: dateColor }}>{m.schedule.time}hs</span>
+                        <span className="font-bold" style={{ color: dateColor }}>Cancha {m.schedule.court}</span>
                         <span className="ml-auto font-medium truncate max-w-[45%]" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName}</span>
                       </div>
                       {m.placeholder ? (
-                        <p className="text-sm italic opacity-70" style={F.body}>{m.placeholder}</p>
+                        <p className="text-sm italic opacity-70" style={F.body}>{m.label ? `${m.label} · ` : ""}{m.placeholder}</p>
                       ) : (
                         <div className="text-sm min-w-0" style={F.body}>
+                          {m.label && <span className="text-[10px] text-teal-500 block">{m.label}</span>}
                           <div className="truncate"><PairName id={m.pairA} pairsById={pairsById} /></div>
                           <div className="text-[11px] opacity-50 my-0.5 flex items-center gap-2">
                             <span>vs</span>
@@ -1823,7 +1835,6 @@ function CircuitsPublicView({ circuits, tournaments, organizers, ads }) {
   if (circuits.length === 0) {
     return (
       <div className="px-6 pb-10">
-        <AdBanner ads={ads} />
         <p className="opacity-60 text-sm" style={F.body}>Todavía no hay circuitos cargados.</p>
       </div>
     );
@@ -1831,7 +1842,6 @@ function CircuitsPublicView({ circuits, tournaments, organizers, ads }) {
 
   return (
     <div className="px-6 pb-10 space-y-8">
-      <AdBanner ads={ads} />
       {Object.entries(byOrganizer).map(([organizerId, list]) => {
         const organizer = organizers.find((o) => o.id === organizerId);
         return (
@@ -1868,7 +1878,6 @@ function OrganizerSelectScreen({ organizers, tournaments, circuits, ads, onSelec
       </header>
 
       <main className="px-6 py-8">
-        <AdBanner ads={ads} />
         {visible.length === 0 ? (
           <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
         ) : (
@@ -1994,9 +2003,6 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
       ) : (
       <>
       <main className={`px-6 py-8 grid gap-5 ${bigCards ? "grid-cols-2" : "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"}`}>
-        <div className={bigCards ? "col-span-2" : "col-span-1 md:col-span-2 lg:col-span-3"}>
-          <AdBanner ads={ads} />
-        </div>
         {filtered.length === 0 && (
           <p className="opacity-60" style={F.body}>
             {orgTournaments.length === 0 ? "Todavía no hay torneos cargados." : "No hay torneos en este estado."}
@@ -2067,10 +2073,6 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
           );
         })}
       </main>
-
-      <div className="px-6 pb-10">
-        <AdBanner ads={ads} />
-      </div>
       </>
       )}
     </div>
@@ -2079,107 +2081,107 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
 
 /* ---------- Vista pública: detalle de torneo ---------- */
 
-function CategoryPublicView({ category, format, tournamentName }) {
+function CategoryGroupsPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
 
   return (
-    <div>
-      <section className="mt-6">
-        <h2 className="text-2xl mb-4 relative inline-block" style={F.display}>
-          Grupos
-          <span className="absolute left-0 -bottom-1 w-10 h-1 rounded" style={{ backgroundColor: "#9fe022" }} />
-        </h2>
-        {category.groups.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no se armaron los grupos.</p>}
-        <div className="grid gap-6 md:grid-cols-2 min-w-0">
-          {category.groups.map((g, gi) => {
-            const color = GROUP_COLORS[gi % GROUP_COLORS.length];
+    <section className="mt-6">
+      {category.groups.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no se armaron los grupos.</p>}
+      <div className="grid gap-6 md:grid-cols-2 min-w-0">
+        {category.groups.map((g, gi) => {
+          const color = GROUP_COLORS[gi % GROUP_COLORS.length];
+          return (
+            <div key={g.id} className="rounded-xl p-4 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <SkewPill color={color}>{g.name}</SkewPill>
+              </div>
+              <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} />
+              <div className="mt-3 space-y-2">
+                {g.matches.map((m) => {
+                  const hasResult = (m.sets || []).some((s) => s && s.a != null && s.b != null);
+                  const pending = !m.pairA || !m.pairB;
+                  const w = hasResult ? matchWinnerId(m) : null;
+                  return (
+                    <div key={m.id} className="text-sm" style={F.body}>
+                      {groupMatchStageLabel(g, m) && <span className="text-[10px] text-teal-500 block">{g.name} · {groupMatchStageLabel(g, m)}</span>}
+                      {pending ? (
+                        <div className="flex justify-between items-baseline gap-3">
+                          <span className="italic opacity-70 min-w-0">
+                            {m.stage === "ganadores" ? "Ganador Partido 1 vs Ganador Partido 2" : m.stage === "perdedores" ? "Perdedor Partido 1 vs Perdedor Partido 2" : "A definir"}
+                          </span>
+                          <span className="text-right"><ScheduleLabel schedule={m.schedule} /></span>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-[1fr_auto] gap-x-3 items-baseline">
+                          <span className="min-w-0"><GroupPairName id={m.pairA} pairsById={pairsById} /></span>
+                          <span className="text-right font-mono text-xs text-teal-300">{w === m.pairA ? <SetsSummary sets={m.sets} /> : (w == null && <ScheduleLabel schedule={m.schedule} />)}</span>
+                          <span className="min-w-0"><GroupPairName id={m.pairB} pairsById={pairsById} /></span>
+                          <span className="text-right font-mono text-xs text-teal-300">{w === m.pairB ? <SetsSummary sets={m.sets} /> : (w != null && <ScheduleLabel schedule={m.schedule} />)}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {category.groups.length > 0 && <StandingsLegend />}
+    </section>
+  );
+}
+
+function CategoryBracketPublicView({ category }) {
+  const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
+
+  return (
+    <section className="mt-6">
+      {!category.bracket && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se generó.</p>}
+      {category.bracket && (
+        <div className="flex gap-8 overflow-x-auto pb-4">
+          {category.bracket.map((round, ri) => {
+            const isFinal = ri === category.bracket.length - 1;
+            const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
             return (
-              <div key={g.id} className="rounded-xl p-4 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
-                <div className="flex items-center gap-2 mb-3 flex-wrap">
-                  <SkewPill color={color}>{g.name}</SkewPill>
-                </div>
-                <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} />
-                <div className="mt-3 space-y-2">
-                  {g.matches.map((m) => {
-                    const hasResult = (m.sets || []).some((s) => s && s.a != null && s.b != null);
-                    const pending = !m.pairA || !m.pairB;
-                    const w = hasResult ? matchWinnerId(m) : null;
-                    return (
-                      <div key={m.id} className="text-sm" style={F.body}>
-                        {groupMatchStageLabel(g, m) && <span className="text-[10px] text-teal-500 block">{groupMatchStageLabel(g, m)}</span>}
-                        {pending ? (
-                          <div className="flex justify-between items-baseline gap-3">
-                            <span className="italic opacity-70 min-w-0">
-                              {m.stage === "ganadores" ? "Ganador Partido 1 vs Ganador Partido 2" : m.stage === "perdedores" ? "Perdedor Partido 1 vs Perdedor Partido 2" : "A definir"}
-                            </span>
-                            <span className="text-right"><ScheduleLabel schedule={m.schedule} /></span>
-                          </div>
-                        ) : (
-                          <div className="grid grid-cols-[1fr_auto] gap-x-3 items-baseline">
-                            <span className="min-w-0"><GroupPairName id={m.pairA} pairsById={pairsById} /></span>
-                            <span className="text-right font-mono text-xs text-teal-300">{w === m.pairA ? <SetsSummary sets={m.sets} /> : (w == null && <ScheduleLabel schedule={m.schedule} />)}</span>
-                            <span className="min-w-0"><GroupPairName id={m.pairB} pairsById={pairsById} /></span>
-                            <span className="text-right font-mono text-xs text-teal-300">{w === m.pairB ? <SetsSummary sets={m.sets} /> : (w != null && <ScheduleLabel schedule={m.schedule} />)}</span>
-                          </div>
-                        )}
+              <div key={ri} className="flex flex-col justify-around gap-4 min-w-[220px]">
+                <span
+                  className="self-start px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide"
+                  style={{ backgroundColor: color, color: "#14181f" }}
+                >
+                  {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
+                </span>
+                {round.map((m) => {
+                  const w = winnerOf(m);
+                  const { a: setsA, b: setsB } = setsWon(m);
+                  return (
+                    <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
+                      <ScheduleLabel schedule={m.schedule} />
+                      <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
+                        <PairName id={m.pairA} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsA : ""}</span>
                       </div>
-                    );
-                  })}
-                </div>
+                      <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
+                        <PairName id={m.pairB} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsB : ""}</span>
+                      </div>
+                      {matchIsPlayed(m) && (
+                        <p className="text-[10px] text-teal-500 mt-1"><SetsSummary sets={m.sets} /></p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
         </div>
-        {category.groups.length > 0 && <StandingsLegend />}
-      </section>
-
-      <section className="mt-10">
-        <h2 className="text-lg font-semibold mb-3" style={F.body}>Llave final</h2>
-        {!category.bracket && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se generó.</p>}
-        {category.bracket && (
-          <div className="flex gap-8 overflow-x-auto pb-4">
-            {category.bracket.map((round, ri) => {
-              const isFinal = ri === category.bracket.length - 1;
-              const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
-              return (
-                <div key={ri} className="flex flex-col justify-around gap-4 min-w-[220px]">
-                  <span
-                    className="self-start px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide"
-                    style={{ backgroundColor: color, color: "#14181f" }}
-                  >
-                    {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
-                  </span>
-                  {round.map((m) => {
-                    const w = winnerOf(m);
-                    const { a: setsA, b: setsB } = setsWon(m);
-                    return (
-                      <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                        <ScheduleLabel schedule={m.schedule} />
-                        <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                          <PairName id={m.pairA} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsA : ""}</span>
-                        </div>
-                        <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                          <PairName id={m.pairB} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsB : ""}</span>
-                        </div>
-                        {matchIsPlayed(m) && (
-                          <p className="text-[10px] text-teal-500 mt-1"><SetsSummary sets={m.sets} /></p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
-    </div>
+      )}
+    </section>
   );
 }
 
+
 function PublicTournament({ tournament, ads, organizers, onBack }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
-  const [view, setView] = useState("categorias"); // categorias | horarios
+  const [view, setView] = useState("horarios"); // horarios | grupos | llaves
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;
   const organizerName = (organizers || []).find((o) => o.id === tournament.organizerId)?.name;
@@ -2200,10 +2202,8 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
       </p>
       {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
 
-      <div className="mt-4"><AdBanner ads={ads} /></div>
-
-      <div className="flex gap-2 mt-2">
-        {[["categorias", "Categorías"], ["horarios", "Horarios"]].map(([key, label]) => (
+      <div className="flex gap-2 mt-4">
+        {[["horarios", "Horarios"], ["grupos", "Grupos"], ["llaves", "Llaves finales"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setView(key)}
@@ -2241,15 +2241,13 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
               );
             })}
           </div>
-          {category && <CategoryPublicView category={category} format={format} tournamentName={tournament.name} />}
+          {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
+          {category && view === "llaves" && <CategoryBracketPublicView category={category} />}
         </>
       )}
     </div>
   );
 }
-
-/* ---------- Login organizadores ---------- */
-
 function Login({ onLogin, onBack }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -4095,6 +4093,9 @@ function SmashPointAppInner() {
   return (
     <div className="min-h-screen overflow-x-hidden" style={{ backgroundImage: "linear-gradient(135deg, #14181f, #1b2027)", color: "#e2e8f0", ...F.body }}>
       {content}
+      <div className="px-6 pb-10 max-w-4xl mx-auto">
+        <AdBanner ads={ads} />
+      </div>
     </div>
   );
 }
