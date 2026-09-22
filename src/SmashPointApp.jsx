@@ -248,6 +248,7 @@ function setsWon(match) {
 }
 
 function matchIsPlayed(match) {
+  if (match && match.walkover) return true;
   const { a, b } = setsWon(match);
   return a + b > 0;
 }
@@ -265,9 +266,25 @@ function tournamentProgress(t) {
 }
 
 function matchWinnerId(match) {
+  if (match && match.walkover) return match.walkover === match.pairA ? match.pairB : match.pairA;
   const { a, b } = setsWon(match);
   if (a === b) return null;
   return a > b ? match.pairA : match.pairB;
+}
+
+/* Estado visual de un partido para la tabla de horarios: "finalizado" se calcula solo al cargar
+   resultado o walkover; "en_curso" lo marca el organizador a mano mientras no haya resultado. */
+function matchDisplayStatus(m) {
+  if (matchIsPlayed(m)) return "finalizado";
+  if (m && m.liveStatus === "en_curso") return "en_curso";
+  return "pendiente";
+}
+
+/* Chequea si una pareja ya jugó algún partido (de grupos o de la llave) dentro de la categoría */
+function pairHasPlayed(category, pairId) {
+  const inGroups = (category.groups || []).some((g) => g.matches.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchIsPlayed(m)));
+  const inBracket = (category.bracket || []).some((round) => round.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchIsPlayed(m)));
+  return inGroups || inBracket;
 }
 
 /* Agrega/actualiza el resultado de un set puntual dentro del array de sets de un partido */
@@ -527,6 +544,7 @@ function collectScheduleableMatches(tournament) {
             key: `${c.id}:g:${g.id}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "group", groupId: g.id }, matchId: m.id, label: g.name,
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
+            walkover: m.walkover || null, liveStatus: m.liveStatus || null,
             stage: m.stage || null, groupFormat: g.format || "roundrobin",
             placeholder: isPending4 ? (m.stage === "ganadores" ? "Ganador Partido 1 vs Ganador Partido 2" : "Perdedor Partido 1 vs Perdedor Partido 2") : null,
           });
@@ -536,7 +554,7 @@ function collectScheduleableMatches(tournament) {
     (c.bracket || []).forEach((round, ri) => {
       round.forEach((m) => {
         if (m.pairA && m.pairB) {
-          list.push({ key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name, location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri), pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [] });
+          list.push({ key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name, location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri), pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [], walkover: m.walkover || null, liveStatus: m.liveStatus || null });
         }
       });
     });
@@ -561,6 +579,28 @@ function withMatchSchedule(tournament, categoryId, location, matchId, schedule) 
       return {
         ...c,
         bracket: c.bracket.map((round, ri) => (ri !== location.roundIndex ? round : round.map((m) => (m.id === matchId ? { ...m, schedule } : m)))),
+      };
+    }),
+  };
+}
+
+/* Marca/quita el estado "en curso" a mano en un partido puntual (se usa mientras no tenga resultado cargado) */
+function withMatchLiveStatus(tournament, categoryId, location, matchId, liveStatus) {
+  return {
+    ...tournament,
+    categories: tournament.categories.map((c) => {
+      if (c.id !== categoryId) return c;
+      if (location.type === "group") {
+        return {
+          ...c,
+          groups: c.groups.map((g) => (g.id !== location.groupId ? g : {
+            ...g, matches: g.matches.map((m) => (m.id === matchId ? { ...m, liveStatus } : m)),
+          })),
+        };
+      }
+      return {
+        ...c,
+        bracket: c.bracket.map((round, ri) => (ri !== location.roundIndex ? round : round.map((m) => (m.id === matchId ? { ...m, liveStatus } : m)))),
       };
     }),
   };
@@ -1189,11 +1229,46 @@ function GroupPairName({ id, pairsById }) {
   return <span>{pairsById[id]?.name || "—"}</span>;
 }
 
-/* Muestra el resultado set por set en modo solo lectura, ej: "6-4 · 3-6 · 10-7" */
-function SetsSummary({ sets }) {
+/* Muestra el resultado set por set en modo solo lectura, ej: "6-4 · 3-6 · 10-7".
+   Si se pasa winnerIsA=false, invierte cada set para que el número de la pareja ganadora
+   aparezca siempre primero, así el criterio de lectura es siempre el mismo (ganador-perdedor). */
+function SetsSummary({ sets, winnerIsA }) {
   const played = (sets || []).filter((s) => s && s.a != null && s.b != null);
   if (played.length === 0) return <span className="opacity-50">vs</span>;
-  return <span>{played.map((s) => `${s.a}-${s.b}`).join(" · ")}</span>;
+  return (
+    <span>
+      {played.map((s) => (winnerIsA === false ? `${s.b}-${s.a}` : `${s.a}-${s.b}`)).join(" · ")}
+    </span>
+  );
+}
+
+/* Resultado de un partido en modo lectura: "WO" si fue por walkover, o el resultado set a set (ganador primero) */
+function MatchResultLabel({ match, winnerIsA }) {
+  if (match && match.walkover) return <span className="text-amber-400 font-semibold">WO</span>;
+  return <SetsSummary sets={match.sets} winnerIsA={winnerIsA} />;
+}
+
+/* Tilde que marca a la pareja ganadora de un partido, para que se vea de un vistazo sin tener que leer el resultado */
+function WinnerCheck() {
+  return <span className="text-lime-400 shrink-0" aria-label="Ganador" style={{ fontWeight: 900 }}>✓</span>;
+}
+
+/* Etiqueta de estado de un partido en la tabla de horarios: Finalizado (auto), En curso (manual) o Pendiente */
+function MatchStatusBadge({ status }) {
+  const map = {
+    finalizado: { label: "Finalizado", color: "#9fe022" },
+    en_curso: { label: "En curso", color: "#fb923c" },
+    pendiente: { label: "Pendiente", color: "#64748b" },
+  };
+  const s = map[status] || map.pendiente;
+  return (
+    <span
+      className="text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full whitespace-nowrap"
+      style={{ backgroundColor: s.color + "22", color: s.color }}
+    >
+      {s.label}
+    </span>
+  );
 }
 
 /* Tabla de posiciones completa de un grupo: PJ, PG, PP, sets a favor/en contra y diferencia,
@@ -1554,28 +1629,44 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
 }
 
 /* Una fila editable de la grilla (admin): permite reasignar fecha, hora y cancha a mano */
-function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear }) {
+function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive }) {
   const s = m.schedule;
+  const hasResult = matchIsPlayed(m);
+  const w = hasResult ? matchWinnerId(m) : null;
+  const winnerIsA = w == null ? null : w === m.pairA;
   return (
     <div className="flex items-center justify-between gap-3 flex-wrap border border-teal-800 rounded px-3 py-2 text-sm" style={F.body}>
       <div className="min-w-[200px] max-w-full">
-        <span className="text-xs text-teal-500 block mb-1">{m.categoryName} · {m.label}</span>
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <span className="text-xs text-teal-500">{m.categoryName} · {m.label}</span>
+          {!m.placeholder && <MatchStatusBadge status={matchDisplayStatus(m)} />}
+        </div>
         {m.placeholder ? (
           <span className="italic opacity-70">{m.placeholder}</span>
         ) : (
           <div className="leading-snug">
-            <div><PairName id={m.pairA} pairsById={pairsById} /></div>
+            <div className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
             <div className="text-[11px] opacity-50 flex items-center gap-2">
               <span>vs</span>
-              {(m.sets || []).some((s) => s && s.a != null && s.b != null) && (
-                <span className="font-mono not-italic opacity-100 text-teal-300"><SetsSummary sets={m.sets} /></span>
+              {hasResult && (
+                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>
               )}
             </div>
-            <div><PairName id={m.pairB} pairsById={pairsById} /></div>
+            <div className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
           </div>
         )}
       </div>
       <div className="flex items-center gap-2 flex-wrap">
+        {!m.placeholder && !hasResult && (
+          <button
+            type="button"
+            onClick={() => onToggleLive(m.liveStatus === "en_curso" ? null : "en_curso")}
+            className="text-xs px-2 py-1 rounded border"
+            style={m.liveStatus === "en_curso" ? { borderColor: "#fb923c", color: "#fb923c" } : { borderColor: "#94a3b8", color: "#94a3b8" }}
+          >
+            {m.liveStatus === "en_curso" ? "Quitar \"en curso\"" : "Marcar en curso"}
+          </button>
+        )}
         <select
           value={s?.date || ""}
           onChange={(e) => onEdit({ date: e.target.value, time: s?.time || "09:00", court: s?.court || 1 })}
@@ -1626,6 +1717,7 @@ function ScheduleAdminView({ tournament, update }) {
 
   const editSchedule = (m, schedule) => update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, schedule));
   const clearSchedule = (m) => update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, null));
+  const toggleLiveStatus = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
 
   return (
     <div>
@@ -1666,7 +1758,7 @@ function ScheduleAdminView({ tournament, update }) {
                     <div className="p-2 space-y-2" style={{ backgroundColor: dateColor + "08" }}>
                       {byCourt[court].map((m) => (
                         <ScheduleRow key={m.key} m={m} pairsById={pairsById} playDates={tournament.playDates || []} courtsCount={tournament.courtsCount || 4}
-                          onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} />
+                          onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} onToggleLive={(ls) => toggleLiveStatus(m, ls)} />
                       ))}
                     </div>
                   </div>
@@ -1682,7 +1774,7 @@ function ScheduleAdminView({ tournament, update }) {
               <div className="space-y-2">
                 {unscheduled.map((m) => (
                   <ScheduleRow key={m.key} m={m} pairsById={pairsById} playDates={tournament.playDates || []} courtsCount={tournament.courtsCount || 4}
-                    onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} />
+                    onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} onToggleLive={(ls) => toggleLiveStatus(m, ls)} />
                 ))}
               </div>
             </div>
@@ -1747,23 +1839,29 @@ function SchedulePublicView({ tournament }) {
                     <div key={m.key} className="px-3 py-2" style={{ backgroundColor: dateColor + "08" }}>
                       <div className="flex items-center gap-2 text-xs mb-1 flex-wrap" style={F.body}>
                         <span className="font-bold" style={{ color: dateColor }}>Cancha {m.schedule.court}</span>
-                        <span className="ml-auto font-medium truncate max-w-[45%]" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName}</span>
+                        <span className="font-medium truncate max-w-[35%]" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName}</span>
+                        {!m.placeholder && <span className="ml-auto"><MatchStatusBadge status={matchDisplayStatus(m)} /></span>}
                       </div>
                       {m.placeholder ? (
                         <p className="text-sm italic opacity-70" style={F.body}>{m.label ? `${m.label} · ` : ""}{m.placeholder}</p>
-                      ) : (
-                        <div className="text-sm min-w-0" style={F.body}>
-                          {m.label && <span className="text-[10px] text-teal-500 block">{m.label}</span>}
-                          <div className="truncate"><PairName id={m.pairA} pairsById={pairsById} /></div>
-                          <div className="text-[11px] opacity-50 my-0.5 flex items-center gap-2">
-                            <span>vs</span>
-                            {(m.sets || []).some((s) => s && s.a != null && s.b != null) && (
-                              <span className="font-mono not-italic opacity-100 text-teal-300"><SetsSummary sets={m.sets} /></span>
-                            )}
+                      ) : (() => {
+                        const hasResult = matchIsPlayed(m);
+                        const w = hasResult ? matchWinnerId(m) : null;
+                        const winnerIsA = w == null ? null : w === m.pairA;
+                        return (
+                          <div className="text-sm min-w-0" style={F.body}>
+                            {m.label && <span className="text-[10px] text-teal-500 block">{m.label}</span>}
+                            <div className="truncate flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
+                            <div className="text-[11px] opacity-50 my-0.5 flex items-center gap-2">
+                              <span>vs</span>
+                              {hasResult && (
+                                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>
+                              )}
+                            </div>
+                            <div className="truncate flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
                           </div>
-                          <div className="truncate"><PairName id={m.pairB} pairsById={pairsById} /></div>
-                        </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -2098,9 +2196,10 @@ function CategoryGroupsPublicView({ category, format }) {
               <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} />
               <div className="mt-3 space-y-2">
                 {g.matches.map((m) => {
-                  const hasResult = (m.sets || []).some((s) => s && s.a != null && s.b != null);
+                  const hasResult = matchIsPlayed(m);
                   const pending = !m.pairA || !m.pairB;
                   const w = hasResult ? matchWinnerId(m) : null;
+                  const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="text-sm" style={F.body}>
                       {groupMatchStageLabel(g, m) && <span className="text-[10px] text-teal-500 block">{g.name} · {groupMatchStageLabel(g, m)}</span>}
@@ -2112,12 +2211,20 @@ function CategoryGroupsPublicView({ category, format }) {
                           <span className="text-right"><ScheduleLabel schedule={m.schedule} /></span>
                         </div>
                       ) : (
-                        <div className="grid grid-cols-[1fr_auto] gap-x-3 items-baseline">
-                          <span className="min-w-0"><GroupPairName id={m.pairA} pairsById={pairsById} /></span>
-                          <span className="text-right font-mono text-xs text-teal-300">{w === m.pairA ? <SetsSummary sets={m.sets} /> : (w == null && <ScheduleLabel schedule={m.schedule} />)}</span>
-                          <span className="min-w-0"><GroupPairName id={m.pairB} pairsById={pairsById} /></span>
-                          <span className="text-right font-mono text-xs text-teal-300">{w === m.pairB ? <SetsSummary sets={m.sets} /> : (w != null && <ScheduleLabel schedule={m.schedule} />)}</span>
-                        </div>
+                        <>
+                          <div className="flex items-center gap-1 min-w-0">
+                            {w === m.pairA && <WinnerCheck />}
+                            <GroupPairName id={m.pairA} pairsById={pairsById} />
+                          </div>
+                          <div className="flex items-center gap-1 min-w-0">
+                            {w === m.pairB && <WinnerCheck />}
+                            <GroupPairName id={m.pairB} pairsById={pairsById} />
+                          </div>
+                          <div className="flex justify-between items-baseline gap-3 mt-0.5">
+                            <span className="font-mono text-xs text-teal-300">{hasResult && <MatchResultLabel match={m} winnerIsA={winnerIsA} />}</span>
+                            <span className="text-right"><ScheduleLabel schedule={m.schedule} /></span>
+                          </div>
+                        </>
                       )}
                     </div>
                   );
@@ -2154,17 +2261,20 @@ function CategoryBracketPublicView({ category }) {
                 {round.map((m) => {
                   const w = winnerOf(m);
                   const { a: setsA, b: setsB } = setsWon(m);
+                  const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                       <ScheduleLabel schedule={m.schedule} />
                       <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                        <PairName id={m.pairA} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsA : ""}</span>
+                        <span className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
+                        <span>{m.walkover ? "" : matchIsPlayed(m) ? setsA : ""}</span>
                       </div>
                       <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                        <PairName id={m.pairB} pairsById={pairsById} /><span>{matchIsPlayed(m) ? setsB : ""}</span>
+                        <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
+                        <span>{m.walkover ? "" : matchIsPlayed(m) ? setsB : ""}</span>
                       </div>
                       {matchIsPlayed(m) && (
-                        <p className="text-[10px] text-teal-500 mt-1"><SetsSummary sets={m.sets} /></p>
+                        <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></p>
                       )}
                     </div>
                   );
@@ -3282,6 +3392,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [tab, setTab] = useState("parejas");
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
+  const [editingPairId, setEditingPairId] = useState(null);
+  const [editPairName, setEditPairName] = useState("");
   const [groupName, setGroupName] = useState("");
   const [groupSelection, setGroupSelection] = useState([]);
   const [confirmingAutoGroups, setConfirmingAutoGroups] = useState(false);
@@ -3310,6 +3422,16 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     });
   };
 
+  // La edición de nombre/jugadores de una pareja solo se permite mientras no haya jugado su primer partido
+  const startEditPair = (p) => { setEditingPairId(p.id); setEditPairName(p.name); };
+  const cancelEditPair = () => { setEditingPairId(null); setEditPairName(""); };
+  const saveEditPair = (id) => {
+    if (!editPairName.trim()) return;
+    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, name: editPairName.trim() } : p)) });
+    setEditingPairId(null);
+    setEditPairName("");
+  };
+
   const createGroup = () => {
     if (!groupName.trim() || groupSelection.length < 2) return;
     const built = buildGroupMatches(groupSelection);
@@ -3332,6 +3454,18 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
         if (g.id !== groupId) return g;
         let matches = g.matches.map((m) => m.id === matchId ? { ...m, sets: withSetScore(m.sets, setIndex, side, value) } : m);
         // En grupos de 4, apenas se cargan los partidos 1 y 2 se arman solos los cruces de ganadores/perdedores
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        return { ...g, matches };
+      }),
+    });
+  };
+
+  const setGroupWalkover = (groupId, matchId, walkoverPairId) => {
+    onUpdateCategory({
+      ...category,
+      groups: category.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
         if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
         return { ...g, matches };
       }),
@@ -3381,6 +3515,11 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
   };
 
+  const setBracketWalkover = (matchId, walkoverPairId) => {
+    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+  };
+
   return (
     <div>
       <div className="flex gap-2 mb-6 border-b border-teal-800">
@@ -3406,15 +3545,42 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           {pairError && <p className="text-xs text-red-400 mb-3" style={F.body}>{pairError}</p>}
           <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Una pareja/jugador solo puede estar anotado en una categoría de este torneo.</p>
           <ul className="space-y-2">
-            {category.pairs.map((p) => (
-              <li key={p.id} className="border border-teal-800 rounded px-3 py-2">
-                <div className="flex justify-between items-center">
-                  <span style={F.body}>{p.name}</span>
-                  <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>
-                </div>
-                <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />
-              </li>
-            ))}
+            {category.pairs.map((p) => {
+              const played = pairHasPlayed(category, p.id);
+              const isEditing = editingPairId === p.id;
+              return (
+                <li key={p.id} className="border border-teal-800 rounded px-3 py-2">
+                  <div className="flex justify-between items-center gap-2 flex-wrap">
+                    {isEditing ? (
+                      <input
+                        value={editPairName}
+                        onChange={(e) => setEditPairName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") saveEditPair(p.id); }}
+                        autoFocus
+                        className="flex-1 min-w-[140px] px-2 py-1 rounded border text-sm outline-none focus:border-lime-400"
+                        style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                      />
+                    ) : (
+                      <span style={F.body}>{p.name}</span>
+                    )}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isEditing ? (
+                        <>
+                          <button type="button" onClick={() => saveEditPair(p.id)} className="text-sm text-lime-400">Guardar</button>
+                          <button type="button" onClick={cancelEditPair} className="text-sm text-teal-400">Cancelar</button>
+                        </>
+                      ) : played ? (
+                        <span className="text-[11px] text-teal-600 italic">Ya jugó · nombre bloqueado</span>
+                      ) : (
+                        <button type="button" onClick={() => startEditPair(p)} className="text-sm text-teal-300">Editar</button>
+                      )}
+                      <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>
+                    </div>
+                  </div>
+                  <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />
+                </li>
+              );
+            })}
             {category.pairs.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay parejas en esta categoría.</p>}
           </ul>
         </div>
@@ -3488,29 +3654,44 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                   {g.matches.map((m) => {
                     const stageLabel = groupMatchStageLabel(g, m);
                     const editable = m.pairA && m.pairB;
-                    const hasResult = (m.sets || []).some((s) => s && s.a != null && s.b != null);
+                    const hasResult = matchIsPlayed(m);
                     const w = hasResult ? matchWinnerId(m) : null;
+                    const winnerIsA = w == null ? null : w === m.pairA;
                     return (
                       <div key={m.id} className="flex items-start justify-between gap-3 text-sm flex-wrap">
                         <div className="min-w-0">
                           {stageLabel && <span className="text-[10px] text-teal-500 block mb-1">{stageLabel}</span>}
-                          <div className="flex items-baseline gap-2 flex-wrap" style={F.body}>
+                          <div className="flex items-center gap-1 flex-wrap" style={F.body}>
+                            {w === m.pairA && <WinnerCheck />}
                             <GroupPairName id={m.pairA} pairsById={pairsById} />
-                            {w === m.pairA && <span className="font-mono text-xs text-teal-300"><SetsSummary sets={m.sets} /></span>}
-                            {(w == null || w === m.pairB) && m.schedule && <ScheduleLabel schedule={m.schedule} />}
                           </div>
-                          <div className="flex items-baseline gap-2 flex-wrap" style={F.body}>
+                          <div className="flex items-center gap-1 flex-wrap" style={F.body}>
+                            {w === m.pairB && <WinnerCheck />}
                             <GroupPairName id={m.pairB} pairsById={pairsById} />
-                            {w === m.pairB && <span className="font-mono text-xs text-teal-300"><SetsSummary sets={m.sets} /></span>}
-                            {w === m.pairA && m.schedule && <ScheduleLabel schedule={m.schedule} />}
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap mt-0.5" style={F.body}>
+                            {hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>}
+                            {m.schedule && <ScheduleLabel schedule={m.schedule} />}
                           </div>
                         </div>
                         {editable && (
-                          <MatchSetsEditor
-                            sets={m.sets}
-                            format={format}
-                            onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
-                          />
+                          <div className="flex flex-col items-end gap-1">
+                            <MatchSetsEditor
+                              sets={m.sets}
+                              format={format}
+                              onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
+                            />
+                            <div className="flex gap-2 flex-wrap justify-end text-[10px]">
+                              {m.walkover ? (
+                                <button type="button" onClick={() => setGroupWalkover(g.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
+                              ) : (
+                                <>
+                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
+                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
+                                </>
+                              )}
+                            </div>
+                          </div>
                         )}
                       </div>
                     );
@@ -3644,27 +3825,41 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       return (
                         <div key={m.id} className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                           <ScheduleLabel schedule={m.schedule} />
-                          {(() => {
+                          {m.walkover ? (
+                            <p className="text-amber-400 font-semibold text-xs">WO</p>
+                          ) : (() => {
                             const { a: setsA, b: setsB } = setsWon(m);
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                                  <PairName id={m.pairA} pairsById={pairsById} />
+                                  <span className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsA : ""}</span>}
                                 </div>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                                  <PairName id={m.pairB} pairsById={pairsById} />
+                                  <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsB : ""}</span>}
                                 </div>
                               </>
                             );
                           })()}
                           {editable && (
-                            <MatchSetsEditor
-                              sets={m.sets}
-                              format={format}
-                              onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
-                            />
+                            <>
+                              <MatchSetsEditor
+                                sets={m.sets}
+                                format={format}
+                                onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
+                              />
+                              <div className="flex gap-2 flex-wrap text-[10px]">
+                                {m.walkover ? (
+                                  <button type="button" onClick={() => setBracketWalkover(m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
+                                ) : (
+                                  <>
+                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
+                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
+                                  </>
+                                )}
+                              </div>
+                            </>
                           )}
                         </div>
                       );
