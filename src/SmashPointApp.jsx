@@ -603,15 +603,28 @@ function collectScheduleableMatches(tournament) {
       });
     });
     (c.bracket || []).forEach((round, ri) => {
-      round.forEach((m) => {
-        const isSkeletonSlot = c.bracketIsSkeleton && ri === 0 && (m.placeholderA || m.placeholderB);
+      round.forEach((m, mi) => {
+        // En un esqueleto precargado, no solo la ronda 1 tiene placeholders de texto propios:
+        // TODAS las rondas siguientes (semis, final...) también deben poder programarse de
+        // antemano, aunque todavía no tengan ni pairA/pairB ni placeholderA/placeholderB propios
+        // (esos se completan recién cuando se resuelve la ronda anterior).
+        const isSkeletonSlot = c.bracketIsSkeleton && !(m.pairA && m.pairB);
+        let placeholderText = null;
+        if (isSkeletonSlot) {
+          if (m.placeholderA || m.placeholderB) {
+            placeholderText = `${m.placeholderA || "?"} vs ${m.placeholderB || "?"}`;
+          } else {
+            const prevLabel = roundStageLabel(c.bracket.length, ri - 1);
+            placeholderText = `Ganador ${prevLabel} ${mi * 2 + 1} vs Ganador ${prevLabel} ${mi * 2 + 2}`;
+          }
+        }
         if ((m.pairA && m.pairB) || isSkeletonSlot) {
           list.push({
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri),
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
             walkover: m.walkover || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
-            placeholder: isSkeletonSlot ? `${m.placeholderA || "?"} vs ${m.placeholderB || "?"}` : null,
+            placeholder: placeholderText,
           });
         }
       });
