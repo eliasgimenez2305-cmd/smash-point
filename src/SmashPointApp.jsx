@@ -438,6 +438,57 @@ function buildBracket(pairIds) {
   return propagateBracket(rounds);
 }
 
+/* Arma un esqueleto de llave SIN saber todavía qué pareja concreta clasifica a cada lugar:
+   solo usa la cantidad de grupos y cuántos clasificados por grupo definió el organizador
+   (g.qualifiersCount, default 2). Cada partido de ronda 1 lleva un label textual tipo
+   "1° Grupo A vs 2° Grupo B" (guardado en placeholderA/placeholderB) en vez de pairA/pairB reales.
+   Replica el mismo cruce en cadena de buildKnockoutSeeding (1° de un grupo vs 2° de OTRO grupo)
+   para que el esqueleto, cuando después se rellene con buildSeededBracket, coincida en tamaño
+   y en qué casillero corresponde a cada duelo. */
+function buildPlaceholderBracket(groups) {
+  if (!groups || groups.length === 0) return null;
+  const firsts = groups.map((g) => ({ label: `1° ${g.name}`, groupIndex: groups.indexOf(g) }));
+  let seconds = groups
+    .map((g, gi) => (g.qualifiersCount || 2) >= 2 ? { label: `2° ${g.name}`, groupIndex: gi } : null)
+    .filter(Boolean);
+  const extra = []; // clasificados 3°, 4°, etc. si algún grupo define más de 2
+  groups.forEach((g, gi) => {
+    const q = g.qualifiersCount || 2;
+    for (let place = 3; place <= q; place++) {
+      extra.push({ label: `${place}° ${g.name}`, groupIndex: gi });
+    }
+  });
+
+  let crossedSeconds = seconds;
+  if (seconds.length >= 2) {
+    crossedSeconds = seconds.map((_, i) => seconds[(i + 1) % seconds.length]);
+  }
+
+  const duels = firsts.map((f1, i) => [f1, crossedSeconds[i]].filter(Boolean));
+  let seeded = duels.flat();
+  if (seeded.length === 0) seeded = [...firsts, ...seconds];
+  seeded = [...seeded, ...extra];
+
+  if (seeded.length < 2) return null;
+
+  let size = 1;
+  while (size < seeded.length) size *= 2;
+  const slots = [...seeded];
+  while (slots.length < size) slots.push(null); // huecos = bye, todavía sin saber quién pasa directo
+
+  const round1 = [];
+  for (let i = 0; i < slots.length; i += 2) {
+    round1.push({ id: uid(), pairA: null, pairB: null, placeholderA: slots[i]?.label || null, placeholderB: slots[i + 1]?.label || null, sets: [] });
+  }
+  const rounds = [round1];
+  let count = round1.length;
+  while (count > 1) {
+    count = count / 2;
+    rounds.push(Array.from({ length: count }, () => ({ id: uid(), pairA: null, pairB: null, sets: [] })));
+  }
+  return rounds;
+}
+
 /* Como buildBracket, pero a partir del resultado de buildKnockoutSeeding: coloca en la ronda 1
    primero los duelos reales entre parejas que juegan, y después las parejas con bye emparejadas
    con un lugar vacío (pasan solas a la ronda siguiente sin jugar la ronda 1). */
@@ -553,8 +604,15 @@ function collectScheduleableMatches(tournament) {
     });
     (c.bracket || []).forEach((round, ri) => {
       round.forEach((m) => {
-        if (m.pairA && m.pairB) {
-          list.push({ key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name, location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri), pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [], walkover: m.walkover || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished });
+        const isSkeletonSlot = c.bracketIsSkeleton && ri === 0 && (m.placeholderA || m.placeholderB);
+        if ((m.pairA && m.pairB) || isSkeletonSlot) {
+          list.push({
+            key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
+            location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri),
+            pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
+            walkover: m.walkover || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
+            placeholder: isSkeletonSlot ? `${m.placeholderA || "?"} vs ${m.placeholderB || "?"}` : null,
+          });
         }
       });
     });
@@ -3619,16 +3677,20 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const createGroup = () => {
     if (!groupName.trim() || groupSelection.length < 2) return;
     const built = buildGroupMatches(groupSelection);
-    const group = { id: uid(), name: groupName.trim(), pairIds: groupSelection, format: built.format, matches: built.matches };
+    const group = { id: uid(), name: groupName.trim(), pairIds: groupSelection, format: built.format, matches: built.matches, qualifiersCount: 2 };
     (onGroupsLocked || onUpdateCategory)({ ...category, groups: [...category.groups, group] });
     setGroupName(""); setGroupSelection([]);
   };
 
   const runAutoGroups = () => {
     const { groups, warnings } = autoFormGroups(category.pairs, playDates);
-    (onGroupsLocked || onUpdateCategory)({ ...category, groups, bracket: null });
+    (onGroupsLocked || onUpdateCategory)({ ...category, groups: groups.map((g) => ({ ...g, qualifiersCount: 2 })), bracket: null });
     setGroupWarnings(warnings);
     setConfirmingAutoGroups(false);
+  };
+
+  const setGroupQualifiers = (groupId, count) => {
+    onUpdateCategory({ ...category, groups: category.groups.map((g) => (g.id === groupId ? { ...g, qualifiersCount: count } : g)) });
   };
 
   const setMatchSetScore = (groupId, matchId, setIndex, side, value) => {
@@ -3661,9 +3723,32 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory(autoScheduleBracket(tournament, withBracket));
   };
 
+  // Si ya había un esqueleto precargado (bracketIsSkeleton) con horarios puestos a mano o por
+  // autoScheduleBracket, los mismos horarios se copian al bracket real ronda por ronda / casillero
+  // por casillero, para no perder lo ya programado.
+  const carrySkeletonSchedules = (skeletonRounds, realRounds) => {
+    if (!skeletonRounds) return realRounds;
+    return realRounds.map((round, ri) => round.map((m, mi) => {
+      const prev = skeletonRounds[ri]?.[mi];
+      return prev?.schedule ? { ...m, schedule: prev.schedule } : m;
+    }));
+  };
+
   const generateBracketFromGroups = () => {
     const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
-    const withBracket = { ...category, bracket: buildSeededBracket(seeding), bracketPublished: false };
+    const realBracket = carrySkeletonSchedules(category.bracketIsSkeleton ? category.bracket : null, buildSeededBracket(seeding));
+    const withBracket = { ...category, bracket: realBracket, bracketIsSkeleton: false, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false };
+    onUpdateCategory(autoScheduleBracket(tournament, withBracket));
+  };
+
+  // Precarga SOLO la estructura de la llave (fechas/horas/canchas) apenas se cierran los grupos,
+  // sin esperar a saber qué pareja concreta clasifica a cada lugar. Usa placeholders tipo
+  // "1° Grupo A vs 2° Grupo B". Cuando después se genera la llave real (generateBracketFromGroups),
+  // los horarios ya cargados en este esqueleto se conservan.
+  const generatePlaceholderBracket = () => {
+    const skeleton = buildPlaceholderBracket(category.groups);
+    if (!skeleton) return;
+    const withBracket = { ...category, bracket: skeleton, bracketIsSkeleton: true, bracketPublished: false };
     onUpdateCategory(autoScheduleBracket(tournament, withBracket));
   };
 
@@ -3830,8 +3915,21 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             const color = GROUP_COLORS[gi % GROUP_COLORS.length];
             return (
               <div key={g.id} className="rounded-xl p-4 mb-6 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
-                <div className="flex items-center gap-2 mb-3">
+                <div className="flex items-center gap-2 mb-3 flex-wrap">
                   <SkewPill color={color}>{g.name}</SkewPill>
+                  <label className="flex items-center gap-1 text-[11px] text-teal-500" style={F.body}>
+                    Clasifican:
+                    <select
+                      value={g.qualifiersCount || 2}
+                      onChange={(e) => setGroupQualifiers(g.id, parseInt(e.target.value, 10))}
+                      className="px-1.5 py-0.5 rounded border outline-none text-[11px]"
+                      style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                    >
+                      {Array.from({ length: Math.max(g.pairIds.length - 1, 1) }, (_, i) => i + 1).map((n) => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
                 <div className="mb-4"><StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} /></div>
                 <div className="space-y-3">
@@ -3930,6 +4028,20 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
       {tab === "llave" && (
         <div>
+          {!category.bracket && category.groups.length > 0 && (
+            <div className="border border-purple-800 rounded-lg p-4 mb-4">
+              <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
+                Todavía no terminaron los grupos, pero ya podés precargar la estructura de la llave (fechas, horarios y canchas de octavos, cuartos, semis y final) usando "1°, 2°..." de cada grupo. Cuando se sepan las parejas clasificadas, se completan solas en los horarios que ya hayas cargado.
+              </p>
+              <button
+                onClick={generatePlaceholderBracket}
+                className="px-4 py-2 rounded font-semibold text-sm"
+                style={{ backgroundColor: "#a78bfa", color: "#14181f" }}
+              >
+                Precargar estructura de la llave
+              </button>
+            </div>
+          )}
           {!category.bracket && (
             <div className="border border-teal-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-teal-300 mb-3" style={F.body}>
@@ -3948,6 +4060,22 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               >
                 Generar llave final
               </button>
+            </div>
+          )}
+          {category.bracketIsSkeleton && category.bracket && (
+            <div className="border border-purple-800 rounded-lg p-4 mb-6">
+              <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
+                Esta es la estructura precargada de la llave, todavía sin parejas confirmadas. Podés seguir ajustando los horarios en la grilla. Cuando los grupos terminen, generá la llave final desde la pestaña de grupos para completar las parejas.
+              </p>
+              {category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m))) && (
+                <button
+                  onClick={generateBracketFromGroups}
+                  className="px-4 py-2 rounded font-semibold text-sm"
+                  style={{ backgroundColor: "#9fe022", color: "#14181f" }}
+                >
+                  Completar llave con las parejas clasificadas
+                </button>
+              )}
             </div>
           )}
           {category.bracket && !round1HasResults && (
