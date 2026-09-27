@@ -471,7 +471,10 @@ function computeStandings(group, pairsById, format) {
         b.gamesF += s.b; b.gamesC += s.a;
       }
     });
-    if (sa > sb) { a.pg++; a.pts += 2; b.pp++; }
+    // Un WO cuenta como partido ganado para el rival de quien no se presentó (sin sets ni games)
+    const woWinner = m.walkover ? (m.walkover === m.pairA ? b : a) : null;
+    if (woWinner) { const woLoser = woWinner === a ? b : a; woWinner.pg++; woWinner.pts += 2; woLoser.pp++; }
+    else if (sa > sb) { a.pg++; a.pts += 2; b.pp++; }
     else if (sb > sa) { b.pg++; b.pts += 2; a.pp++; }
   });
   const rows = Object.values(table);
