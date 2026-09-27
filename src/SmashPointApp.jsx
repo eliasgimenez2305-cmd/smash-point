@@ -237,6 +237,154 @@ function buildGroupMatches(pairIds) {
   return { format: "roundrobin", matches: buildRoundRobin(pairIds) };
 }
 
+/* ---------- Formato Súper 8 ---------- */
+
+/* Una categoría puede jugarse con el sistema clásico (zonas + llave) o en alguna de las dos
+   variantes del Súper 8: un cuadro fijo de partidos sin eliminación que termina en tabla de posiciones.
+   - Individual: 8 jugadores sueltos; las parejas rotan para que cada uno juegue una vez con cada
+     otro como compañero y dos veces contra cada otro como rival (14 partidos, 7 rondas de 2).
+   - Parejas Fijas: 8 parejas armadas, todos contra todos (28 partidos, 7 rondas de 4). */
+const CATEGORY_FORMAT_LABEL = {
+  zonas: "Zonas + llave",
+  super8_individual: "Súper 8 Individual",
+  super8_parejas: "Súper 8 por Parejas Fijas",
+};
+const SUPER8_SIZE = 8;
+
+function isSuper8(category) {
+  return category?.format === "super8_individual" || category?.format === "super8_parejas";
+}
+
+/* Round robin por el método del círculo: el primero queda fijo y el resto rota un lugar por ronda.
+   Devuelve las rondas como listas de cruces [a, b]. Con 8 parejas da 7 rondas de 4 partidos. */
+function buildCircleRounds(ids) {
+  const n = ids.length;
+  let arr = [...ids];
+  const rounds = [];
+  for (let r = 0; r < n - 1; r++) {
+    const round = [];
+    for (let i = 0; i < n / 2; i++) round.push([arr[i], arr[n - 1 - i]]);
+    rounds.push(round);
+    arr = [arr[0], arr[n - 1], ...arr.slice(1, n - 1)];
+  }
+  return rounds;
+}
+
+/* Rondas del Súper 8 Individual para n jugadores (n múltiplo de 4). Cada ronda es una lista de
+   partidos [[a1, a2], [b1, b2]] donde juegan todos, y en el total cada jugador es compañero de
+   cada otro exactamente una vez y rival exactamente dos veces.
+   Construcción cíclica: el jugador 0 queda fijo y los demás se numeran módulo n-1. Se busca una
+   ronda base que, sumando 1 a cada número ronda tras ronda, cumpla las dos condiciones. La búsqueda
+   recorre siempre el mismo orden, así que para la misma cantidad de jugadores sale siempre la misma
+   tabla (con 8 jugadores tarda unos milisegundos). */
+function buildSuper8IndividualRounds(ids) {
+  const n = ids.length;
+  if (n < 4 || n % 4 !== 0) return null;
+  const m = n - 1;
+  const shift = (x, r) => (x === 0 ? 0 : ((x - 1 + r) % m) + 1);
+  const key = (a, b) => (a < b ? a * n + b : b * n + a);
+  const develop = (base) => Array.from({ length: m }, (_, r) => base.map(([t1, t2]) => [t1.map((x) => shift(x, r)), t2.map((x) => shift(x, r))]));
+  const isValid = (rounds) => {
+    const partners = new Set();
+    const opponents = new Map();
+    for (const round of rounds) {
+      for (const [t1, t2] of round) {
+        for (const t of [t1, t2]) {
+          const k = key(t[0], t[1]);
+          if (partners.has(k)) return false;
+          partners.add(k);
+        }
+        for (const x of t1) for (const y of t2) {
+          const k = key(x, y), count = (opponents.get(k) || 0) + 1;
+          if (count > 2) return false;
+          opponents.set(k, count);
+        }
+      }
+    }
+    return true;
+  };
+  // Arma la ronda base de a 4 jugadores (el primero libre + otros 3), probando los 3 repartos de compañeros
+  const search = (free, base) => {
+    if (free.length === 0) {
+      const rounds = develop(base);
+      return isValid(rounds) ? rounds : null;
+    }
+    const [a, ...rest] = free;
+    for (let i = 0; i < rest.length; i++) for (let j = i + 1; j < rest.length; j++) for (let k = j + 1; k < rest.length; k++) {
+      const quad = [a, rest[i], rest[j], rest[k]];
+      const others = rest.filter((_, x) => x !== i && x !== j && x !== k);
+      for (const p of [1, 2, 3]) {
+        const t1 = [quad[0], quad[p]];
+        const t2 = quad.filter((_, x) => x !== 0 && x !== p);
+        base.push([t1, t2]);
+        const found = search(others, base);
+        if (found) return found;
+        base.pop();
+      }
+    }
+    return null;
+  };
+  const rounds = search(Array.from({ length: n }, (_, i) => i), []);
+  return rounds && rounds.map((round) => round.map(([t1, t2]) => [t1.map((x) => ids[x]), t2.map((x) => ids[x])]));
+}
+
+/* Arma la zona única del Súper 8 con los jugadores/parejas ya numerados (orderedIds[0] = el 1, etc.).
+   En el Individual, cada lado de un partido es un "equipo" de 2 jugadores que se guarda en
+   category.teams; los partidos apuntan a esos equipos en pairA/pairB, así el resto de la app
+   (resultados, WO, horarios) los trata igual que a una pareja. */
+function buildSuper8Group(format, orderedIds) {
+  const teams = [];
+  let matches;
+  if (format === "super8_individual") {
+    const rounds = buildSuper8IndividualRounds(orderedIds);
+    if (!rounds) return null;
+    const teamFor = (playerIds) => {
+      const team = { id: uid(), playerIds };
+      teams.push(team);
+      return team.id;
+    };
+    matches = rounds.flatMap((round, ri) => round.map(([t1, t2]) => ({ id: uid(), pairA: teamFor(t1), pairB: teamFor(t2), sets: [], round: ri + 1 })));
+  } else {
+    matches = buildCircleRounds(orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
+  }
+  return { group: { id: uid(), name: "Súper 8", pairIds: orderedIds, format: "super8", matches }, teams };
+}
+
+/* Parejas/jugadores de la categoría por id, sumando los equipos del Súper 8 Individual (cuyo nombre
+   se arma con el de sus dos jugadores, para que un cambio de nombre se refleje solo). */
+function categoryEntitiesById(category) {
+  const map = Object.fromEntries(category.pairs.map((p) => [p.id, p]));
+  (category.teams || []).forEach((t) => {
+    map[t.id] = { id: t.id, name: t.playerIds.map((pid) => map[pid]?.name || "—").join(" / ") };
+  });
+  return map;
+}
+
+/* Quiénes juegan de verdad en un lado de un partido: los dos jugadores si es un equipo del Súper 8
+   Individual, o la pareja misma en cualquier otro caso. */
+function sideParticipantIds(category, sideId) {
+  const team = (category?.teams || []).find((t) => t.id === sideId);
+  return team ? team.playerIds : [sideId];
+}
+
+/* Para la tabla de posiciones del Súper 8 Individual: cada partido de equipos se parte en dos
+   "partidos" jugador contra jugador con el mismo resultado, así computeStandings le suma a cada
+   jugador lo que hizo su equipo (sin contarlo doble). */
+function super8IndividualStandingsGroup(category, group) {
+  const teamsById = Object.fromEntries((category.teams || []).map((t) => [t.id, t]));
+  const matches = group.matches.flatMap((m) => {
+    const tA = teamsById[m.pairA], tB = teamsById[m.pairB];
+    if (!tA || !tB) return [];
+    return [0, 1].map((i) => ({
+      ...m,
+      pairA: tA.playerIds[i],
+      pairB: tB.playerIds[i],
+      walkover: m.walkover ? (m.walkover === m.pairA ? tA.playerIds[i] : tB.playerIds[i]) : null,
+    }));
+  });
+  return { ...group, matches };
+}
+
 /* Cuenta sets ganados por cada lado a partir de los games/puntos cargados set por set */
 function setsWon(match) {
   let a = 0, b = 0;
@@ -280,9 +428,10 @@ function matchDisplayStatus(m) {
   return "pendiente";
 }
 
-/* Chequea si una pareja ya jugó algún partido (de grupos o de la llave) dentro de la categoría */
+/* Chequea si una pareja (o jugador del Súper 8 Individual) ya jugó algún partido (de grupos o de la llave) dentro de la categoría */
 function pairHasPlayed(category, pairId) {
-  const inGroups = (category.groups || []).some((g) => g.matches.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchIsPlayed(m)));
+  const plays = (m) => [m.pairA, m.pairB].some((side) => sideParticipantIds(category, side).includes(pairId));
+  const inGroups = (category.groups || []).some((g) => g.matches.some((m) => plays(m) && matchIsPlayed(m)));
   const inBracket = (category.bracket || []).some((round) => round.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchIsPlayed(m)));
   return inGroups || inBracket;
 }
@@ -593,7 +742,7 @@ function collectScheduleableMatches(tournament) {
         if ((m.pairA && m.pairB) || isPending4) {
           list.push({
             key: `${c.id}:g:${g.id}:${m.id}`, categoryId: c.id, categoryName: c.name,
-            location: { type: "group", groupId: g.id }, matchId: m.id, label: g.name,
+            location: { type: "group", groupId: g.id }, matchId: m.id, label: m.round ? `${g.name} · Ronda ${m.round}` : g.name,
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
             walkover: m.walkover || null, liveStatus: m.liveStatus || null,
             stage: m.stage || null, groupFormat: g.format || "roundrobin",
@@ -801,6 +950,9 @@ function findNextFreeSlotOnCourt(scheduledMatches, dateInfo, court, fromTime, du
 
 function pairAvailability(tournament, categoryId, pairId) {
   const cat = tournament.categories.find((c) => c.id === categoryId);
+  // Equipo del Súper 8 Individual: puede jugar solo cuando coinciden sus dos jugadores
+  const team = (cat?.teams || []).find((t) => t.id === pairId);
+  if (team) return groupCombinedAvailability(tournament, categoryId, team.playerIds);
   const pair = cat?.pairs.find((p) => p.id === pairId);
   if (pair?.availability && pair.availability.length > 0) return pair.availability;
   // Sin disponibilidad cargada: se toma como disponible todos los días del torneo, en el horario de cada uno
@@ -1069,6 +1221,7 @@ function computeCircuitStandings(circuit, tournaments) {
 
   tournaments.filter((t) => t.circuitId === circuit.id).forEach((t) => {
     t.categories.forEach((cat) => {
+      if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
       if (!matchName) return;
       categoryPlacements(cat).forEach(({ pairId, tier }) => {
@@ -1100,13 +1253,17 @@ function autoSchedule(tournament) {
   const dates = (tournament.playDates || []).map((d) => d.date);
   const all = collectScheduleableMatches(tournament);
 
+  // Quiénes no pueden estar en dos canchas a la vez: las dos parejas, o los 4 jugadores en el
+  // Súper 8 Individual (ahí las parejas cambian en cada partido, así que se controla por jugador).
+  const categoriesById = Object.fromEntries((tournament.categories || []).map((c) => [c.id, c]));
+  const participants = (m) => [m.pairA, m.pairB].flatMap((side) => sideParticipantIds(categoriesById[m.categoryId], side));
+
   const courtBusy = new Set();
   const pairBusy = new Set();
   all.filter((m) => m.schedule).forEach((m) => {
     const { date, time, court } = m.schedule;
     courtBusy.add(`${date}|${time}|${court}`);
-    pairBusy.add(`${date}|${time}|${m.pairA}`);
-    pairBusy.add(`${date}|${time}|${m.pairB}`);
+    participants(m).forEach((pid) => pairBusy.add(`${date}|${time}|${pid}`));
   });
 
   let updated = tournament;
@@ -1161,7 +1318,7 @@ function autoSchedule(tournament) {
         const time = minutesToTime(t);
         // Para el cruce de ganadores/perdedores todavía no sabemos qué pareja concreta juega,
         // así que solo evitamos pisar otra cancha (no hay pareja puntual que chequear todavía).
-        if (!isPlaceholder && (pairBusy.has(`${date}|${time}|${m.pairA}`) || pairBusy.has(`${date}|${time}|${m.pairB}`))) continue;
+        if (!isPlaceholder && participants(m).some((pid) => pairBusy.has(`${date}|${time}|${pid}`))) continue;
         let freeCourt = null;
         for (let c = 1; c <= courts; c++) {
           if (!courtBusy.has(`${date}|${time}|${c}`)) { freeCourt = c; break; }
@@ -1174,10 +1331,7 @@ function autoSchedule(tournament) {
     }
     if (placed) {
       courtBusy.add(`${placed.date}|${placed.time}|${placed.court}`);
-      if (!isPlaceholder) {
-        pairBusy.add(`${placed.date}|${placed.time}|${m.pairA}`);
-        pairBusy.add(`${placed.date}|${placed.time}|${m.pairB}`);
-      }
+      if (!isPlaceholder) participants(m).forEach((pid) => pairBusy.add(`${placed.date}|${placed.time}|${pid}`));
       if (m.stage === "r1") (groupR1Schedules[groupKey] = groupR1Schedules[groupKey] || []).push(placed);
       updated = withMatchSchedule(updated, m.categoryId, m.location, m.matchId, placed);
     }
@@ -1375,12 +1529,12 @@ function MatchStatusBadge({ status }) {
    games a favor/en contra y diferencia, super tie-breaks ganados, y puntos */
 const GROUP_COLORS = ["#9fe022", "#38bdf8", "#fb923c", "#e879f9", "#22d3ee", "#fbbf24", "#f87171", "#a78bfa"];
 
-function StandingsTable({ group, pairsById, format, accentColor = "#9fe022" }) {
+function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", highlightCount = 2 }) {
   const table = computeStandings(group, pairsById, format);
   return (
     <div className="rounded-lg border overflow-hidden" style={{ borderColor: accentColor + "40" }}>
       {table.map((row, i) => {
-        const qualifies = i < 2;
+        const qualifies = i < highlightCount;
         const ds = row.setsF - row.setsC;
         const dg = row.gamesF - row.gamesC;
         return (
@@ -1851,7 +2005,7 @@ function ScheduleAdminView({ tournament, update }) {
   const [notice, setNotice] = useState(null);
   const pairsById = useMemo(() => {
     const map = {};
-    tournament.categories.forEach((c) => c.pairs.forEach((p) => { map[p.id] = p; }));
+    tournament.categories.forEach((c) => Object.assign(map, categoryEntitiesById(c)));
     return map;
   }, [tournament.categories]);
 
@@ -2044,7 +2198,7 @@ function ScheduleAdminView({ tournament, update }) {
 function SchedulePublicView({ tournament }) {
   const pairsById = useMemo(() => {
     const map = {};
-    tournament.categories.forEach((c) => c.pairs.forEach((p) => { map[p.id] = p; }));
+    tournament.categories.forEach((c) => Object.assign(map, categoryEntitiesById(c)));
     return map;
   }, [tournament.categories]);
 
@@ -2434,6 +2588,78 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
 
 /* ---------- Vista pública: detalle de torneo ---------- */
 
+/* Súper 8: lista de todos los partidos agrupados por ronda y, debajo, la tabla de posiciones (se
+   recalcula sola con cada resultado). Con onSetScore/onWalkover muestra la carga de resultados
+   para el organizador; sin ellos es la vista de solo lectura para el público. */
+function Super8View({ category, format, onSetScore, onWalkover }) {
+  const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
+  const group = category.groups[0];
+  if (!group) return null;
+  const editable = !!onSetScore;
+  const individual = category.format === "super8_individual";
+  const standingsGroup = individual ? super8IndividualStandingsGroup(category, group) : group;
+  const rounds = [];
+  group.matches.forEach((m) => { (rounds[m.round - 1] = rounds[m.round - 1] || []).push(m); });
+
+  return (
+    <div>
+      <div className="space-y-5">
+        {rounds.map((matches, ri) => {
+          const color = GROUP_COLORS[ri % GROUP_COLORS.length];
+          return (
+            <div key={ri} className="rounded-xl p-4 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
+              <div className="mb-3"><SkewPill color={color}>Ronda {ri + 1}</SkewPill></div>
+              <div className="space-y-3">
+                {matches.map((m) => {
+                  const hasResult = matchIsPlayed(m);
+                  const w = hasResult ? matchWinnerId(m) : null;
+                  const winnerIsA = w == null ? null : w === m.pairA;
+                  return (
+                    <div key={m.id} className="flex items-start justify-between gap-3 text-sm flex-wrap" style={F.body}>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {w === m.pairA && <WinnerCheck />}
+                          <GroupPairName id={m.pairA} pairsById={pairsById} />
+                        </div>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {w === m.pairB && <WinnerCheck />}
+                          <GroupPairName id={m.pairB} pairsById={pairsById} />
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap mt-0.5">
+                          {hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>}
+                          <ScheduleLabel schedule={m.schedule} />
+                        </div>
+                      </div>
+                      {editable && (
+                        <div className="flex flex-col items-end gap-1">
+                          <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, side, value) => onSetScore(group.id, m.id, setIndex, side, value)} />
+                          <div className="flex gap-2 flex-wrap justify-end text-[10px]">
+                            {m.walkover ? (
+                              <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
+                            ) : (
+                              <>
+                                <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "lado 1"}</button>
+                                <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "lado 2"}</button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Tabla de posiciones</h3>
+      <StandingsTable group={standingsGroup} pairsById={pairsById} format={format} highlightCount={3} />
+      <StandingsLegend />
+    </div>
+  );
+}
+
 function CategoryGroupsPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
 
@@ -2606,8 +2832,23 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
               );
             })}
           </div>
-          {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
-          {category && view === "llaves" && <CategoryBracketPublicView category={category} />}
+          {category && isSuper8(category) ? (
+            view === "grupos" ? (
+              <section className="mt-6">
+                <p className="text-xs text-teal-500 mb-4" style={F.body}>{CATEGORY_FORMAT_LABEL[category.format]}</p>
+                {category.groups.length > 0
+                  ? <Super8View category={category} format={format} />
+                  : <p className="opacity-60 text-sm" style={F.body}>Todavía no se generaron los partidos.</p>}
+              </section>
+            ) : (
+              <p className="opacity-60 text-sm mt-6" style={F.body}>Esta categoría se juega en formato {CATEGORY_FORMAT_LABEL[category.format]}: no tiene llave final. Los partidos y la tabla de posiciones están en la pestaña Grupos.</p>
+            )
+          ) : (
+            <>
+              {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
+              {category && view === "llaves" && <CategoryBracketPublicView category={category} />}
+            </>
+          )}
         </>
       )}
     </div>
@@ -3643,6 +3884,91 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
   );
 }
 
+/* Pestaña "Partidos y posiciones" de una categoría Súper 8: genera el cuadro fijo de partidos
+   (numerando a los jugadores/parejas por orden de inscripción o por sorteo) y después muestra la
+   carga de resultados ronda por ronda con la tabla de posiciones debajo. */
+function Super8AdminPanel({ category, format, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover }) {
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const individual = category.format === "super8_individual";
+  const entryWord = individual ? "jugadores" : "parejas";
+  const group = category.groups[0];
+  const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
+  const anyResult = !!group && group.matches.some((m) => matchIsPlayed(m));
+
+  const generate = (shuffle) => {
+    const ids = category.pairs.map((p) => p.id);
+    if (shuffle) {
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+    }
+    const built = buildSuper8Group(category.format, ids);
+    if (!built) return;
+    // Igual que al cerrar los grupos: se dispara el armado automático de horarios del torneo
+    (onGroupsLocked || onUpdateCategory)({ ...category, groups: [built.group], teams: built.teams, bracket: null });
+  };
+
+  const reset = () => {
+    onUpdateCategory({ ...category, groups: [], teams: [] });
+    setConfirmingReset(false);
+  };
+
+  if (!group) {
+    const ready = category.pairs.length === SUPER8_SIZE;
+    return (
+      <div className="border border-lime-800 rounded-lg p-4" style={{ backgroundColor: "rgba(163,230,53,0.05)" }}>
+        <p className="text-sm font-semibold mb-1" style={F.body}>Generar partidos</p>
+        <p className="text-xs text-teal-400 mb-3" style={F.body}>
+          Se numera a los {entryWord} del 1 al {SUPER8_SIZE} y se arma el cuadro fijo de {individual ? 14 : 28} partidos en 7 rondas. Si ya cargaste fechas y canchas, los horarios se asignan solos.
+        </p>
+        {!ready && (
+          <p className="text-xs text-amber-400 mb-3" style={F.body}>
+            Faltan {entryWord}: hay {category.pairs.length} de {SUPER8_SIZE}. Cargalos en la pestaña anterior.
+          </p>
+        )}
+        <div className="flex gap-2 flex-wrap">
+          <button type="button" disabled={!ready} onClick={() => generate(false)} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
+            Numerar por orden de inscripción
+          </button>
+          <button type="button" disabled={!ready} onClick={() => generate(true)} className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400 disabled:opacity-40">
+            Numerar al azar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="border border-teal-800 rounded-lg p-4 mb-6">
+        <p className="text-xs text-teal-400 mb-2" style={F.body}>Numeración</p>
+        <ol className="flex flex-wrap gap-2 text-sm" style={F.body}>
+          {group.pairIds.map((pid, i) => (
+            <li key={pid} className="border border-teal-800 rounded px-2 py-1">
+              <span className="text-lime-400 font-semibold mr-1">{i + 1}.</span>{pairsById[pid]?.name || "—"}
+            </li>
+          ))}
+        </ol>
+        {!anyResult && (
+          <div className="mt-3 text-xs" style={F.body}>
+            {confirmingReset ? (
+              <span>
+                <span className="text-teal-300 mr-2">Se borran los partidos y sus horarios. ¿Confirmás?</span>
+                <button type="button" onClick={reset} className="text-red-400 font-semibold mr-2">Sí, reiniciar</button>
+                <button type="button" onClick={() => setConfirmingReset(false)} className="text-teal-400">Cancelar</button>
+              </span>
+            ) : (
+              <button type="button" onClick={() => setConfirmingReset(true)} className="text-red-400">Reiniciar partidos</button>
+            )}
+          </div>
+        )}
+      </div>
+      <Super8View category={category} format={format} onSetScore={onSetScore} onWalkover={onWalkover} />
+    </div>
+  );
+}
+
 function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked }) {
   const [tab, setTab] = useState("parejas");
   const [pairName, setPairName] = useState("");
@@ -3653,11 +3979,16 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [groupSelection, setGroupSelection] = useState([]);
   const [confirmingAutoGroups, setConfirmingAutoGroups] = useState(false);
   const [groupWarnings, setGroupWarnings] = useState([]);
-  const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
+  const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
   const assignedPairIds = useMemo(() => new Set(category.groups.flatMap((g) => g.pairIds)), [category.groups]);
+  const super8 = isSuper8(category);
+  const individual = category.format === "super8_individual";
+  const super8Generated = super8 && category.groups.length > 0;
 
   const addPair = () => {
     if (!pairName.trim()) return;
+    if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
+    if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
     const conflict = findPlayerCategoryConflict(pairName, tournament, category.id);
     if (conflict) { setPairError(`Uno de los jugadores ya está anotado en la categoría "${conflict}". Una pareja/jugador solo puede jugar una categoría por torneo.`); return; }
     setPairError("");
@@ -3802,10 +4133,21 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
   };
 
+  const categoryTabs = super8
+    ? [["parejas", individual ? "1. Jugadores" : "1. Parejas"], ["super8", "2. Partidos y posiciones"]]
+    : [["parejas", "1. Parejas"], ["grupos", "2. Grupos"], ["llave", "3. Llave final"]];
+
   return (
     <div>
+      {super8 && (
+        <p className="text-xs text-teal-400 mb-4" style={F.body}>
+          Formato <span className="text-lime-400 font-semibold">{CATEGORY_FORMAT_LABEL[category.format]}</span>: {individual
+            ? `${SUPER8_SIZE} jugadores sueltos. Cada uno juega una vez con cada otro como compañero y dos veces contra cada otro como rival.`
+            : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.
+        </p>
+      )}
       <div className="flex gap-2 mb-6 border-b border-teal-800">
-        {[["parejas", "1. Parejas"], ["grupos", "2. Grupos"], ["llave", "3. Llave final"]].map(([key, label]) => (
+        {categoryTabs.map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-lime-400 text-lime-400" : "text-teal-400"}`} style={F.body}>
             {label}
           </button>
@@ -3819,7 +4161,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               value={pairName}
               onChange={(e) => setPairName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
-              placeholder="Ej: Pérez / López"
+              placeholder={individual ? "Ej: Pérez" : "Ej: Pérez / López"}
               className="flex-1 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
             />
             <button type="button" onClick={addPair} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar</button>
@@ -3856,16 +4198,32 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       ) : (
                         <button type="button" onClick={() => startEditPair(p)} className="text-sm text-teal-300">Editar</button>
                       )}
-                      <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>
+                      {!super8Generated && <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>}
                     </div>
                   </div>
                   <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />
                 </li>
               );
             })}
-            {category.pairs.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay parejas en esta categoría.</p>}
+            {category.pairs.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay {individual ? "jugadores" : "parejas"} en esta categoría.</p>}
           </ul>
+          {super8 && (
+            <p className="text-xs text-teal-500 mt-3" style={F.body}>
+              {category.pairs.length} de {SUPER8_SIZE} {individual ? "jugadores anotados" : "parejas anotadas"}.
+            </p>
+          )}
         </div>
+      )}
+
+      {tab === "super8" && (
+        <Super8AdminPanel
+          category={category}
+          format={format}
+          onUpdateCategory={onUpdateCategory}
+          onGroupsLocked={onGroupsLocked}
+          onSetScore={setMatchSetScore}
+          onWalkover={setGroupWalkover}
+        />
       )}
 
       {tab === "grupos" && (
@@ -4204,7 +4562,13 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelete }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newFormat, setNewFormat] = useState("zonas");
   const [editingId, setEditingId] = useState(null);
+  const submitNew = () => {
+    if (!newName.trim()) return;
+    onAdd(newName.trim(), newFormat);
+    setNewName(""); setNewFormat("zonas"); setAdding(false);
+  };
   const [editName, setEditName] = useState("");
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
 
@@ -4262,19 +4626,27 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
             <input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { onAdd(newName.trim()); setNewName(""); setAdding(false); } }}
+              onKeyDown={(e) => { if (e.key === "Enter") submitNew(); }}
               placeholder="Ej: 4ta Caballeros"
               autoFocus
               className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
             />
+            <select
+              value={newFormat}
+              onChange={(e) => setNewFormat(e.target.value)}
+              className="px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+              title="Formato de la categoría"
+            >
+              {Object.entries(CATEGORY_FORMAT_LABEL).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
             <button
               type="button"
-              onClick={() => { if (newName.trim()) { onAdd(newName.trim()); setNewName(""); setAdding(false); } }}
+              onClick={submitNew}
               className="px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
             >
               Agregar
             </button>
-            <button type="button" onClick={() => { setAdding(false); setNewName(""); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
+            <button type="button" onClick={() => { setAdding(false); setNewName(""); setNewFormat("zonas"); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
           </span>
         ) : (
           <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded-full text-sm border border-dashed border-teal-700 text-teal-400 hover:border-lime-400 hover:text-lime-400" style={F.body}>
@@ -4296,8 +4668,8 @@ function AdminTournament({ tournament, update, onBack }) {
 
   const setCategories = (categories) => update({ ...tournament, categories });
 
-  const addCategory = (name) => {
-    const cat = { id: uid(), name, pairs: [], groups: [], bracket: null };
+  const addCategory = (name, format = "zonas") => {
+    const cat = { id: uid(), name, pairs: [], groups: [], bracket: null, ...(format !== "zonas" ? { format, teams: [] } : {}) };
     setCategories([...tournament.categories, cat]);
     setCategoryId(cat.id);
   };
@@ -4371,7 +4743,7 @@ function AdminTournament({ tournament, update, onBack }) {
           />
 
           {category ? (
-            <CategoryAdminView category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} />
+            <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} />
           ) : (
             <p className="opacity-60 text-sm" style={F.body}>Agregá al menos una categoría para empezar a cargar parejas.</p>
           )}
