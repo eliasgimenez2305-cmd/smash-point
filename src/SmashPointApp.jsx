@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import portadaUrl from "./assets/portada.jpg";
+import logoMarkUrl from "./assets/logo-mark.png";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -7,6 +9,9 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const STORAGE_KEY_TOURNAMENTS = "sp:tournaments";
 const STORAGE_KEY_ADS = "sp:ads";
 const STORAGE_KEY_CIRCUITS = "sp:circuits";
+// Foto de portada de cada organizador ({ [organizerId]: url }): se guarda aparte porque la tabla
+// organizers de Supabase solo tiene nombre y logo
+const STORAGE_KEY_ORGANIZER_COVERS = "sp:organizer_covers";
 
 /* ---------- Supabase (login y perfiles de organizador) ---------- */
 /* Usamos fetch directo a la API REST de Supabase (sin el SDK) para que
@@ -108,6 +113,96 @@ async function kvSet(key, value, accessToken) {
   if (!res.ok) throw new Error(`No se pudo guardar "${key}".`);
 }
 
+/* ---------- Inscripciones online (ver supabase/migrations/20260927_inscripciones.sql) ---------- */
+
+/* Llama a una función de Supabase. Sin accessToken va como público (anon). Si falla, el error trae
+   en .code el motivo que manda la función (ej: "cupo_completo"). */
+async function supabaseRpc(fn, params, accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(data?.message || "No se pudo completar la operación.");
+    err.code = data?.message;
+    throw err;
+  }
+  return data;
+}
+
+/* Inscripciones de los torneos del organizador logueado (la base solo le devuelve las suyas) */
+async function fetchInscripciones(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/inscripciones?select=*&order=created_at.desc`, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("No se pudieron cargar las inscripciones.");
+  return res.json();
+}
+
+const INSCRIPCION_ERRORES = {
+  inscripciones_cerradas: "Las inscripciones de este torneo están cerradas.",
+  categoria_invalida: "Elegí una categoría válida.",
+  cupo_completo: "El cupo de esa categoría ya está completo.",
+  datos_invalidos: "Revisá los nombres: tienen que tener entre 3 y 80 letras.",
+  telefono_invalido: "Revisá el WhatsApp: tiene que ser un número de Argentina con característica.",
+  duplicada: "Ya hay una inscripción con ese WhatsApp en esta categoría.",
+  no_autorizado: "No tenés permiso para esta inscripción.",
+  ya_resuelta: "Esta inscripción ya fue aceptada o rechazada.",
+  partidos_generados: "Los partidos de esa categoría ya están generados: no se pueden sumar inscriptos.",
+  torneo_no_encontrado: "No se encontró el torneo de esta inscripción.",
+};
+const inscripcionErrorText = (e) => INSCRIPCION_ERRORES[e?.code] || "No se pudo completar. Probá de nuevo en un rato.";
+
+/* WhatsApp argentino a formato internacional sin signos (549 + característica + número), el que usa
+   wa.me. Acepta cómo lo escribe la gente: con +54, con 9, con 0 adelante o con 15. Devuelve null si
+   no se puede armar un número válido. */
+function normalizeArPhone(input) {
+  let d = String(input || "").replace(/\D/g, "");
+  if (d.startsWith("549") && d.length === 13) return d;
+  if (d.startsWith("54")) d = d.slice(2);
+  if (d.startsWith("9") && d.length === 11) d = d.slice(1);
+  if (d.startsWith("0")) d = d.slice(1);
+  if (d.length === 12) {
+    for (const pos of [2, 3, 4]) {
+      if (d.slice(pos, pos + 2) === "15") { d = d.slice(0, pos) + d.slice(pos + 2); break; }
+    }
+  }
+  return d.length === 10 ? "549" + d : null;
+}
+
+function formatArPhone(normalized) {
+  return normalized ? `+54 9 ${normalized.slice(3)}` : "";
+}
+
+/* Cupo de una categoría (el Súper 8 es siempre de 8); null = sin límite */
+function categoryCupo(category) {
+  if (isSuper8(category)) return SUPER8_SIZE;
+  return Number.isInteger(category.cupo) && category.cupo > 0 ? category.cupo : null;
+}
+
+/* Un Súper 8 con los partidos ya generados no admite más inscriptos */
+function categoryAcceptsRegistrations(category) {
+  return !(isSuper8(category) && category.groups.length > 0);
+}
+
+/* Lugares libres: cuentan todas las parejas anotadas (a mano o aceptadas). null = sin límite */
+function categorySpotsLeft(category) {
+  const cupo = categoryCupo(category);
+  return cupo == null ? null : Math.max(0, cupo - category.pairs.length);
+}
+
+/* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
+   categorías llenas) o "cerrado" (no se muestra el botón) */
+function registrationStatus(t) {
+  if (!t.inscripcionesAbiertas || t.status === STATUS.FINALIZADO) return "cerrado";
+  const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
+  if (categories.length === 0) return "cerrado";
+  return categories.some((c) => categorySpotsLeft(c) !== 0) ? "abierto" : "completo";
+}
+
 /* Subida de imágenes (logos, publicidades, portadas de torneo) a Supabase Storage.
    El bucket "images" tiene que existir y ser público (ver instrucciones de configuración). */
 const IMAGES_BUCKET = "images";
@@ -144,6 +239,94 @@ const STATUS = {
 };
 
 const DEFAULT_MATCH_FORMAT = { setsToPlay: 3, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: true };
+
+/* ---------- Tipo de torneo ---------- */
+
+/* Cada torneo es de uno de tres tipos, que se elige al crearlo (y se puede cambiar después):
+   - Clásico: zonas + llave final, partidos por sets, con grilla de horarios.
+   - Súper 8: cada categoría es un cuadro fijo de 8 jugadores sueltos (Individual) u 8 parejas
+     (Por Parejas) que termina en tabla de posiciones. Un solo set a los games que elija el organizador.
+   - Americano: zonas + llave final en un solo día, con un set único a 7 o a 9 games. Usa la grilla
+     de horarios (canchas, horario de arranque y tiempo entre partidos se piden al crearlo).
+   El Súper 8 no usa la grilla de horarios: los partidos se juegan uno atrás del otro.
+   En los formatos de set único, si llegan a N-1 iguales se define con un tie break a 7 puntos con
+   diferencia de 2 y el set queda N a N-1 (7-6 jugando a 7, 9-8 jugando a 9). */
+const TOURNAMENT_TYPE_LABEL = { clasico: "Clásico", super8: "Súper 8", americano: "Americano" };
+const SUPER8_MODE_LABEL = { individual: "Individual", parejas: "Por Parejas" };
+const SUPER8_GAMES_OPTIONS = [4, 5, 6, 7, 8, 9];
+const AMERICANO_GAMES_OPTIONS = [7, 9];
+
+function singleSetMatchFormat(type, games) {
+  return { type, setsToPlay: 1, gamesPerSet: games, setTiebreak: true, finalSuperTiebreak: false };
+}
+
+function isSingleSetFormat(format) {
+  return format?.type === "americano" || format?.type === "super8";
+}
+
+/* Torneos creados antes de que existiera el tipo: son Clásicos, salvo los que ya tenían el
+   formato de partido Americano. */
+function tournamentType(t) {
+  return t.type || (t.matchFormat?.type === "americano" ? "americano" : "clasico");
+}
+
+function tournamentUsesSchedule(t) {
+  return tournamentType(t) !== "super8";
+}
+
+/* Configuración elegible del tipo de torneo: { type, super8Mode, games } */
+function tournamentConfig(t) {
+  const type = tournamentType(t);
+  return { type, super8Mode: type === "super8" ? t.super8Mode : null, games: isSingleSetFormat(t.matchFormat) ? t.matchFormat.gamesPerSet : null };
+}
+
+function tournamentConfigIsComplete(config) {
+  if (config.type === "super8") return !!config.super8Mode && SUPER8_GAMES_OPTIONS.includes(config.games);
+  if (config.type === "americano") return AMERICANO_GAMES_OPTIONS.includes(config.games);
+  return config.type === "clasico";
+}
+
+/* Formato de las categorías de un torneo según su tipo (ver CATEGORY_FORMAT_LABEL) */
+function categoryFormatForConfig(config) {
+  return config.type === "super8" ? `super8_${config.super8Mode}` : "zonas";
+}
+
+function newCategory(name, categoryFormat) {
+  return { id: uid(), name, pairs: [], groups: [], bracket: null, ...(categoryFormat !== "zonas" ? { format: categoryFormat, teams: [] } : {}) };
+}
+
+/* Aplica una configuración de tipo a un torneo. Si cambia el formato de las categorías (pasar a o
+   desde Súper 8, o de Individual a Por Parejas), las categorías se adaptan; eso solo se permite
+   mientras ninguna tenga partidos armados (ver tournamentConfigChangeBlocked). */
+function withTournamentConfig(t, config) {
+  const matchFormat = config.type === "clasico"
+    ? (isSingleSetFormat(t.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : t.matchFormat || { ...DEFAULT_MATCH_FORMAT })
+    : singleSetMatchFormat(config.type, config.games);
+  const prev = tournamentConfig(t);
+  const categoriesChange = prev.type !== config.type || prev.super8Mode !== config.super8Mode;
+  const categoryFormat = categoryFormatForConfig(config);
+  const categories = !categoriesChange ? t.categories : t.categories.map((c) => {
+    if ((c.format || "zonas") === categoryFormat) return c;
+    const { format, teams, ...rest } = c;
+    return categoryFormat === "zonas" ? rest : { ...rest, format: categoryFormat, teams: [] };
+  });
+  // Solo el Clásico suma para un circuito
+  const circuitId = config.type === "clasico" ? t.circuitId || null : null;
+  return { ...t, type: config.type, super8Mode: config.type === "super8" ? config.super8Mode : null, matchFormat, categories, circuitId };
+}
+
+/* Cambiar el formato de una categoría con partidos ya armados rompería esos partidos */
+function tournamentConfigChangeBlocked(t, config) {
+  const categoryFormat = categoryFormatForConfig(config);
+  return t.categories.some((c) => (c.format || "zonas") !== categoryFormat && (c.groups.length > 0 || c.bracket));
+}
+
+/* Un set único a N games está completo y bien cargado si el ganador llegó a N y el otro quedó
+   en N-1 o menos (N a N-1 solo se da ganando el tie break en N-1 iguales). */
+function singleSetIsValid(a, b, games) {
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  return hi === games && lo <= games - 1;
+}
 const WEEKDAY_LABEL = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
 
 function formatDateShort(dateStr) {
@@ -355,7 +538,7 @@ function buildSuper8Group(format, orderedIds) {
 function categoryEntitiesById(category) {
   const map = Object.fromEntries(category.pairs.map((p) => [p.id, p]));
   (category.teams || []).forEach((t) => {
-    map[t.id] = { id: t.id, name: t.playerIds.map((pid) => map[pid]?.name || "—").join(" / ") };
+    map[t.id] = { id: t.id, name: t.playerIds.map((pid) => map[pid]?.name || "—").join(" - ") };
   });
   return map;
 }
@@ -505,69 +688,86 @@ function computeStandings(group, pairsById, format) {
   });
 }
 
-/* Arma el orden de clasificados para la llave final a partir de los grupos, evitando que el
-   1° y 2° de un mismo grupo se crucen en la primera ronda, y dejando a los mejores clasificados
-   (por diferencia de games) pasar directo cuando la cantidad no cierra en potencia de dos.
+/* Cuántas parejas pasan de un grupo a la llave final: lo elige el organizador en cada grupo por
+   separado (g.qualifiersCount, por defecto 2), nunca más que las parejas que tiene el grupo. */
+function groupQualifiersCount(group) {
+  return Math.min(group.qualifiersCount || 2, group.pairIds.length);
+}
 
-   Cómo arma los cruces entre grupos:
-   - Si hay 2 o más grupos, se rota en cadena: el 2° del grupo 1 "viaja" a la llave del 1° del
-     grupo 2, el 2° del grupo 2 a la del 1° del grupo 3, ..., y el 2° del último grupo cierra el
-     círculo volviendo a la llave del 1° del grupo 1. Así ningún 1° se cruza con el 2° de su
-     propio grupo en primera ronda, sea cual sea la cantidad de grupos (par o impar).
-   - Si hay un solo grupo, no hay con quién rotar: se arma la llave con el orden normal de la tabla.
+/* Arma la primera ronda de la llave final a partir de los clasificados de todos los grupos, sea
+   cual sea la cantidad que pase de cada uno (el Grupo A puede clasificar 2, el B 3 y el C 1).
+   Recibe una entrada por clasificado { groupIndex, place, ... } y una función que ordena a los
+   del mismo puesto entre sí (mejor primero). Devuelve la lista de partidos de ronda 1 como pares
+   [entrada, entrada | null] (null = pasa directo, bye), ya en el orden de la llave.
 
-   Cómo resuelve cuando el número de clasificados no es potencia de dos:
-   - Se ordenan todas las parejas clasificadas por mérito (puntos, luego diferencia de sets, luego
-     diferencia de games, igual que el desempate de grupo) para decidir cuáles son "mejores
-     clasificados".
-   - Los mejores clasificados (empezando por los que más méritos tienen) pasan directo a la ronda
-     siguiente (bye), hasta que la cantidad de parejas que sí juegan la primera ronda complete un
-     número par que, sumado a los que ya tienen bye, cierre en una potencia de dos. Es el sistema
-     habitual en pádel: con byes, los mejor ubicados saltan la primera ronda. */
+   - Orden general: primero todos los 1°, después todos los 2°, los 3°, etc.; dentro de cada puesto
+     decide la función de orden (el mérito en la tabla, o el orden de los grupos si todavía no se
+     jugó nada).
+   - Si la cantidad no es potencia de dos, los mejor ubicados pasan directo a la ronda siguiente
+     (bye), como es habitual en pádel.
+   - El resto se cruza el mejor con el peor que quede, siempre de un grupo distinto cuando se puede:
+     así un 1° nunca se enfrenta en primera ronda con el 2° de su propio grupo.
+   - Los cruces se ubican en la llave por siembra, para que los dos mejores clasificados recién
+     puedan cruzarse en la final. */
+function seedKnockoutRound1(entries, compareSamePlace) {
+  const ranked = [...entries].sort((a, b) => a.place - b.place || compareSamePlace(a, b));
+  let size = 1;
+  while (size < ranked.length) size *= 2;
+  const byeCount = size - ranked.length;
+
+  const units = ranked.slice(0, byeCount).map((e) => [e, null]);
+  const pool = ranked.slice(byeCount);
+  while (pool.length > 0) {
+    const top = pool.shift();
+    if (pool.length === 0) { units.push([top, null]); break; }
+    let idx = pool.length - 1;
+    while (idx > 0 && pool[idx].groupIndex === top.groupIndex) idx--;
+    if (pool[idx].groupIndex === top.groupIndex) idx = pool.length - 1; // todos del mismo grupo: no queda otra
+    units.push([top, pool.splice(idx, 1)[0]]);
+  }
+
+  // Posiciones de siembra: con 4 cruces queda [1, 4, 2, 3], así el 1 y el 2 van a mitades opuestas
+  let order = [1];
+  while (order.length < units.length) {
+    const n = order.length * 2;
+    order = order.flatMap((s) => [s, n + 1 - s]);
+  }
+  const placed = order.map((s) => units[s - 1]);
+
+  // Segunda ronda: si un cruce puede terminar en dos parejas de la misma zona (por ejemplo el 1° A
+  // con bye contra el ganador de 2° A vs 2° B), se intercambia el de abajo con otro lugar de la
+  // llave que no genere el mismo problema, probando primero los de peor siembra.
+  const groupsOf = (unit) => unit.filter(Boolean).map((e) => e.groupIndex);
+  const clash = (u, v) => groupsOf(u).some((g) => groupsOf(v).includes(g));
+  for (let i = 0; i + 1 < placed.length; i += 2) {
+    if (!clash(placed[i], placed[i + 1])) continue;
+    for (let j = placed.length - 1; j > i + 1; j--) {
+      const partner = j % 2 === 0 ? j + 1 : j - 1;
+      if (clash(placed[i], placed[j]) || clash(placed[i + 1], placed[partner])) continue;
+      [placed[i + 1], placed[j]] = [placed[j], placed[i + 1]];
+      break;
+    }
+  }
+  return placed;
+}
+
+/* Arma el orden de clasificados para la llave final a partir de las tablas de los grupos,
+   tomando de cada grupo la cantidad de clasificados que eligió el organizador. Entre parejas del
+   mismo puesto de distintos grupos manda el mérito: puntos, diferencia de sets y diferencia de games. */
 function buildKnockoutSeeding(groups, pairsById, format) {
-  const groupTables = groups.map((g) => computeStandings(g, pairsById, format));
-
-  // Mérito general de una fila de tabla, para comparar clasificados de distintos grupos entre sí.
-  const meritKey = (row) => [row.pts, row.setsF - row.setsC, row.gamesF - row.gamesC];
+  const entries = groups.flatMap((g, gi) => {
+    const table = computeStandings(g, pairsById, format);
+    return table.slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
+  });
+  const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC];
   const compareMerit = (a, b) => {
     const ka = meritKey(a), kb = meritKey(b);
     for (let i = 0; i < ka.length; i++) {
       if (kb[i] !== ka[i]) return kb[i] - ka[i];
     }
-    return 0;
+    return a.groupIndex - b.groupIndex;
   };
-
-  const firsts = groupTables.map((t) => t[0]).filter(Boolean);
-  const seconds = groupTables.map((t) => t[1]).filter(Boolean);
-
-  // Rotación en cadena de los 2dos puestos, para que cada uno caiga en la llave del 1° de OTRO grupo.
-  let crossedSeconds = seconds;
-  if (seconds.length >= 2) {
-    crossedSeconds = seconds.map((_, i) => seconds[(i + 1) % seconds.length]);
-  }
-
-  // Armamos los "duelos" 1° vs 2° cruzado, en el orden de los grupos.
-  const duels = firsts.map((f1, i) => [f1, crossedSeconds[i]].filter(Boolean));
-  let seeded = duels.flat();
-
-  // Si algún grupo no tiene 2do (grupos de 1 pareja, caso raro) igual quedan sueltos los 1ros.
-  if (seeded.length === 0) seeded = [...firsts, ...seconds];
-
-  // Orden de mérito general, para decidir quién pasa directo cuando el número no cierra.
-  const byMerit = [...seeded].sort((a, b) => compareMerit(a, b));
-
-  let size = 1;
-  while (size < seeded.length) size *= 2;
-  const byeCount = size - seeded.length; // cuántas parejas pasan directo a la ronda siguiente
-
-  const byePairIds = byMerit.slice(0, byeCount).map((r) => r.pairId);
-  const playFirstRound = seeded.filter((r) => !byePairIds.includes(r.pairId));
-
-  return {
-    order: seeded.map((r) => r.pairId),
-    byePairIds,
-    playFirstRoundIds: playFirstRound.map((r) => r.pairId),
-  };
+  return seedKnockoutRound1(entries, compareMerit).map(([a, b]) => [a.row.pairId, b ? b.row.pairId : null]);
 }
 
 /* Llave eliminación directa a partir de una lista ordenada de pairIds (o null = BYE) */
@@ -591,47 +791,21 @@ function buildBracket(pairIds) {
 }
 
 /* Arma un esqueleto de llave SIN saber todavía qué pareja concreta clasifica a cada lugar:
-   solo usa la cantidad de grupos y cuántos clasificados por grupo definió el organizador
-   (g.qualifiersCount, default 2). Cada partido de ronda 1 lleva un label textual tipo
-   "1° Grupo A vs 2° Grupo B" (guardado en placeholderA/placeholderB) en vez de pairA/pairB reales.
-   Replica el mismo cruce en cadena de buildKnockoutSeeding (1° de un grupo vs 2° de OTRO grupo)
-   para que el esqueleto, cuando después se rellene con buildSeededBracket, coincida en tamaño
-   y en qué casillero corresponde a cada duelo. */
+   solo usa los grupos y cuántos clasificados definió el organizador en cada uno. Cada partido de
+   ronda 1 lleva un label textual tipo "1° Grupo A vs 2° Grupo B" (guardado en
+   placeholderA/placeholderB) en vez de pairA/pairB reales. Usa la misma siembra que la llave real
+   (seedKnockoutRound1), así los casilleros coinciden cuando después se completa con las parejas;
+   como todavía no hay tabla, entre los del mismo puesto ordena por grupo. Quiénes pasan directo
+   (bye) puede cambiar en la llave real, porque ahí manda el mérito. */
 function buildPlaceholderBracket(groups) {
   if (!groups || groups.length === 0) return null;
-  const firsts = groups.map((g) => ({ label: `1° ${g.name}`, groupIndex: groups.indexOf(g) }));
-  let seconds = groups
-    .map((g, gi) => (g.qualifiersCount || 2) >= 2 ? { label: `2° ${g.name}`, groupIndex: gi } : null)
-    .filter(Boolean);
-  const extra = []; // clasificados 3°, 4°, etc. si algún grupo define más de 2
-  groups.forEach((g, gi) => {
-    const q = g.qualifiersCount || 2;
-    for (let place = 3; place <= q; place++) {
-      extra.push({ label: `${place}° ${g.name}`, groupIndex: gi });
-    }
-  });
+  const entries = groups.flatMap((g, gi) =>
+    Array.from({ length: groupQualifiersCount(g) }, (_, i) => ({ groupIndex: gi, place: i + 1, label: `${i + 1}° ${g.name}` })));
+  if (entries.length < 2) return null;
 
-  let crossedSeconds = seconds;
-  if (seconds.length >= 2) {
-    crossedSeconds = seconds.map((_, i) => seconds[(i + 1) % seconds.length]);
-  }
-
-  const duels = firsts.map((f1, i) => [f1, crossedSeconds[i]].filter(Boolean));
-  let seeded = duels.flat();
-  if (seeded.length === 0) seeded = [...firsts, ...seconds];
-  seeded = [...seeded, ...extra];
-
-  if (seeded.length < 2) return null;
-
-  let size = 1;
-  while (size < seeded.length) size *= 2;
-  const slots = [...seeded];
-  while (slots.length < size) slots.push(null); // huecos = bye, todavía sin saber quién pasa directo
-
-  const round1 = [];
-  for (let i = 0; i < slots.length; i += 2) {
-    round1.push({ id: uid(), pairA: null, pairB: null, placeholderA: slots[i]?.label || null, placeholderB: slots[i + 1]?.label || null, sets: [] });
-  }
+  const round1 = seedKnockoutRound1(entries, (a, b) => a.groupIndex - b.groupIndex).map(([a, b]) => (
+    { id: uid(), pairA: null, pairB: null, placeholderA: a.label, placeholderB: b ? b.label : null, sets: [] }
+  ));
   const rounds = [round1];
   let count = round1.length;
   while (count > 1) {
@@ -641,16 +815,10 @@ function buildPlaceholderBracket(groups) {
   return rounds;
 }
 
-/* Como buildBracket, pero a partir del resultado de buildKnockoutSeeding: coloca en la ronda 1
-   primero los duelos reales entre parejas que juegan, y después las parejas con bye emparejadas
-   con un lugar vacío (pasan solas a la ronda siguiente sin jugar la ronda 1). */
-function buildSeededBracket(seeding) {
-  const { order, byePairIds } = seeding;
-  const byeSet = new Set(byePairIds);
-  const playing = order.filter((id) => !byeSet.has(id));
-  const slots = [...playing];
-  byePairIds.forEach((id) => { slots.push(id); slots.push(null); });
-  return buildBracket(slots);
+/* Como buildBracket, pero a partir de los cruces de ronda 1 que arma buildKnockoutSeeding (las
+   parejas con bye van contra un lugar vacío y pasan solas a la ronda siguiente). */
+function buildSeededBracket(round1Pairs) {
+  return buildBracket(round1Pairs.flat());
 }
 
 function winnerOf(m) {
@@ -714,6 +882,11 @@ function propagateBracket(rounds) {
 
 function formatSummary(format) {
   const f = format || DEFAULT_MATCH_FORMAT;
+  if (isSingleSetFormat(f)) {
+    const tie = f.gamesPerSet - 1;
+    const set = f.type === "americano" ? `set único a ${f.gamesPerSet} games, sin ventaja` : `un solo set a ${f.gamesPerSet} games`;
+    return `${set} · en ${tie}-${tie} tie break a 7 puntos (diferencia de 2)`;
+  }
   const parts = [
     f.setsToPlay === 2 ? "2 sets directos" : "Al mejor de 3 sets",
     `${f.gamesPerSet} games por set`,
@@ -816,6 +989,53 @@ function withMatchSchedule(tournament, categoryId, location, matchId, schedule) 
   };
 }
 
+/* Cambia el resultado (sets o WO) de un partido puntual y propaga lo que dependa de él: los cruces
+   de ganadores/perdedores en un grupo de 4, o las rondas siguientes de la llave. */
+function withMatchResult(tournament, categoryId, location, matchId, change) {
+  return {
+    ...tournament,
+    categories: tournament.categories.map((c) => {
+      if (c.id !== categoryId) return c;
+      if (location.type === "group") {
+        return {
+          ...c,
+          groups: c.groups.map((g) => {
+            if (g.id !== location.groupId) return g;
+            const matches = g.matches.map((m) => (m.id === matchId ? change(m) : m));
+            return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches) : matches };
+          }),
+        };
+      }
+      const rounds = c.bracket.map((round, ri) => (ri !== location.roundIndex ? round : round.map((m) => (m.id === matchId ? change(m) : m))));
+      return { ...c, bracket: propagateBracket(rounds) };
+    }),
+  };
+}
+
+/* Rearma la grilla desde cero: saca el horario a todos los partidos que todavía no se jugaron ni
+   están en curso, y los vuelve a ubicar con las canchas, el horario y la duración actuales (primero
+   los de grupos y después las llaves). Sirve cuando cambia el horario de arranque, la cantidad de
+   canchas o el tiempo entre partidos con los horarios ya generados. */
+function rescheduleTournament(tournament) {
+  const keep = (m) => matchIsPlayed(m) || m.liveStatus === "en_curso";
+  const clear = (m) => (m.schedule && !keep(m) ? { ...m, schedule: null } : m);
+  let next = {
+    ...tournament,
+    categories: tournament.categories.map((c) => ({
+      ...c,
+      groups: (c.groups || []).map((g) => ({ ...g, matches: g.matches.map(clear) })),
+      bracket: c.bracket ? c.bracket.map((round) => round.map(clear)) : c.bracket,
+    })),
+  };
+  next = autoSchedule(next);
+  next.categories.forEach((c) => {
+    if (!c.bracket) return;
+    const scheduled = autoScheduleBracket(next, c);
+    next = { ...next, categories: next.categories.map((x) => (x.id === c.id ? scheduled : x)) };
+  });
+  return next;
+}
+
 /* Marca/quita el estado "en curso" a mano en un partido puntual (se usa mientras no tenga resultado cargado) */
 function withMatchLiveStatus(tournament, categoryId, location, matchId, liveStatus) {
   return {
@@ -882,7 +1102,7 @@ function autoScheduleBracket(tournament, category) {
   const duration = tournament.matchDurationMinutes || 90;
   const courts = tournament.courtsCount || 4;
   const dates = tournament.playDates || [];
-  if (dates.length === 0 || !category.bracket) return category;
+  if (!tournamentUsesSchedule(tournament) || dates.length === 0 || !category.bracket) return category;
 
   // Cada fecha del torneo ya trae su propio rango horario
   const slots = [];
@@ -929,6 +1149,25 @@ function autoScheduleBracket(tournament, category) {
   });
 
   return { ...category, bracket: rounds };
+}
+
+/* Horarios de arranque de la grilla para un día de juego, según la duración de cada partido */
+function dayTimeSlots(dateInfo, duration) {
+  const times = [];
+  for (let t = timeToMinutes(dateInfo.from); t + duration <= timeToMinutes(dateInfo.to); t += duration) times.push(minutesToTime(t));
+  return times;
+}
+
+/* Orden cronológico de partidos con horario: fecha, hora y cancha */
+function compareBySchedule(a, b) {
+  if (a.schedule.date !== b.schedule.date) return a.schedule.date < b.schedule.date ? -1 : 1;
+  if (a.schedule.time !== b.schedule.time) return a.schedule.time < b.schedule.time ? -1 : 1;
+  return a.schedule.court - b.schedule.court;
+}
+
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 /* Partidos ya ubicados (de cualquier categoría) en una fecha/cancha puntual, excluyendo opcionalmente
@@ -1251,6 +1490,7 @@ function computeCircuitStandings(circuit, tournaments) {
 /* Arma la grilla de forma automática: solo completa partidos que todavía no tengan horario asignado,
    respetando disponibilidad de parejas, sin repetir cancha ni hacer jugar a una pareja dos veces a la vez */
 function autoSchedule(tournament) {
+  if (!tournamentUsesSchedule(tournament)) return tournament; // El Súper 8 no tiene grilla
   const courts = tournament.courtsCount || 4;
   const duration = tournament.matchDurationMinutes || 90;
   const dates = (tournament.playDates || []).map((d) => d.date);
@@ -1357,90 +1597,315 @@ function useBrandFonts() {
 const F = { display: { fontFamily: "'Archivo Black', sans-serif" }, body: { fontFamily: "'Work Sans', sans-serif" } };
 
 /* Colores de marca, tomados del logo */
-const BRAND = { bgStart: "#14181f", bgEnd: "#1b2027", lime: "#9fe022", limeText: "#14181f", ink: "#f2f5f8" };
+const BRAND = { bgStart: "#14181f", bgEnd: "#1b2027", lime: "#9fe022", limeText: "#14181f", ink: "#f2f5f8", cyan: "#22d3ee", logoLime: "#c1ef26" };
+
+/* Fondo general: azul petróleo muy oscuro con un brillo suave arriba */
+const APP_BACKGROUND = "radial-gradient(120% 60% at 50% 0%, #0f2f3a 0%, #0b1c24 45%, #081218 100%)";
+
+/* Borde de neón con resplandor, para tarjetas y botones destacados */
+function neonStyle(color, strong = false) {
+  return {
+    border: `1.5px solid ${color}${strong ? "" : "cc"}`,
+    boxShadow: `0 0 ${strong ? 22 : 12}px ${color}${strong ? "80" : "4d"}, inset 0 0 18px ${color}14`,
+  };
+}
+
+/* Fondo de cancha genérico (sin foto): vidrio oscuro con líneas de luz, para cuando el organizador
+   todavía no subió su foto de portada */
+const COURT_FALLBACK_BACKGROUND = [
+  "linear-gradient(115deg, transparent 0 38%, rgba(159,224,34,0.18) 38.5%, transparent 40%)",
+  "repeating-linear-gradient(90deg, rgba(148,163,184,0.07) 0 1px, transparent 1px 22px)",
+  "repeating-linear-gradient(0deg, rgba(148,163,184,0.07) 0 1px, transparent 1px 22px)",
+  "radial-gradient(80% 70% at 50% 30%, #12313b 0%, #0a1a21 100%)",
+].join(", ");
 
 /* ---------- Componentes chicos ---------- */
 
-/* Isotipo "S" del logo. size chico para navbars, más grande con wordmark para pantallas de login/landing */
-
+/* Logo: la "S" con el trazo de la pelota (imagen con fondo transparente), del alto indicado. Con
+   withWordmark suma "SMASH POINT / EVENTOS DE PADEL" escrito como texto, para que se vea nítido
+   en cualquier tamaño. */
 function Logo({ size = 40, withWordmark = false }) {
-  const mark = (
-    <svg width={size} height={size} viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="sp-bg" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor={BRAND.bgStart} />
-          <stop offset="100%" stopColor={BRAND.bgEnd} />
-        </linearGradient>
-      </defs>
-      <rect x="0" y="0" width="600" height="600" rx="80" fill="url(#sp-bg)" />
-      <g transform="translate(300,295) scale(0.55) translate(-312,-290)">
-        <path
-          d="M 400 160 L 400 215 L 275 215 C 255 215 245 225 245 245 C 245 263 255 273 275 273 L 355 273 C 405 273 435 300 435 345 C 435 392 405 420 355 420 L 210 420 L 210 365 L 345 365 C 365 365 375 355 375 337 C 375 319 365 309 345 309 L 275 309 C 220 309 190 282 190 240 C 190 195 222 160 270 160 Z"
-          fill={BRAND.lime}
-        />
-        <circle cx="322" cy="243" r="30" fill={BRAND.bgStart} />
-        <path d="M 302 227 Q 322 243 302 259" fill="none" stroke={BRAND.lime} strokeWidth="3" opacity="0.8" />
-        <path d="M 342 227 Q 322 243 342 259" fill="none" stroke={BRAND.lime} strokeWidth="3" opacity="0.8" />
-      </g>
-    </svg>
-  );
+  const mark = <img src={logoMarkUrl} alt="Smash Point" style={{ height: size, width: "auto" }} className="shrink-0" />;
   if (!withWordmark) return mark;
   return (
     <div className="flex flex-col items-center">
       {mark}
-      <span className="mt-2 text-lg" style={{ ...F.display, color: BRAND.ink, letterSpacing: "1px" }}>SMASH POINT</span>
-      <span className="text-[11px]" style={{ ...F.body, color: BRAND.lime, letterSpacing: "3px" }}>EVENTOS DE PADEL</span>
+      <span className="mt-2 text-2xl" style={{ ...F.display, color: BRAND.logoLime, letterSpacing: "1px" }}>SMASH POINT</span>
+      <span className="text-[11px]" style={{ ...F.body, color: BRAND.logoLime, letterSpacing: "4px" }}>EVENTOS DE PADEL</span>
     </div>
   );
 }
 
-/* Banner publicitario público: rota entre los anuncios activos. No renderiza nada si no hay anuncios. */
-function AdBanner({ ads }) {
-  const PAGE_SIZE = 4;
+/* Publicidad, igual en toda la app: una cuadrícula de 4 anuncios (2×2 en el celular, 4 en fila en
+   la compu) que va rotando de a 4 cada 6 segundos. Los puntitos muestran la tanda actual y se
+   pueden tocar para pasar a otra. No se muestra nada si no hay anuncios activos. */
+const ADS_PAGE_SIZE = 4;
+
+function AdBanner({ ads, className = "" }) {
   const active = (ads || []).filter((a) => a.active);
   const pages = [];
-  for (let i = 0; i < active.length; i += PAGE_SIZE) pages.push(active.slice(i, i + PAGE_SIZE));
+  for (let i = 0; i < active.length; i += ADS_PAGE_SIZE) pages.push(active.slice(i, i + ADS_PAGE_SIZE));
   const [page, setPage] = useState(0);
 
   useEffect(() => {
     if (pages.length < 2) return;
     const id = setInterval(() => setPage((p) => (p + 1) % pages.length), 6000);
     return () => clearInterval(id);
-  }, [pages.length]);
+  }, [pages.length, page]); // al tocar un puntito se reinicia la cuenta
 
   if (active.length === 0) return null;
-  const current = pages[page % pages.length] || [];
+  const current = page % pages.length;
 
   return (
-    <div className="mb-6">
-      <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
-        {current.map((ad) => (
-          <a
-            key={ad.id}
-            href={ad.linkUrl || "#"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block relative rounded-lg overflow-hidden border border-teal-800"
-          >
-            <img src={ad.imageUrl} alt={ad.name || "Publicidad"} className="w-full h-24 sm:h-28 object-cover" />
-            <span className="absolute top-1 right-1 text-[9px] px-1.5 py-0.5 rounded" style={{ backgroundColor: "rgba(20,24,31,0.8)", color: "#94a3b8" }}>
-              Publicidad
-            </span>
-          </a>
-        ))}
+    <section className={className} aria-label="Publicidad">
+      <div key={current} className="grid gap-3 grid-cols-2 sm:grid-cols-4 sp-fade-in">
+        {pages[current].map((ad, i) => {
+          const color = (Math.floor(i / 2) + i) % 2 === 0 ? BRAND.lime : BRAND.cyan;
+          return (
+            <a
+              key={ad.id}
+              href={ad.linkUrl || "#"}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block relative rounded-2xl overflow-hidden"
+              style={neonStyle(color)}
+            >
+              <img src={ad.imageUrl} alt={ad.name || "Publicidad"} className="w-full aspect-[4/3] object-cover" />
+              <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full" style={{ backgroundColor: "rgba(8,18,24,0.8)", color: "#cbd5e1", ...F.body }}>Publicidad</span>
+            </a>
+          );
+        })}
       </div>
       {pages.length > 1 && (
-        <div className="flex gap-1 justify-center mt-2">
+        <div className="flex gap-2 justify-center mt-3">
           {pages.map((_, i) => (
-            <span
+            <button
               key={i}
-              className="w-1.5 h-1.5 rounded-full"
-              style={{ backgroundColor: i === page ? BRAND.lime : "#334155" }}
+              type="button"
+              onClick={() => setPage(i)}
+              aria-label={`Publicidades ${i + 1} de ${pages.length}`}
+              className="w-2.5 h-2.5 rounded-full transition"
+              style={{ backgroundColor: i === current ? BRAND.lime : "#1e3a45" }}
             />
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+/* Logo del organizador en un círculo (o su inicial si no subió logo) */
+function OrganizerAvatar({ organizer, size = 48, color = BRAND.cyan }) {
+  const style = { width: size, height: size, ...neonStyle(color), backgroundColor: "#081218" };
+  if (organizer?.logoUrl) return <img src={organizer.logoUrl} alt={organizer.name} className="rounded-full object-cover shrink-0" style={style} />;
+  return (
+    <span className="rounded-full flex items-center justify-center shrink-0" style={{ ...style, ...F.display, color, fontSize: size * 0.4 }}>
+      {(organizer?.name || "?").trim().charAt(0).toUpperCase()}
+    </span>
+  );
+}
+
+/* Formulario público de inscripción, en una hoja que sube desde abajo (en la compu, centrada).
+   Sin cuenta: se guarda como "pendiente" y el organizador la acepta o rechaza desde su panel.
+   Trae un campo trampa (honeypot) oculto para frenar bots y el botón se bloquea mientras envía. */
+function RegistrationSheet({ tournament, organizer, onClose }) {
+  const categories = tournament.categories.filter(categoryAcceptsRegistrations);
+  const [categoryId, setCategoryId] = useState(categories.length === 1 ? categories[0].id : "");
+  const [player1, setPlayer1] = useState("");
+  const [player2, setPlayer2] = useState("");
+  const [phone, setPhone] = useState("");
+  const [website, setWebsite] = useState(""); // honeypot: una persona nunca lo ve ni lo completa
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape" && !sending) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, sending]);
+
+  const category = categories.find((c) => c.id === categoryId);
+  const individual = category?.format === "super8_individual";
+  const full = category ? categorySpotsLeft(category) === 0 : false;
+  const normalizedPhone = normalizeArPhone(phone);
+  const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
+  const ready = category && !full && validName(player1) && (individual || validName(player2)) && normalizedPhone;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!ready || sending) return;
+    setSending(true);
+    setError("");
+    try {
+      await supabaseRpc("crear_inscripcion", {
+        p_torneo_id: tournament.id,
+        p_categoria_id: category.id,
+        p_jugador1: player1.trim(),
+        p_jugador2: individual ? null : player2.trim(),
+        p_telefono: normalizedPhone,
+        p_honeypot: website,
+      });
+      setDone(true);
+    } catch (err) {
+      setError(inscripcionErrorText(err));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const input = "w-full px-3 py-3 rounded-lg border outline-none text-base focus:border-lime-400";
+  const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const label = "block text-xs text-teal-300 mb-1";
+  const spotsText = (c) => {
+    const left = categorySpotsLeft(c);
+    return left == null ? "" : left === 0 ? " (completo)" : ` (quedan ${left})`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" style={{ backgroundColor: "rgba(0,0,0,0.7)" }} onClick={() => { if (!sending) onClose(); }}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Inscripción a ${tournament.name}`}
+        className="w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl px-5 pt-4 sm:p-6"
+        style={{ backgroundColor: "#0b1c24", color: "#e2e8f0", ...neonStyle(BRAND.cyan), paddingBottom: "calc(env(safe-area-inset-bottom) + 1.25rem)", ...F.body }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="w-10 h-1 rounded-full mx-auto mb-4 sm:hidden" style={{ backgroundColor: "#1e3a45" }} />
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-3">
+            <Logo size={40} />
+            <span className="text-teal-600 text-lg">×</span>
+            <OrganizerAvatar organizer={organizer} size={44} />
+          </div>
+          <button type="button" onClick={onClose} disabled={sending} className="text-teal-400 hover:text-lime-400 text-xl leading-none p-1" aria-label="Cerrar">✕</button>
+        </div>
+
+        <p className="text-xs text-teal-400 mb-0.5">{organizer?.name || "Organizador"}</p>
+        <h2 className="text-xl mb-1" style={F.display}>{tournament.name.toUpperCase()}</h2>
+        <div className="flex items-center gap-2 flex-wrap mb-5">
+          <TournamentTypeTag tournament={tournament} />
+          <span className="text-xs text-teal-300">{new Date(tournament.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long" })}</span>
+        </div>
+
+        {done ? (
+          <div className="text-center py-4">
+            <div className="w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl" style={{ ...neonStyle(BRAND.lime, true), color: BRAND.lime }}>✓</div>
+            <p className="text-base font-semibold mb-1">¡Listo!</p>
+            <p className="text-sm text-teal-200 mb-5">Tu inscripción está pendiente de confirmación del organizador.</p>
+            <button type="button" onClick={onClose} className="w-full py-3 rounded-full font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Listo</button>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="space-y-4" noValidate>
+            {categories.length > 1 ? (
+              <div>
+                <label className={label} htmlFor="insc-cat">Categoría</label>
+                <select id="insc-cat" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={input} style={inputStyle} required>
+                  <option value="">Elegí la categoría…</option>
+                  {categories.map((c) => <option key={c.id} value={c.id} disabled={categorySpotsLeft(c) === 0}>{c.name}{spotsText(c)}</option>)}
+                </select>
+              </div>
+            ) : category && (
+              <p className="text-sm">Categoría: <span className="font-semibold text-lime-400">{category.name}</span><span className="text-teal-400">{spotsText(category)}</span></p>
+            )}
+
+            <div>
+              <label className={label} htmlFor="insc-j1">{individual ? "Nombre y apellido" : "Jugador 1 · nombre y apellido"}</label>
+              <input id="insc-j1" value={player1} onChange={(e) => setPlayer1(e.target.value)} autoComplete="name" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Juan Pérez" />
+            </div>
+            {!individual && (
+              <div>
+                <label className={label} htmlFor="insc-j2">Jugador 2 · nombre y apellido</label>
+                <input id="insc-j2" value={player2} onChange={(e) => setPlayer2(e.target.value)} autoComplete="off" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Martín López" />
+              </div>
+            )}
+            <div>
+              <label className={label} htmlFor="insc-tel">WhatsApp</label>
+              <input id="insc-tel" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={input} style={inputStyle} placeholder="Ej: 3446 123456" />
+              <p className="text-[11px] mt-1 text-teal-500">
+                {phone && !normalizedPhone ? <span className="text-amber-400">Con característica, sin el 0 ni el 15. Ej: 11 2345 6789</span> : normalizedPhone ? `Te van a escribir al ${formatArPhone(normalizedPhone)}` : "Con característica, sin el 0 ni el 15."}
+              </p>
+            </div>
+
+            {/* Honeypot: fuera de pantalla y fuera del orden de tabulación */}
+            <div aria-hidden="true" style={{ position: "absolute", left: "-10000px", width: 1, height: 1, overflow: "hidden" }}>
+              <label htmlFor="insc-web">No completar</label>
+              <input id="insc-web" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={(e) => setWebsite(e.target.value)} />
+            </div>
+
+            {((player1 && !validName(player1)) || (!individual && player2 && !validName(player2))) && (
+              <p className="text-sm text-amber-400">Poné nombre y apellido de {individual ? "quien se inscribe" : "cada jugador"}.</p>
+            )}
+            {full && <p className="text-sm text-amber-400">El cupo de esta categoría ya está completo.</p>}
+            {error && <p className="text-sm text-red-400" role="alert">{error}</p>}
+
+            <button type="submit" disabled={!ready || sending} className="w-full py-3.5 rounded-full font-semibold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+              {sending ? "Enviando…" : "Enviar inscripción"}
+            </button>
+            <p className="text-[11px] text-teal-600 text-center">Tu WhatsApp solo lo ve el organizador del torneo.</p>
+          </form>
+        )}
+      </div>
     </div>
+  );
+}
+
+/* Botón "Inscribirme" según el estado de las inscripciones del torneo (no se muestra si están cerradas) */
+function RegisterButton({ tournament, onRegister, className = "", full = false }) {
+  const status = registrationStatus(tournament);
+  if (status === "cerrado") return null;
+  const complete = status === "completo";
+  return (
+    <button
+      type="button"
+      disabled={complete}
+      onClick={(e) => { e.stopPropagation(); onRegister(tournament); }}
+      className={`${full ? "w-full" : ""} px-4 py-2.5 rounded-full text-sm font-semibold transition disabled:opacity-60 ${className}`}
+      style={complete ? { ...F.body, border: "1px solid #475569", color: "#94a3b8" } : { ...F.body, backgroundColor: BRAND.lime, color: "#14181f", boxShadow: `0 0 14px ${BRAND.lime}55` }}
+    >
+      {complete ? "Cupo completo" : "Inscribirme"}
+    </button>
+  );
+}
+
+function OpenRegistrationsBadge({ tournament }) {
+  if (registrationStatus(tournament) !== "abierto") return null;
+  return (
+    <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wide" style={{ ...F.body, color: BRAND.lime, border: `1px solid ${BRAND.lime}80`, backgroundColor: BRAND.lime + "1a" }}>
+      ● Inscripciones abiertas
+    </span>
+  );
+}
+
+/* Franja del inicio con los torneos que tienen inscripciones abiertas (no se muestra si no hay) */
+function OpenRegistrationsStrip({ tournaments, organizers, onRegister }) {
+  const open = tournaments.filter((t) => registrationStatus(t) !== "cerrado").sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (open.length === 0) return null;
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" aria-labelledby="insc-abiertas">
+      <h2 id="insc-abiertas" className="text-sm uppercase tracking-wide mb-3 flex items-center gap-2" style={{ ...F.display, color: BRAND.lime }}>
+        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND.lime, boxShadow: `0 0 8px ${BRAND.lime}` }} /> Inscripciones abiertas
+      </h2>
+      <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1" style={{ scrollbarWidth: "none" }}>
+        {open.map((t, i) => {
+          const organizer = organizers.find((o) => o.id === t.organizerId);
+          const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
+          return (
+            <div key={t.id} className="snap-start shrink-0 w-[85%] sm:w-[48%] lg:w-[32%] rounded-2xl p-4 flex gap-3 items-center" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.75)" }}>
+              <OrganizerAvatar organizer={organizer} size={52} color={color} />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold truncate" style={{ ...F.body, color: BRAND.ink }}>{t.name}</p>
+                <p className="text-xs text-teal-300 truncate" style={F.body}>{organizer?.name || "Organizador"}</p>
+                <p className="text-xs text-teal-400" style={F.body}>📅 {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { weekday: "short", day: "2-digit", month: "short" })}</p>
+                <div className="mt-1"><TournamentTypeTag tournament={t} /></div>
+              </div>
+              <RegisterButton tournament={t} onRegister={onRegister} className="shrink-0" />
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -1621,109 +2086,536 @@ function groupMatchStageLabel(group, match) {
 function MatchSetsEditor({ sets, format, onSetScore }) {
   const total = format?.setsToPlay ?? DEFAULT_MATCH_FORMAT.setsToPlay;
   const rows = Array.from({ length: total }, (_, i) => (sets && sets[i]) || { a: null, b: null });
+  // En los formatos de set único (Americano, Súper 8) se avisa si el set cargado no puede ser un
+  // resultado final, y se marca cuando se definió en tie break
+  const singleSet = isSingleSetFormat(format);
+  const { a: setA, b: setB } = rows[0];
+  const singleSetLoaded = singleSet && setA != null && setB != null;
+  const singleSetInvalid = singleSetLoaded && !singleSetIsValid(setA, setB, format.gamesPerSet);
+  const tieAt = format?.gamesPerSet - 1;
+  const singleSetNote = !singleSetLoaded ? null
+    : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}).`
+    : Math.min(setA, setB) === tieAt ? "Definido en tie break" : null;
   return (
-    <div className="flex flex-wrap gap-2">
-      {rows.map((s, i) => {
-        const isTiebreak = format?.finalSuperTiebreak && i === total - 1;
-        return (
-          <div key={i} className="flex flex-col items-center">
-            <span className="text-[10px] text-teal-500 mb-0.5" style={F.body}>
-              {isTiebreak ? "STB a 10" : `Set ${i + 1}`}
-            </span>
-            <div className="flex items-center gap-1">
-              <input
-                type="number" min="0" max={isTiebreak ? undefined : 9}
-                maxLength={isTiebreak ? 2 : 1}
-                className="w-11 px-1 py-1 rounded border text-center text-sm"
-                style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                value={s.a ?? ""}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  const limit = isTiebreak ? 2 : 1;
-                  if (raw.length > limit) return;
-                  onSetScore(i, "a", raw === "" ? null : Number(raw));
-                }}
-              />
-              <span className="text-xs text-teal-500">-</span>
-              <input
-                type="number" min="0" max={isTiebreak ? undefined : 9}
-                maxLength={isTiebreak ? 2 : 1}
-                className="w-11 px-1 py-1 rounded border text-center text-sm"
-                style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                value={s.b ?? ""}
-                onChange={(e) => {
-                  const raw = e.target.value;
-                  const limit = isTiebreak ? 2 : 1;
-                  if (raw.length > limit) return;
-                  onSetScore(i, "b", raw === "" ? null : Number(raw));
-                }}
-              />
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex flex-wrap gap-2">
+        {rows.map((s, i) => {
+          const isTiebreak = format?.finalSuperTiebreak && i === total - 1;
+          return (
+            <div key={i} className="flex flex-col items-center">
+              <span className="text-[10px] text-teal-500 mb-0.5" style={F.body}>
+                {isTiebreak ? "STB a 10" : singleSet ? `Set a ${format.gamesPerSet}` : `Set ${i + 1}`}
+              </span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number" inputMode="numeric" pattern="[0-9]*" min="0" max={isTiebreak ? undefined : 9}
+                  maxLength={isTiebreak ? 2 : 1}
+                  className="w-12 h-10 px-1 rounded border text-center text-base"
+                  style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                  value={s.a ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const limit = isTiebreak ? 2 : 1;
+                    if (raw.length > limit) return;
+                    onSetScore(i, "a", raw === "" ? null : Number(raw));
+                  }}
+                />
+                <span className="text-xs text-teal-500">-</span>
+                <input
+                  type="number" inputMode="numeric" pattern="[0-9]*" min="0" max={isTiebreak ? undefined : 9}
+                  maxLength={isTiebreak ? 2 : 1}
+                  className="w-12 h-10 px-1 rounded border text-center text-base"
+                  style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                  value={s.b ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const limit = isTiebreak ? 2 : 1;
+                    if (raw.length > limit) return;
+                    onSetScore(i, "b", raw === "" ? null : Number(raw));
+                  }}
+                />
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      {singleSetNote && (
+        <span className={`text-[10px] text-right ${singleSetInvalid ? "text-amber-400" : "text-teal-500"}`} style={F.body}>{singleSetNote}</span>
+      )}
     </div>
   );
 }
 
-/* Panel para ver y editar el formato de partido de un torneo */
-function MatchFormatEditor({ format, onChange }) {
-  const [open, setOpen] = useState(false);
+/* Opción grande de elección múltiple (tipo de torneo, Individual/Por Parejas, games) */
+function ChoiceCard({ selected, onClick, title, description, compact = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={`text-left rounded-lg border transition ${compact ? "px-4 py-2" : "px-4 py-3"} ${selected ? "border-lime-400" : "border-teal-800 hover:border-teal-500"}`}
+      style={{ backgroundColor: selected ? "rgba(159,224,34,0.1)" : "transparent", ...F.body }}
+    >
+      <span className={`block font-semibold ${compact ? "text-sm" : ""} ${selected ? "text-lime-400" : ""}`}>{title}</span>
+      {description && <span className="block text-xs text-teal-400 mt-0.5">{description}</span>}
+    </button>
+  );
+}
+
+const TOURNAMENT_TYPE_DESCRIPTION = {
+  clasico: "Zonas + llave final, partidos por sets y grilla de horarios.",
+  super8: "8 jugadores u 8 parejas por categoría, a un solo set. Termina en tabla de posiciones.",
+  americano: "Zonas + llave final en un solo día, con un set único a 7 o a 9 games.",
+};
+
+/* Paso 1: elegir el tipo de torneo. Al cambiar de tipo se limpian las opciones del anterior. */
+function TournamentTypeChoice({ config, onChange }) {
+  return (
+    <div className="grid gap-2">
+      {Object.keys(TOURNAMENT_TYPE_LABEL).map((type) => (
+        <ChoiceCard
+          key={type}
+          selected={config.type === type}
+          onClick={() => { if (config.type !== type) onChange({ type, super8Mode: null, games: null }); }}
+          title={TOURNAMENT_TYPE_LABEL[type]}
+          description={TOURNAMENT_TYPE_DESCRIPTION[type]}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* Paso 2: las preguntas propias de cada tipo (el Clásico no tiene ninguna acá) */
+function TournamentTypeOptions({ config, onChange }) {
+  const label = "block text-xs text-teal-400 mb-2";
+  const gamesChoice = (options, format) => (
+    <div className="flex flex-wrap gap-2">
+      {options.map((g) => (
+        <ChoiceCard key={g} compact selected={config.games === g} onClick={() => onChange({ ...config, games: g })} title={format(g)} />
+      ))}
+    </div>
+  );
+  const tiebreakNote = config.games && (
+    <p className="text-[11px] text-teal-500 mt-2" style={F.body}>
+      En {config.games - 1}-{config.games - 1} se define con tie break a 7 puntos (diferencia de 2) y el set queda {config.games}-{config.games - 1}.
+    </p>
+  );
+
+  if (config.type === "super8") {
+    return (
+      <div>
+        <p className="text-sm font-semibold mb-3 px-3 py-2 rounded border border-lime-400 text-lime-400" style={{ backgroundColor: "rgba(159,224,34,0.08)", ...F.body }}>
+          El Súper 8 se juega a un solo set.
+        </p>
+        <p className={label} style={F.body}>¿Individual o por parejas?</p>
+        <div className="grid sm:grid-cols-2 gap-2 mb-4">
+          <ChoiceCard selected={config.super8Mode === "individual"} onClick={() => onChange({ ...config, super8Mode: "individual" })} title="Individual" description="8 jugadores sueltos: cada uno juega una vez con cada otro como compañero." />
+          <ChoiceCard selected={config.super8Mode === "parejas"} onClick={() => onChange({ ...config, super8Mode: "parejas" })} title="Por Parejas" description="8 parejas armadas, todas contra todas." />
+        </div>
+        {config.super8Mode && (
+          <div>
+            <p className={label} style={F.body}>¿A cuántos games se juega cada partido?</p>
+            {gamesChoice(SUPER8_GAMES_OPTIONS, (g) => `${g} games`)}
+            {tiebreakNote}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (config.type === "americano") {
+    return (
+      <div>
+        <p className={label} style={F.body}>¿A cuántos games se juega cada partido?</p>
+        {gamesChoice(AMERICANO_GAMES_OPTIONS, (g) => `A${g}`)}
+        {tiebreakNote}
+      </div>
+    );
+  }
+  return null;
+}
+
+/* Formato de partido del Clásico: sets, games por set y tie breaks */
+function ClassicMatchFormatFields({ format, onChange }) {
   const f = format || DEFAULT_MATCH_FORMAT;
   const [gamesText, setGamesText] = useState(String(f.gamesPerSet));
+  return (
+    <div className="flex flex-wrap gap-4 items-end">
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" style={F.body}>Sets</label>
+        <select
+          value={f.setsToPlay}
+          onChange={(e) => onChange({ ...f, setsToPlay: Number(e.target.value) })}
+          className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+        >
+          <option value={2}>2 sets directos</option>
+          <option value={3}>Al mejor de 3</option>
+        </select>
+      </div>
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" style={F.body}>Games por set</label>
+        <input
+          type="number" min="1" inputMode="numeric"
+          value={gamesText}
+          onChange={(e) => setGamesText(e.target.value)}
+          onBlur={() => {
+            const n = Number(gamesText);
+            const valid = gamesText.trim() !== "" && n >= 1;
+            const final = valid ? n : f.gamesPerSet;
+            setGamesText(String(final));
+            if (final !== f.gamesPerSet) onChange({ ...f, gamesPerSet: final });
+          }}
+          className="w-20 px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+        />
+      </div>
+      <label className="flex items-center gap-2 text-sm" style={F.body}>
+        <input type="checkbox" checked={f.setTiebreak} onChange={(e) => onChange({ ...f, setTiebreak: e.target.checked })} />
+        Tie break a 7 puntos dentro del set
+      </label>
+      <label className="flex items-center gap-2 text-sm" style={F.body}>
+        <input type="checkbox" checked={f.finalSuperTiebreak} onChange={(e) => onChange({ ...f, finalSuperTiebreak: e.target.checked })} />
+        Super tie-break a 10 en el set decisivo
+      </label>
+    </div>
+  );
+}
+
+/* Nombre del tipo de torneo: "Clásico", "Súper 8 Individual", "Americano"... */
+function tournamentTypeName(t) {
+  const { type, super8Mode } = tournamentConfig(t);
+  return type === "super8" && super8Mode ? `${TOURNAMENT_TYPE_LABEL.super8} ${SUPER8_MODE_LABEL[super8Mode]}` : TOURNAMENT_TYPE_LABEL[type];
+}
+
+/* Etiqueta con el tipo de torneo para las tarjetas: "Clásico", "Súper 8 Individual · 6 games",
+   "Americano · A7". Cada tipo tiene su color. */
+const TOURNAMENT_TYPE_COLOR = { clasico: "#38bdf8", super8: "#e879f9", americano: "#fb923c" };
+
+function TournamentTypeTag({ tournament }) {
+  const { type, games } = tournamentConfig(tournament);
+  const color = TOURNAMENT_TYPE_COLOR[type];
+  const detail = type === "americano" && games ? ` · A${games}` : type === "super8" && games ? ` · ${games} games` : "";
+  return (
+    <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wide" style={{ ...F.body, color, border: `1px solid ${color}80`, backgroundColor: color + "1a" }}>
+      {tournamentTypeName(tournament)}{detail}
+    </span>
+  );
+}
+
+/* Tipo de torneo en una línea: "Súper 8 Individual · un solo set a 6 games · ..." */
+function tournamentTypeSummary(t) {
+  return `${tournamentTypeName(t)} · ${formatSummary(t.matchFormat)}`;
+}
+
+/* Panel para ver y cambiar el tipo de torneo y su configuración después de creado. Los cambios se
+   preparan en un borrador y se aplican con "Guardar". */
+function TournamentTypeEditor({ tournament, update }) {
+  const [open, setOpen] = useState(false);
+  const [config, setConfig] = useState(() => tournamentConfig(tournament));
+  const [classicFormat, setClassicFormat] = useState(() => (isSingleSetFormat(tournament.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : tournament.matchFormat || { ...DEFAULT_MATCH_FORMAT }));
+  const blocked = tournamentConfigChangeBlocked(tournament, config);
+  const hasResults = tournamentProgress(tournament).played > 0;
+
+  const start = () => {
+    setConfig(tournamentConfig(tournament));
+    setClassicFormat(isSingleSetFormat(tournament.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : tournament.matchFormat || { ...DEFAULT_MATCH_FORMAT });
+    setOpen(true);
+  };
+  const save = () => {
+    if (!tournamentConfigIsComplete(config) || blocked) return;
+    const next = withTournamentConfig(tournament, config);
+    update(config.type === "clasico" ? { ...next, matchFormat: classicFormat } : next);
+    setOpen(false);
+  };
 
   return (
     <div className="border border-teal-800 rounded-lg p-4 mb-6">
       <div className="flex justify-between items-center flex-wrap gap-2">
         <div>
-          <p className="text-sm font-semibold" style={F.body}>Formato de partido</p>
-          <p className="text-xs text-teal-400" style={F.body}>{formatSummary(f)}</p>
+          <p className="text-sm font-semibold" style={F.body}>Tipo de torneo</p>
+          <p className="text-xs text-teal-400" style={F.body}>{tournamentTypeSummary(tournament)}</p>
         </div>
-        <button type="button" onClick={() => setOpen((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
-          {open ? "Cerrar" : "Editar formato"}
+        <button type="button" onClick={() => (open ? setOpen(false) : start())} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
+          {open ? "Cancelar" : "Editar"}
         </button>
       </div>
 
       {open && (
-        <div className="mt-4 flex flex-wrap gap-4 items-end">
-          <div>
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Sets</label>
-            <select
-              value={f.setsToPlay}
-              onChange={(e) => onChange({ ...f, setsToPlay: Number(e.target.value) })}
-              className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            >
-              <option value={2}>2 sets directos</option>
-              <option value={3}>Al mejor de 3</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Games por set</label>
-            <input
-              type="number" min="1" inputMode="numeric"
-              value={gamesText}
-              onChange={(e) => setGamesText(e.target.value)}
-              onBlur={() => {
-                const n = Number(gamesText);
-                const valid = gamesText.trim() !== "" && n >= 1;
-                const final = valid ? n : f.gamesPerSet;
-                setGamesText(String(final));
-                if (final !== f.gamesPerSet) onChange({ ...f, gamesPerSet: final });
-              }}
-              className="w-20 px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-          </div>
-          <label className="flex items-center gap-2 text-sm" style={F.body}>
-            <input type="checkbox" checked={f.setTiebreak} onChange={(e) => onChange({ ...f, setTiebreak: e.target.checked })} />
-            Tie break a 7 puntos dentro del set
-          </label>
-          <label className="flex items-center gap-2 text-sm" style={F.body}>
-            <input type="checkbox" checked={f.finalSuperTiebreak} onChange={(e) => onChange({ ...f, finalSuperTiebreak: e.target.checked })} />
-            Super tie-break a 10 en el set decisivo
-          </label>
+        <div className="mt-4 space-y-4">
+          <TournamentTypeChoice config={config} onChange={setConfig} />
+          <TournamentTypeOptions config={config} onChange={setConfig} />
+          {config.type === "clasico" && <ClassicMatchFormatFields format={classicFormat} onChange={setClassicFormat} />}
+          {blocked && (
+            <p className="text-xs text-amber-400" style={F.body}>
+              Hay categorías con partidos ya armados en otro formato. Para este cambio, primero reiniciá sus grupos o partidos.
+            </p>
+          )}
+          {!blocked && hasResults && (
+            <p className="text-[11px] text-amber-400" style={F.body}>
+              Ya hay resultados cargados: si cambiás el formato, esos resultados se van a leer con el formato nuevo.
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={save}
+            disabled={!tournamentConfigIsComplete(config) || blocked}
+            className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
+          >
+            Guardar
+          </button>
         </div>
       )}
     </div>
+  );
+}
+
+/* Interruptor sí/no */
+function Toggle({ checked, onChange, label, description }) {
+  return (
+    <label className="flex items-start gap-3 cursor-pointer select-none" style={F.body}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className="relative w-11 h-6 rounded-full shrink-0 mt-0.5 transition"
+        style={{ backgroundColor: checked ? BRAND.lime : "#1e3a45", boxShadow: checked ? `0 0 10px ${BRAND.lime}66` : "none" }}
+      >
+        <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all" style={{ left: checked ? "1.375rem" : "0.125rem" }} />
+      </button>
+      <span>
+        <span className="block text-sm font-semibold">{label}</span>
+        {description && <span className="block text-xs text-teal-400">{description}</span>}
+      </span>
+    </label>
+  );
+}
+
+/* Inscripciones online de un torneo: el interruptor y el cupo de cada categoría (vacío = sin límite;
+   el Súper 8 es siempre de 8). rows: [{ key, name, fixed, value }] */
+function RegistrationSettings({ open, onOpenChange, rows, onCupoChange }) {
+  return (
+    <div className="rounded-lg border border-teal-800 p-3 space-y-3">
+      <Toggle
+        checked={open}
+        onChange={onOpenChange}
+        label="Inscripciones abiertas"
+        description="Los jugadores se anotan solos desde la página pública y vos aceptás o rechazás cada inscripción."
+      />
+      {open && rows.length > 0 && (
+        <div>
+          <p className="text-xs text-teal-400 mb-2" style={F.body}>Cupo por categoría (cuentan todas las parejas anotadas; vacío = sin límite)</p>
+          <div className="space-y-1.5">
+            {rows.map((r) => (
+              <div key={r.key} className="flex items-center justify-between gap-3 text-sm" style={F.body}>
+                <span className="truncate">{r.name}</span>
+                {r.fixed ? (
+                  <span className="text-xs text-teal-500">{r.fixed}</span>
+                ) : (
+                  <input
+                    type="number" min="1" inputMode="numeric"
+                    value={r.value}
+                    onChange={(e) => onCupoChange(r.key, e.target.value)}
+                    placeholder="Sin límite"
+                    className="w-28 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Texto del campo de cupo → número entero positivo, o null (sin límite) */
+function parseCupo(text) {
+  const n = Number(text);
+  return String(text).trim() !== "" && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/* Ventana emergente centrada sobre la pantalla */
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-4 overflow-y-auto" style={{ backgroundColor: "rgba(0,0,0,0.7)" }} onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-lg rounded-xl border border-teal-800 p-5 sm:p-6 my-4"
+        style={{ backgroundColor: "#1b2027", color: "#e2e8f0" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex justify-between items-start gap-3 mb-4">
+          <h2 className="text-lg" style={F.display}>{title}</h2>
+          <button type="button" onClick={onClose} className="text-teal-400 hover:text-lime-400 text-lg leading-none" aria-label="Cerrar">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* Creación de torneo paso a paso:
+   1. Tipo de torneo (Clásico, Súper 8 o Americano).
+   2. Nombre, fecha y circuito, más las preguntas propias del tipo elegido.
+   3. Categorías que va a tener el torneo (después se pueden agregar o quitar desde el torneo). */
+function CreateTournamentWizard({ circuits, onCreate, onClose }) {
+  const [step, setStep] = useState(1);
+  const [config, setConfig] = useState({ type: null, super8Mode: null, games: null });
+  const [name, setName] = useState("");
+  const [date, setDate] = useState("");
+  const [circuitId, setCircuitId] = useState("");
+  const [categoryNames, setCategoryNames] = useState([]);
+  const [categoryText, setCategoryText] = useState("");
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [cupos, setCupos] = useState({}); // { [nombre de categoría]: texto del cupo }
+  // Americano: se juega en un solo día, así que la grilla se arma con estos tres datos
+  const [courtsText, setCourtsText] = useState("2");
+  const [startTime, setStartTime] = useState("09:00");
+  const [intervalText, setIntervalText] = useState("40");
+  const super8 = config.type === "super8";
+  const americano = config.type === "americano";
+  const courts = Number(courtsText), interval = Number(intervalText);
+  const scheduleReady = !americano || (Number.isInteger(courts) && courts >= 1 && startTime && Number.isInteger(interval) && interval >= 10);
+
+  const addCategoryName = () => {
+    const n = categoryText.trim();
+    if (!n) return;
+    if (!categoryNames.some((c) => c.toLowerCase() === n.toLowerCase())) setCategoryNames([...categoryNames, n]);
+    setCategoryText("");
+  };
+  const step2Ready = name.trim() && date && tournamentConfigIsComplete(config) && scheduleReady;
+  // Si quedó un nombre escrito sin tocar "Agregar", también se crea
+  const pending = categoryText.trim();
+  const finalNames = pending && !categoryNames.some((c) => c.toLowerCase() === pending.toLowerCase()) ? [...categoryNames, pending] : categoryNames;
+  const create = () => {
+    if (!step2Ready || finalNames.length === 0) return;
+    const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] } : null;
+    onCreate({
+      name: name.trim(), date, circuitId: config.type === "clasico" ? circuitId || null : null, config, schedule,
+      categories: finalNames.map((n) => ({ name: n, cupo: super8 ? null : parseCupo(cupos[n] ?? "") })),
+      inscripcionesAbiertas: registrationOpen,
+    });
+    onClose();
+  };
+
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const primary = "px-4 py-2 rounded font-semibold text-sm disabled:opacity-40";
+  const primaryStyle = { backgroundColor: "#9fe022", color: "#14181f", ...F.body };
+  const back = (to) => <button type="button" onClick={() => setStep(to)} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Atrás</button>;
+
+  return (
+    <Modal title={`Nuevo torneo · Paso ${step} de 3`} onClose={onClose}>
+      {step === 1 && (
+        <div>
+          <p className="text-sm text-teal-300 mb-3" style={F.body}>¿Qué tipo de torneo vas a organizar?</p>
+          <TournamentTypeChoice config={config} onChange={setConfig} />
+          <div className="flex justify-end mt-5">
+            <button type="button" disabled={!config.type} onClick={() => setStep(2)} className={primary} style={primaryStyle}>Siguiente</button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div>
+          <p className="text-xs text-lime-400 mb-3 font-semibold" style={F.body}>{TOURNAMENT_TYPE_LABEL[config.type]}</p>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Nombre del torneo</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} autoFocus className="w-full mb-3 px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
+          <div className="flex flex-wrap gap-3 mb-4">
+            <div>
+              <label className="block text-xs text-teal-400 mb-1" style={F.body}>Fecha</label>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
+            </div>
+            {config.type === "clasico" && (
+              <div>
+                <label className="block text-xs text-teal-400 mb-1" style={F.body}>Circuito (opcional)</label>
+                <select value={circuitId} onChange={(e) => setCircuitId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={input}>
+                  <option value="">Sin circuito (torneo independiente)</option>
+                  {circuits.map((c) => <option key={c.id} value={c.id}>{c.name} {c.year}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+          <TournamentTypeOptions config={config} onChange={setConfig} />
+          {americano && (
+            <div className="mt-4">
+              <p className="block text-xs text-teal-400 mb-2" style={F.body}>Horarios del día</p>
+              <div className="flex flex-wrap gap-3">
+                <div>
+                  <label className="block text-[11px] text-teal-500 mb-1" style={F.body}>Canchas</label>
+                  <input type="number" min="1" inputMode="numeric" value={courtsText} onChange={(e) => setCourtsText(e.target.value)} className="w-20 px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-teal-500 mb-1" style={F.body}>Horario de arranque</label>
+                  <input type="time" lang="es-AR" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-teal-500 mb-1" style={F.body}>Tiempo entre partidos (min)</label>
+                  <input type="number" min="10" step="5" inputMode="numeric" value={intervalText} onChange={(e) => setIntervalText(e.target.value)} className="w-24 px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
+                </div>
+              </div>
+              <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Cada cancha arranca un partido nuevo cada {interval >= 10 ? interval : "…"} minutos. Se puede ajustar después en Horarios.</p>
+            </div>
+          )}
+          <div className="flex justify-between items-center mt-5">
+            {back(1)}
+            <button type="button" disabled={!step2Ready} onClick={() => setStep(3)} className={primary} style={primaryStyle}>Siguiente</button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div>
+          <p className="text-sm text-teal-300 mb-1" style={F.body}>¿Qué categorías va a tener el torneo?</p>
+          <p className="text-xs text-teal-500 mb-3" style={F.body}>
+            {super8
+              ? `Cada categoría admite exactamente 8 ${config.super8Mode === "individual" ? "jugadores" : "parejas"}. `
+              : ""}
+            {super8 ? "Los inscriptos" : "Las parejas"} se cargan después, a medida que se anotan. Más adelante también podés agregar o quitar categorías.
+          </p>
+          <div className="flex gap-2 mb-3">
+            <input
+              value={categoryText}
+              onChange={(e) => setCategoryText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") addCategoryName(); }}
+              placeholder="Ej: 4ta Caballeros"
+              autoFocus
+              className="flex-1 min-w-0 px-3 py-2 rounded border outline-none focus:border-lime-400" style={input}
+            />
+            <button type="button" onClick={addCategoryName} className="px-4 py-2 rounded font-semibold text-sm" style={primaryStyle}>Agregar</button>
+          </div>
+          <div className="flex flex-wrap gap-2 min-h-[2rem]">
+            {categoryNames.map((c, i) => {
+              const color = GROUP_COLORS[i % GROUP_COLORS.length];
+              return (
+                <span key={c} className="flex items-center gap-2 px-3 py-1 rounded-full text-sm border" style={{ backgroundColor: color + "14", color, borderColor: color + "40", ...F.body }}>
+                  {c}
+                  <button type="button" onClick={() => setCategoryNames(categoryNames.filter((x) => x !== c))} aria-label={`Quitar ${c}`} className="opacity-70 hover:opacity-100">✕</button>
+                </span>
+              );
+            })}
+            {categoryNames.length === 0 && <p className="text-xs opacity-60" style={F.body}>Agregá al menos una categoría.</p>}
+          </div>
+          <div className="mt-4">
+            <RegistrationSettings
+              open={registrationOpen}
+              onOpenChange={setRegistrationOpen}
+              rows={categoryNames.map((n) => ({ key: n, name: n, fixed: super8 ? "8 (Súper 8)" : null, value: cupos[n] ?? "" }))}
+              onCupoChange={(key, text) => setCupos({ ...cupos, [key]: text })}
+            />
+          </div>
+          <div className="flex justify-between items-center mt-5">
+            {back(2)}
+            <button type="button" disabled={finalNames.length === 0} onClick={create} className={primary} style={primaryStyle}>Crear torneo</button>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -1735,6 +2627,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
   const [courtsText, setCourtsText] = useState(String(tournament.courtsCount ?? 4));
   const [durationText, setDurationText] = useState(String(tournament.matchDurationMinutes ?? 90));
   const dates = tournament.playDates || [];
+  const singleDay = tournamentType(tournament) === "americano"; // el Americano se juega en un solo día
 
   const addDate = () => {
     if (!newDate || dates.some((d) => d.date === newDate)) return;
@@ -1749,7 +2642,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
 
   return (
     <div className="border border-teal-800 rounded-lg p-4 mb-6">
-      <p className="text-sm font-semibold mb-3" style={F.body}>Canchas y fechas del torneo</p>
+      <p className="text-sm font-semibold mb-3" style={F.body}>{singleDay ? "Canchas y horario del día" : "Canchas y fechas del torneo"}</p>
       <div className="flex flex-wrap gap-4 items-end mb-4">
         <div>
           <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cantidad de canchas</label>
@@ -1768,14 +2661,14 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
           />
         </div>
         <div>
-          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Duración de partido (min)</label>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Tiempo entre partidos (min)" : "Duración de partido (min)"}</label>
           <input
-            type="number" min="15" step="15" inputMode="numeric"
+            type="number" min="10" step="5" inputMode="numeric"
             value={durationText}
             onChange={(e) => setDurationText(e.target.value)}
             onBlur={() => {
               const n = Number(durationText);
-              const valid = durationText.trim() !== "" && n >= 15;
+              const valid = durationText.trim() !== "" && n >= 10;
               const final = valid ? n : (tournament.matchDurationMinutes ?? 90);
               setDurationText(String(final));
               if (final !== tournament.matchDurationMinutes) onChange({ ...tournament, matchDurationMinutes: final });
@@ -1784,7 +2677,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
           />
         </div>
       </div>
-      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Fechas y horario en que se juega cada una</label>
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Día y horario en que se juega" : "Fechas y horario en que se juega cada una"}</label>
       <div className="space-y-2 mb-4">
         {dates.map((d) => (
           <div key={d.date} className="border border-teal-800 rounded-lg px-3 py-3 text-sm" style={F.body}>
@@ -1801,7 +2694,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
         ))}
         {dates.length === 0 && <p className="text-xs opacity-60" style={F.body}>Todavía no agregaste fechas.</p>}
       </div>
-      <div className="border-t border-teal-800 pt-3 space-y-2">
+      {!(singleDay && dates.length > 0) && <div className="border-t border-teal-800 pt-3 space-y-2">
         <div>
           <label className="block text-xs text-teal-400 mb-1" style={F.body}>Fecha nueva</label>
           <input
@@ -1824,7 +2717,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
         <button type="button" onClick={addDate} className="w-full px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
           Agregar fecha
         </button>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -1964,17 +2857,17 @@ function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear, on
 
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
-function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear }) {
+function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear, onResult, onMove }) {
   const status = m.placeholder ? "pendiente" : matchDisplayStatus(m);
   const finished = status === "finalizado";
   const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
   const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : "#38bdf81a";
   return (
     <div
-      draggable
+      draggable={!!onDragStart}
       onDragStart={onDragStart}
       className="rounded-md px-2 py-1.5 mb-1 text-[11px] leading-tight relative"
-      style={{ ...F.body, border: `1.5px ${m.draft ? "dashed" : "solid"} ${border}`, backgroundColor: bg, cursor: "grab" }}
+      style={{ ...F.body, border: `1.5px ${m.draft ? "dashed" : "solid"} ${border}`, backgroundColor: bg, cursor: onDragStart ? "grab" : "default" }}
       title={conflict ? "Choque: hay más de un partido en este horario y cancha" : undefined}
     >
       <button
@@ -1995,7 +2888,249 @@ function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear }) {
         <>
           <p className="truncate"><PairName id={m.pairA} pairsById={pairsById} /></p>
           <p className="truncate opacity-60">vs <PairName id={m.pairB} pairsById={pairsById} /></p>
+          {onResult && (
+            <button type="button" onClick={onResult} className="mt-0.5 text-[10px] underline text-teal-300 hover:text-lime-400">
+              {finished ? <span className="font-mono"><MatchResultLabel match={m} winnerIsA={matchWinnerId(m) === m.pairA} /> ✎</span> : "+ Resultado"}
+            </button>
+          )}
         </>
+      )}
+      {onMove && !finished && (
+        <button type="button" onClick={onMove} className="mt-0.5 ml-2 text-[10px] underline text-teal-300 hover:text-lime-400">⇄ Mover</button>
+      )}
+    </div>
+  );
+}
+
+/* Mover un partido sin arrastrar (en el celular arrastrar no funciona): se elige día, horario y
+   cancha. Si ese lugar ya tiene un partido, los dos se intercambian de lugar. */
+function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) {
+  const playDates = tournament.playDates || [];
+  const duration = tournament.matchDurationMinutes || 90;
+  const courtsCount = tournament.courtsCount || 4;
+  const [date, setDate] = useState(m.schedule?.date || playDates[0]?.date || "");
+  const dateInfo = playDates.find((d) => d.date === date);
+  const times = dateInfo ? dayTimeSlots(dateInfo, duration) : [];
+  const [time, setTime] = useState(m.schedule?.time && times.includes(m.schedule.time) ? m.schedule.time : times[0] || "");
+  const [court, setCourt] = useState(m.schedule?.court || 1);
+  const occupantAt = (c) => matches.find((x) => x.key !== m.key && x.schedule && x.schedule.date === date && x.schedule.time === time && x.schedule.court === c);
+  const occupant = occupantAt(court);
+  const same = m.schedule && m.schedule.date === date && m.schedule.time === time && m.schedule.court === court;
+  const describe = (x) => (x.placeholder ? x.placeholder : `${pairsById[x.pairA]?.name || "—"} vs ${pairsById[x.pairB]?.name || "—"}`);
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+
+  const move = () => {
+    if (!date || !time || same) return;
+    const target = { date, time, court };
+    let next = tournament;
+    if (occupant) next = withMatchSchedule(next, occupant.categoryId, occupant.location, occupant.matchId, m.schedule || null);
+    next = withMatchSchedule(next, m.categoryId, m.location, m.matchId, target);
+    update(next);
+    onClose();
+  };
+  const unschedule = () => { update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, null)); onClose(); };
+
+  return (
+    <Modal title="Mover partido" onClose={onClose}>
+      <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-sm mb-4" style={F.body}>{describe(m)}</p>
+      {playDates.length === 0 ? (
+        <p className="text-sm text-amber-400" style={F.body}>Primero cargá el día y horario del torneo en Horarios.</p>
+      ) : (
+        <div className="space-y-3">
+          {playDates.length > 1 && (
+            <div>
+              <label className="block text-xs text-teal-400 mb-1" style={F.body}>Día</label>
+              <select value={date} onChange={(e) => { setDate(e.target.value); const d = playDates.find((x) => x.date === e.target.value); setTime(d ? dayTimeSlots(d, duration)[0] || "" : ""); }} className="w-full px-3 py-2.5 rounded border text-base" style={input}>
+                {playDates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Horario</label>
+            <select value={time} onChange={(e) => setTime(e.target.value)} className="w-full px-3 py-2.5 rounded border text-base" style={input}>
+              {times.map((t) => <option key={t} value={t}>{t}hs</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cancha</label>
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+              {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => (
+                <ChoiceCard key={c} compact selected={court === c} onClick={() => setCourt(c)} title={`Cancha ${c}`} description={occupantAt(c) ? "Ocupada" : "Libre"} />
+              ))}
+            </div>
+          </div>
+          {occupant && !same && (
+            <p className="text-xs text-amber-400" style={F.body}>
+              Ahí está {describe(occupant)}: {m.schedule ? `se intercambian de lugar (ese pasa a las ${m.schedule.time}hs, Cancha ${m.schedule.court}).` : "queda sin horario."}
+            </p>
+          )}
+          <div className="flex gap-2 flex-wrap pt-1">
+            <button type="button" disabled={!time || same} onClick={move} className="flex-1 px-4 py-2.5 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+              {occupant && !same ? "Intercambiar" : "Mover acá"}
+            </button>
+            {m.schedule && (
+              <button type="button" onClick={unschedule} className="px-4 py-2.5 rounded text-sm border border-red-400 text-red-400" style={F.body}>Quitar horario</button>
+            )}
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* Ventanita para cargar el resultado de un partido desde la grilla de horarios */
+function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onClose }) {
+  const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
+  return (
+    <Modal title="Resultado" onClose={onClose}>
+      <p className="text-xs text-teal-500 mb-2" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-sm mb-4" style={F.body}>{nameA} <span className="text-teal-500">vs</span> {nameB}</p>
+      {m.walkover ? (
+        <p className="text-sm text-amber-400 mb-3" style={F.body}>WO: no se presentó {m.walkover === m.pairA ? nameA : nameB}.</p>
+      ) : (
+        <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} /></div>
+      )}
+      <div className="flex gap-3 flex-wrap text-xs mb-5" style={F.body}>
+        {m.walkover ? (
+          <button type="button" onClick={() => onWalkover(null)} className="text-teal-400 underline">Deshacer WO</button>
+        ) : (
+          <>
+            <button type="button" onClick={() => onWalkover(m.pairA)} className="text-amber-400 underline">WO {nameA}</button>
+            <button type="button" onClick={() => onWalkover(m.pairB)} className="text-amber-400 underline">WO {nameB}</button>
+          </>
+        )}
+      </div>
+      <button type="button" onClick={onClose} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>Listo</button>
+    </Modal>
+  );
+}
+
+/* Resultado, WO y "en curso" de un partido de la grilla, y ventanas de resultado y mover: lo que
+   comparten la grilla de horarios y la pantalla "En cancha". */
+function useMatchActions(tournament, update) {
+  const pairsById = useMemo(() => {
+    const map = {};
+    tournament.categories.forEach((c) => Object.assign(map, categoryEntitiesById(c)));
+    return map;
+  }, [tournament.categories]);
+  const matches = useMemo(() => collectScheduleableMatches(tournament), [tournament]);
+  const [resultKey, setResultKey] = useState(null);
+  const [moveKey, setMoveKey] = useState(null);
+  const resultMatch = resultKey ? matches.find((m) => m.key === resultKey) : null;
+  const moveMatch = moveKey ? matches.find((m) => m.key === moveKey) : null;
+
+  const change = (m, fn) => update(withMatchResult(tournament, m.categoryId, m.location, m.matchId, fn));
+  const setLive = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+
+  const modals = (
+    <>
+      {resultMatch && !resultMatch.placeholder && (
+        <MatchResultModal
+          m={resultMatch}
+          pairsById={pairsById}
+          format={tournament.matchFormat}
+          onSetScore={(setIndex, side, value) => change(resultMatch, (x) => ({ ...x, sets: withSetScore(x.sets, setIndex, side, value) }))}
+          onWalkover={(pairId) => change(resultMatch, (x) => ({ ...x, walkover: pairId, sets: pairId ? [] : x.sets, liveStatus: null }))}
+          onClose={() => setResultKey(null)}
+        />
+      )}
+      {moveMatch && <MoveMatchModal m={moveMatch} tournament={tournament} matches={matches} pairsById={pairsById} update={update} onClose={() => setMoveKey(null)} />}
+    </>
+  );
+  return { pairsById, matches, openResult: (m) => setResultKey(m.key), openMove: (m) => setMoveKey(m.key), setLive, modals };
+}
+
+/* Pantalla "En cancha", pensada para usar desde el celular durante el torneo: lo que se está
+   jugando ahora, los próximos partidos en orden y los terminados, con botones grandes para
+   marcar "en curso", cargar el resultado o mover el partido de horario/cancha. */
+function OnCourtView({ tournament, update }) {
+  const { pairsById, matches, openResult, openMove, setLive, modals } = useMatchActions(tournament, update);
+  const [showAllNext, setShowAllNext] = useState(false);
+  const [showDone, setShowDone] = useState(false);
+
+  const real = matches.filter((m) => !m.draft || m.schedule);
+  const done = real.filter((m) => !m.placeholder && matchIsPlayed(m)).filter((m) => m.schedule).sort(compareBySchedule).reverse();
+  const live = real.filter((m) => !m.placeholder && !matchIsPlayed(m) && m.liveStatus === "en_curso")
+    .sort((a, b) => (a.schedule?.court || 99) - (b.schedule?.court || 99));
+  const upcoming = real.filter((m) => m.schedule && !matchIsPlayed(m) && m.liveStatus !== "en_curso").sort(compareBySchedule);
+  const unscheduled = real.filter((m) => !m.schedule && !m.placeholder && !matchIsPlayed(m));
+  const shownNext = showAllNext ? upcoming : upcoming.slice(0, 8);
+
+  const card = (m, kind) => {
+    const hasResult = !m.placeholder && matchIsPlayed(m);
+    const w = hasResult ? matchWinnerId(m) : null;
+    const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
+    const accent = kind === "live" ? "#fb923c" : kind === "done" ? "#9fe022" : "#38bdf8";
+    const btn = "flex-1 min-w-[6.5rem] px-3 py-2.5 rounded-lg text-sm font-semibold";
+    return (
+      <div key={m.key} className="rounded-xl p-3" style={{ backgroundColor: accent + "0f", border: `1px solid ${accent}40`, borderLeft: `4px solid ${accent}`, ...F.body }}>
+        <div className="flex items-center gap-2 text-xs mb-1 flex-wrap">
+          {m.schedule
+            ? <span className="font-bold" style={{ color: accent }}>{m.schedule.time}hs · Cancha {m.schedule.court}</span>
+            : <span className="font-bold text-amber-400">Sin horario</span>}
+          <span className="text-teal-500 truncate">{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
+          {m.schedule && (tournament.playDates || []).length > 1 && <span className="text-teal-600">{formatDateShort(m.schedule.date)}</span>}
+        </div>
+        {m.placeholder ? (
+          <p className="italic opacity-70 text-sm mb-2">{m.placeholder}</p>
+        ) : (
+          <p className="text-base leading-snug mb-2">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</p>
+        )}
+        {hasResult && <p className="font-mono text-sm text-teal-300 mb-2"><MatchResultLabel match={m} winnerIsA={w === m.pairA} /></p>}
+        <div className="flex gap-2 flex-wrap">
+          {!m.placeholder && !hasResult && (kind === "live" ? (
+            <button type="button" onClick={() => setLive(m, null)} className={`${btn} border border-orange-400 text-orange-300`}>Quitar en curso</button>
+          ) : (
+            <button type="button" onClick={() => setLive(m, "en_curso")} className={`${btn} border border-orange-400 text-orange-300`}>En curso</button>
+          ))}
+          {!m.placeholder && (
+            <button type="button" onClick={() => openResult(m)} className={btn} style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
+              {hasResult ? "Editar resultado" : "Cargar resultado"}
+            </button>
+          )}
+          {!hasResult && <button type="button" onClick={() => openMove(m)} className={`${btn} border border-teal-600 text-teal-300`}>Mover</button>}
+        </div>
+      </div>
+    );
+  };
+
+  const section = (title, count, color) => (
+    <h3 className="text-xs uppercase tracking-wide font-bold mb-2 mt-6 first:mt-0" style={{ color, ...F.body }}>{title} ({count})</h3>
+  );
+
+  if (real.length === 0) {
+    return <p className="opacity-60 text-sm" style={F.body}>Todavía no hay partidos armados. Cargá los grupos en cada categoría.</p>;
+  }
+
+  return (
+    <div>
+      {modals}
+      {section("Jugando ahora", live.length, "#fb923c")}
+      {live.length === 0
+        ? <p className="text-sm opacity-60" style={F.body}>Ningún partido marcado "en curso".</p>
+        : <div className="space-y-3">{live.map((m) => card(m, "live"))}</div>}
+
+      {section("Próximos", upcoming.length, "#38bdf8")}
+      {upcoming.length === 0
+        ? <p className="text-sm opacity-60" style={F.body}>No quedan partidos con horario por jugar.</p>
+        : <div className="space-y-3">{shownNext.map((m) => card(m, "next"))}</div>}
+      {upcoming.length > shownNext.length && (
+        <button type="button" onClick={() => setShowAllNext(true)} className="mt-3 text-sm text-teal-300 underline" style={F.body}>Ver los {upcoming.length} próximos</button>
+      )}
+
+      {unscheduled.length > 0 && (
+        <>
+          {section("Sin horario", unscheduled.length, "#fbbf24")}
+          <div className="space-y-3">{unscheduled.map((m) => card(m, "next"))}</div>
+        </>
+      )}
+
+      {section("Terminados", done.length, "#9fe022")}
+      {done.length > 0 && (
+        showDone
+          ? <div className="space-y-3">{done.map((m) => card(m, "done"))}</div>
+          : <button type="button" onClick={() => setShowDone(true)} className="text-sm text-teal-300 underline" style={F.body}>Ver terminados</button>
       )}
     </div>
   );
@@ -2006,13 +3141,8 @@ function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear }) {
    los partidos finalizados, ya que no queda un orden lineal como en una lista. */
 function ScheduleAdminView({ tournament, update }) {
   const [notice, setNotice] = useState(null);
-  const pairsById = useMemo(() => {
-    const map = {};
-    tournament.categories.forEach((c) => Object.assign(map, categoryEntitiesById(c)));
-    return map;
-  }, [tournament.categories]);
-
-  const matches = useMemo(() => collectScheduleableMatches(tournament), [tournament]);
+  // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
+  const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
   const unscheduled = matches.filter((m) => !m.schedule);
   const duration = tournament.matchDurationMinutes || 90;
@@ -2022,6 +3152,19 @@ function ScheduleAdminView({ tournament, update }) {
   const editSchedule = (m, schedule) => { update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, schedule)); };
   const clearSchedule = (m) => { update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, null)); setNotice(null); };
   const toggleLiveStatus = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+
+  const [confirmingReschedule, setConfirmingReschedule] = useState(false);
+  const reschedule = () => { update(rescheduleTournament(tournament)); setConfirmingReschedule(false); setNotice(null); };
+
+  // Partidos con un horario que ya no entra en la grilla (por ejemplo porque cambió el horario de
+  // arranque, la duración o la cantidad de canchas): no se ven en ninguna celda
+  const gridSlots = new Set();
+  playDates.forEach((d) => {
+    dayTimeSlots(d, duration).forEach((time) => {
+      for (let c = 1; c <= courtsCount; c++) gridSlots.add(`${d.date}|${time}|${c}`);
+    });
+  });
+  const offGrid = scheduled.filter((m) => !matchIsPlayed(m) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
 
@@ -2057,23 +3200,42 @@ function ScheduleAdminView({ tournament, update }) {
 
   return (
     <div>
+      {modals}
       <CourtsAndDatesEditor tournament={tournament} onChange={update} />
 
       {matches.length === 0 ? (
         <p className="opacity-60 text-sm" style={F.body}>Todavía no hay partidos con ambas parejas definidas (cargá grupos o llave en alguna categoría).</p>
       ) : (
         <>
-          <button
-            type="button"
-            onClick={() => update(autoSchedule(tournament))}
-            disabled={playDates.length === 0}
-            className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
-          >
-            Generar horarios automáticamente
-          </button>
+          <div className="flex gap-2 flex-wrap items-center">
+            <button
+              type="button"
+              onClick={() => update(autoSchedule(tournament))}
+              disabled={playDates.length === 0}
+              className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
+            >
+              Generar horarios automáticamente
+            </button>
+            {scheduled.length > 0 && (confirmingReschedule ? (
+              <span className="text-xs" style={F.body}>
+                <span className="text-teal-300 mr-2">Se borran los horarios de los partidos que no se jugaron y se vuelven a asignar. ¿Confirmás?</span>
+                <button type="button" onClick={reschedule} className="text-lime-400 font-semibold mr-2">Sí, rearmar</button>
+                <button type="button" onClick={() => setConfirmingReschedule(false)} className="text-teal-400">Cancelar</button>
+              </span>
+            ) : (
+              <button type="button" disabled={playDates.length === 0} onClick={() => setConfirmingReschedule(true)} className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400 disabled:opacity-40" style={F.body}>
+                Rearmar horarios
+              </button>
+            ))}
+          </div>
           <p className="text-xs text-teal-500 mt-2 mb-3" style={F.body}>
-            El armado automático solo asigna partidos de grupos (y se repite solo apenas se cierra un grupo). Los de la llave se precargan al generarla; arrastrá las tarjetas para reubicarlas.
+            "Generar" solo completa los partidos de grupos sin horario (y se repite solo apenas se cierra un grupo). "Rearmar" vuelve a ubicar desde cero todos los que todavía no se jugaron, incluida la llave: usalo si cambiaste el horario de arranque, las canchas o el tiempo entre partidos. Arrastrá las tarjetas para reubicarlas.
           </p>
+          {offGrid.length > 0 && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
+              {offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.
+            </div>
+          )}
 
           {draftCategories.length > 0 && (
             <div className="mb-4 flex flex-col gap-2">
@@ -2115,16 +3277,14 @@ function ScheduleAdminView({ tournament, update }) {
           ) : (
             playDates.map((dateInfo, di) => {
               const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
-              const start = timeToMinutes(dateInfo.from), end = timeToMinutes(dateInfo.to);
-              const times = [];
-              for (let t = start; t + duration <= end; t += duration) times.push(minutesToTime(t));
+              const times = dayTimeSlots(dateInfo, duration);
               const courts = Array.from({ length: courtsCount }, (_, i) => i + 1);
               return (
                 <div key={dateInfo.date} className="mb-8">
                   <div className="flex items-center gap-2 mb-3 flex-wrap">
                     <SkewPill color={dateColor}>{formatDateShort(dateInfo.date)}</SkewPill>
                   </div>
-                  <div className="overflow-x-auto">
+                  <div className="hidden sm:block overflow-x-auto">
                     <table className="border-collapse w-full min-w-[560px]">
                       <thead>
                         <tr>
@@ -2163,7 +3323,7 @@ function ScheduleAdminView({ tournament, update }) {
                                     </select>
                                   ) : (
                                     cellMatches.map((m) => (
-                                      <GridMatchCard key={m.key} m={m} pairsById={pairsById} conflict={conflict} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} />
+                                      <GridMatchCard key={m.key} m={m} pairsById={pairsById} conflict={conflict} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
                                     ))
                                   )}
                                 </td>
@@ -2173,6 +3333,42 @@ function ScheduleAdminView({ tournament, update }) {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                  {/* En el celular: cancha por cancha, en una columna (la tabla no entra a lo ancho) */}
+                  <div className="sm:hidden space-y-4">
+                    {courts.map((court) => {
+                      const courtMatches = scheduled.filter((m) => m.schedule.date === dateInfo.date && m.schedule.court === court).sort(compareBySchedule);
+                      return (
+                        <div key={court} className="rounded-xl border p-3" style={{ borderColor: dateColor + "40" }}>
+                          <p className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ ...F.body, color: dateColor }}>Cancha {court}</p>
+                          {courtMatches.length === 0 && <p className="text-xs opacity-60 mb-2" style={F.body}>Sin partidos.</p>}
+                          {courtMatches.map((m) => (
+                            <div key={m.key} className="flex gap-2 items-start">
+                              <span className="text-xs font-bold w-11 shrink-0 pt-1.5" style={{ ...F.body, color: dateColor }}>{m.schedule.time}</span>
+                              <div className="flex-1 min-w-0">
+                                <GridMatchCard m={m} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
+                              </div>
+                            </div>
+                          ))}
+                          {unscheduled.length > 0 && (
+                            <select
+                              value=""
+                              onChange={(e) => {
+                                const m = unscheduled.find((u) => u.key === e.target.value);
+                                const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null);
+                                if (free) editSchedule(m, free);
+                                else if (m) setNotice(`Cancha ${court} no tiene horarios libres ese día.`);
+                              }}
+                              className="w-full mt-1 text-sm px-2 py-2 rounded border border-dashed"
+                              style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
+                            >
+                              <option value="">+ Agregar partido en el primer horario libre</option>
+                              {unscheduled.map((u) => <option key={u.key} value={u.key}>{u.categoryName} · {u.label}</option>)}
+                            </select>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -2197,7 +3393,9 @@ function ScheduleAdminView({ tournament, update }) {
   );
 }
 
-/* Grilla de horarios en modo lectura para la vista pública */
+/* Horarios en modo lectura para la vista pública: una lista compacta por día y horario, dos
+   renglones por partido ("C1 · Gómez - Ibáñez vs Rossi - Peralta · 6-3 6-3" y debajo la
+   categoría), con un botón "Ahora" que lleva al horario que se está jugando. */
 function SchedulePublicView({ tournament }) {
   const pairsById = useMemo(() => {
     const map = {};
@@ -2211,76 +3409,69 @@ function SchedulePublicView({ tournament }) {
     return map;
   }, [tournament.categories]);
 
-  const scheduled = useMemo(() => collectScheduleableMatches(tournament).filter((m) => m.schedule && !m.draft).sort((a, b) => {
-    if (a.schedule.date !== b.schedule.date) return a.schedule.date < b.schedule.date ? -1 : 1;
-    if (a.schedule.time !== b.schedule.time) return a.schedule.time < b.schedule.time ? -1 : 1;
-    return a.schedule.court - b.schedule.court;
-  }), [tournament]);
-
-  const byDate = {};
-  scheduled.forEach((m) => { (byDate[m.schedule.date] = byDate[m.schedule.date] || []).push(m); });
-  const dateKeys = Object.keys(byDate).sort();
+  const scheduled = useMemo(() => collectScheduleableMatches(tournament).filter((m) => m.schedule && !m.draft).sort(compareBySchedule), [tournament]);
 
   if (scheduled.length === 0) {
     return <p className="opacity-60 text-sm" style={F.body}>Todavía no hay horarios publicados para este torneo.</p>;
   }
 
+  const slotId = (m) => `slot-${m.schedule.date}-${m.schedule.time.replace(":", "")}`;
+  // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante)
+  const today = todayISO();
+  const pending = scheduled.filter((m) => !m.placeholder && !matchIsPlayed(m));
+  const nowMatch = scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m))
+    || pending.find((m) => m.schedule.date >= today)
+    || pending[0];
+  const goToNow = () => { if (nowMatch) document.getElementById(slotId(nowMatch))?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+
+  const byDate = {};
+  scheduled.forEach((m) => { (byDate[m.schedule.date] = byDate[m.schedule.date] || []).push(m); });
+
   return (
     <div>
-      {dateKeys.map((date, di) => {
+      {nowMatch && (
+        <button type="button" onClick={goToNow} className="mb-4 px-4 py-2 rounded-full text-sm font-semibold" style={{ backgroundColor: "#fb923c", color: "#14181f", ...F.body }}>
+          ● Ahora
+        </button>
+      )}
+      {Object.keys(byDate).sort().map((date, di) => {
         const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
         const byTime = {};
         byDate[date].forEach((m) => { (byTime[m.schedule.time] = byTime[m.schedule.time] || []).push(m); });
-        const times = Object.keys(byTime).sort();
         return (
-        <div key={date} className="mb-8">
-          <div className="flex items-center gap-2 mb-3 flex-wrap">
-            <SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill>
-          </div>
-          <div className="space-y-4">
-            {times.map((time) => (
-              <div key={time} className="rounded-xl overflow-hidden border min-w-0" style={{ borderColor: dateColor + "40" }}>
-                <div className="px-3 py-2 text-center font-extrabold text-sm uppercase tracking-wide" style={{ backgroundColor: dateColor, color: "#14181f" }}>
-                  {time}hs
-                </div>
-                <div className="divide-y" style={{ borderColor: dateColor + "22" }}>
-                  {byTime[time]
-                    .slice()
-                    .sort((a, b) => a.schedule.court - b.schedule.court)
-                    .map((m) => (
-                    <div key={m.key} className="px-3 py-2" style={{ backgroundColor: dateColor + "08" }}>
-                      <div className="flex items-center gap-2 text-xs mb-1 flex-wrap" style={F.body}>
-                        <span className="font-bold" style={{ color: dateColor }}>Cancha {m.schedule.court}</span>
-                        <span className="font-medium truncate max-w-[35%]" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName}</span>
-                        {!m.placeholder && <span className="ml-auto"><MatchStatusBadge status={matchDisplayStatus(m)} /></span>}
-                      </div>
-                      {m.placeholder ? (
-                        <p className="text-sm italic opacity-70" style={F.body}>{m.label ? `${m.label} · ` : ""}{m.placeholder}</p>
-                      ) : (() => {
-                        const hasResult = matchIsPlayed(m);
-                        const w = hasResult ? matchWinnerId(m) : null;
-                        const winnerIsA = w == null ? null : w === m.pairA;
-                        return (
-                          <div className="text-sm min-w-0" style={F.body}>
-                            {m.label && <span className="text-[10px] text-teal-500 block">{m.label}</span>}
-                            <div className="truncate flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
-                            <div className="text-[11px] opacity-50 my-0.5 flex items-center gap-2">
-                              <span>vs</span>
-                              {hasResult && (
-                                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>
-                              )}
-                            </div>
-                            <div className="truncate flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
+          <div key={date} className="mb-6">
+            <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill></div>
+            <div className="rounded-xl border divide-y min-w-0" style={{ borderColor: dateColor + "40" }}>
+              {Object.keys(byTime).sort().map((time) => (
+                <div key={time} id={slotId(byTime[time][0])} className="flex gap-3 px-3 py-2 scroll-mt-4" style={{ borderColor: dateColor + "22" }}>
+                  <span className="text-sm font-extrabold w-11 shrink-0 pt-0.5" style={{ color: dateColor, ...F.body }}>{time}</span>
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    {byTime[time].map((m) => {
+                      const hasResult = !m.placeholder && matchIsPlayed(m);
+                      const w = hasResult ? matchWinnerId(m) : null;
+                      const live = !hasResult && m.liveStatus === "en_curso";
+                      const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
+                      return (
+                        <div key={m.key} className="text-sm min-w-0" style={F.body}>
+                          <div className="flex items-baseline gap-2 min-w-0">
+                            <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                            {m.placeholder
+                              ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
+                              : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
+                            {hasResult && <span className="font-mono text-xs text-teal-300 shrink-0 ml-auto"><MatchResultLabel match={m} winnerIsA={w === m.pairA} /></span>}
+                            {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
                           </div>
-                        );
-                      })()}
-                    </div>
-                  ))}
+                          <div className="text-[10px] truncate pl-7" style={{ color: categoryColor[m.categoryId] }}>
+                            {m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
         );
       })}
     </div>
@@ -2367,52 +3558,165 @@ function CircuitsPublicView({ circuits, tournaments, organizers, ads }) {
   );
 }
 
-function OrganizerSelectScreen({ organizers, tournaments, circuits, ads, onSelect, onGoLogin }) {
+/* ---------- Pantalla de inicio ---------- */
+
+function PeopleIcon({ size = 18, color = BRAND.lime }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
+      <circle cx="12" cy="7.5" r="3.5" /><circle cx="5" cy="9" r="2.5" /><circle cx="19" cy="9" r="2.5" />
+      <path d="M12 12.5c-3.6 0-6 2-6 4.5V19h12v-2c0-2.5-2.4-4.5-6-4.5zM5 13c-2.4 0-4 1.4-4 3.3V18h3.5v-1c0-1.5.6-2.9 1.7-3.9A5 5 0 0 0 5 13zm14 0c-.4 0-.8 0-1.2.1a5.3 5.3 0 0 1 1.7 3.9v1H23v-1.7C23 14.4 21.4 13 19 13z" />
+    </svg>
+  );
+}
+
+function TrophyIcon({ size = 16, color = BRAND.lime }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
+      <path d="M7 3h10v2h3v3a4 4 0 0 1-4 4h-.3A5 5 0 0 1 13 14.9V17h3v3H8v-3h3v-2.1A5 5 0 0 1 8.3 12H8a4 4 0 0 1-4-4V5h3V3zm0 4H6v1a2 2 0 0 0 1 1.7V7zm10 0v2.7A2 2 0 0 0 18 8V7h-1z" />
+    </svg>
+  );
+}
+
+function ChevronCircle({ color }) {
+  return (
+    <span className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.6)" }} aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
+    </span>
+  );
+}
+
+/* Encabezado de la app: logo grande y el acceso de organizadores con borde de neón */
+function SiteHeader({ onGoLogin }) {
+  return (
+    <header className="px-4 sm:px-6 py-4 flex items-center justify-between gap-3 max-w-5xl mx-auto">
+      <div className="flex items-center gap-2 min-w-0">
+        <Logo size={38} />
+        <div className="min-w-0">
+          <p className="leading-none text-[15px] sm:text-xl whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</p>
+          <p className="text-[8px] sm:text-[10px] mt-1 whitespace-nowrap tracking-[2px] sm:tracking-[3px]" style={{ ...F.body, color: BRAND.logoLime }}>EVENTOS DE PADEL</p>
+        </div>
+      </div>
+      <button
+        onClick={onGoLogin}
+        className="flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-full text-xs sm:text-sm font-semibold shrink-0 transition hover:brightness-125"
+        style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
+      >
+        <PeopleIcon /> Organizadores
+      </button>
+    </header>
+  );
+}
+
+/* Números de la portada, calculados con los datos reales: torneos que no terminaron, jugadores
+   anotados en ellos y partidos con horario para hoy */
+function homeStats(tournaments) {
+  const active = tournaments.filter((t) => t.status !== STATUS.FINALIZADO);
+  const players = active.reduce((sum, t) => sum + t.categories.reduce((s, c) => s + c.pairs.length * (c.format === "super8_individual" ? 1 : 2), 0), 0);
+  const today = todayISO();
+  const matchesToday = tournaments.reduce((sum, t) => sum + collectScheduleableMatches(t).filter((m) => m.schedule && m.schedule.date === today && !m.draft).length, 0);
+  return { active: active.length, players, matchesToday };
+}
+
+function HomeHero({ tournaments }) {
+  const stats = useMemo(() => homeStats(tournaments), [tournaments]);
+  const items = [
+    [<TrophyIcon size={22} />, stats.active, stats.active === 1 ? "Torneo activo" : "Torneos activos"],
+    [<PeopleIcon size={22} />, stats.players, "Jugadores"],
+    [<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={BRAND.lime} strokeWidth="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M5.5 6.5c3 2.5 3 8.5 0 11M18.5 6.5c-3 2.5-3 8.5 0 11" /></svg>, stats.matchesToday, "Partidos hoy"],
+  ];
+  return (
+    <section className="relative overflow-hidden" style={{ borderTop: `1px solid ${BRAND.cyan}33`, borderBottom: `1px solid ${BRAND.cyan}33` }}>
+      {/* El jugador está a la izquierda de la foto y abajo a la izquierda trae texto propio: en el
+          celular el texto va abajo (tapando ese texto) y en la compu va a la derecha, sobre la reja */}
+      <img src={portadaUrl} alt="" className="absolute inset-0 w-full h-full object-cover object-[25%_15%] sm:object-[20%_30%]" />
+      <div className="absolute inset-0 sm:hidden" style={{ background: "linear-gradient(0deg, rgba(8,18,24,1) 0%, rgba(8,18,24,0.96) 34%, rgba(8,18,24,0.35) 58%, rgba(8,18,24,0.15) 80%, rgba(8,18,24,0.55) 100%)" }} />
+      <div className="absolute inset-0 hidden sm:block" style={{ background: "linear-gradient(270deg, rgba(8,18,24,0.95) 0%, rgba(8,18,24,0.8) 42%, rgba(8,18,24,0.1) 70%), linear-gradient(0deg, rgba(8,18,24,0.97) 0%, rgba(8,18,24,0.6) 22%, transparent 45%)" }} />
+      <div className="relative max-w-5xl mx-auto px-4 sm:px-6 pt-5 pb-6 sm:py-14 flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-4 sm:gap-8 min-h-[420px] sm:min-h-[380px]">
+        <div className="min-w-0 max-w-md sm:text-right mt-auto sm:mt-0">
+          <div className="flex items-center gap-2 mb-3 sm:justify-end">
+            <Logo size={56} />
+            <span className="leading-[0.85] text-3xl sm:text-5xl" style={{ ...F.display, color: BRAND.ink, fontStyle: "italic" }}>SMASH<br />POINT</span>
+          </div>
+          <p className="text-lg sm:text-2xl leading-snug" style={{ ...F.body, color: BRAND.ink }}>
+            Elegí un organizador para ver sus torneos, resultados y llaves <span className="font-bold" style={{ color: BRAND.lime }}>en vivo.</span>
+          </p>
+        </div>
+        <div className="shrink-0 self-end sm:self-auto rounded-xl px-3 py-2 w-[8.5rem] sm:w-44 divide-y" style={{ ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.72)", backdropFilter: "blur(6px)", borderColor: BRAND.cyan + "66" }}>
+          {items.map(([icon, value, label]) => (
+            <div key={label} className="flex items-center gap-2 py-2" style={{ borderColor: BRAND.cyan + "33" }}>
+              <span className="shrink-0">{icon}</span>
+              <div className="min-w-0">
+                <p className="text-xl sm:text-2xl font-bold leading-none" style={{ ...F.body, color: BRAND.ink }}>{value}</p>
+                <p className="text-[10px] sm:text-xs text-teal-300 leading-tight mt-0.5" style={F.body}>{label}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* Tarjeta de organizador: su foto de portada de fondo (o una cancha genérica), el logo en un
+   círculo con aro de neón, el nombre, la cantidad de torneos y la flecha para entrar */
+function OrganizerCard({ organizer, count, color, onSelect }) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="relative text-left rounded-2xl overflow-hidden min-h-[15rem] sm:min-h-[17rem] flex flex-col justify-end transition hover:brightness-110"
+      style={neonStyle(color)}
+    >
+      {organizer.coverUrl
+        ? <img src={organizer.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+        : <div className="absolute inset-0" style={{ background: COURT_FALLBACK_BACKGROUND }} />}
+      <div className="absolute inset-0" style={{ background: "linear-gradient(0deg, rgba(8,18,24,0.95) 0%, rgba(8,18,24,0.55) 45%, rgba(8,18,24,0.2) 100%)" }} />
+      <div className="relative flex justify-center pt-5">
+        {organizer.logoUrl ? (
+          <img src={organizer.logoUrl} alt="" className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover" style={{ ...neonStyle(color, true), backgroundColor: "#081218" }} />
+        ) : (
+          <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center text-4xl" style={{ ...neonStyle(color, true), ...F.display, backgroundColor: "#081218", color }}>
+            {organizer.name.trim().charAt(0).toUpperCase()}
+          </div>
+        )}
+      </div>
+      <div className="relative p-3 sm:p-4 mt-auto">
+        <p className="text-base sm:text-xl leading-tight uppercase mb-2 break-words" style={{ ...F.display, color: BRAND.ink }}>{organizer.name}</p>
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-sm whitespace-nowrap min-w-0" style={{ ...F.body, border: `1px solid ${color}66`, backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}>
+            <TrophyIcon size={14} color={color} /> {count} torneo{count !== 1 ? "s" : ""}
+          </span>
+          <ChevronCircle color={color} />
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function OrganizerSelectScreen({ organizers, tournaments, ads, onSelect, onGoLogin, onRegister }) {
   const visible = organizers.filter((o) => o.role !== "creador");
 
   return (
     <div>
-      <header className="px-6 pt-10 pb-8 border-b border-teal-900">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Logo size={40} />
-            <h1 className="text-2xl" style={F.display}>SMASH POINT</h1>
-          </div>
-          <button onClick={onGoLogin} className="text-sm px-4 py-2 rounded border border-teal-700 hover:bg-teal-900 transition" style={F.body}>
-            Organizadores
-          </button>
-        </div>
-        <p className="mt-6 max-w-xl text-teal-200" style={F.body}>
-          Elegí un organizador para ver sus torneos, resultados y llaves en vivo.
-        </p>
-      </header>
+      <SiteHeader onGoLogin={onGoLogin} />
+      <HomeHero tournaments={tournaments} />
+      <OpenRegistrationsStrip tournaments={tournaments} organizers={organizers} onRegister={onRegister} />
+      <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" />
 
-      <main className="px-6 py-8">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 pb-10">
         {visible.length === 0 ? (
           <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-            {visible.map((o) => {
-              const count = tournaments.filter((t) => t.organizerId === o.id).length;
-              return (
-                <button
-                  key={o.id}
-                  onClick={() => onSelect(o.id)}
-                  className="rounded-lg border border-teal-800 hover:border-lime-400 transition p-4 text-center"
-                  style={{ backgroundColor: "#9fe02208" }}
-                >
-                  {o.logoUrl ? (
-                    <img src={o.logoUrl} alt="" className="w-20 h-20 rounded-full object-cover mx-auto border border-teal-700" />
-                  ) : (
-                    <div className="w-20 h-20 rounded-full mx-auto flex items-center justify-center text-2xl font-semibold" style={{ backgroundColor: "#115e59", color: "#9fe022" }}>
-                      {o.name.trim().charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <p className="mt-3 font-semibold text-sm" style={F.body}>{o.name}</p>
-                  <p className="text-xs text-teal-500 mt-0.5" style={F.body}>{count} torneo{count !== 1 ? "s" : ""}</p>
-                </button>
-              );
-            })}
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
+            {visible.map((o, i) => (
+              <OrganizerCard
+                key={o.id}
+                organizer={o}
+                count={tournaments.filter((t) => t.organizerId === o.id).length}
+                color={(Math.floor(i / 2) + i) % 2 === 0 ? BRAND.lime : BRAND.cyan}
+                onSelect={() => onSelect(o.id)}
+              />
+            ))}
           </div>
         )}
       </main>
@@ -2424,17 +3728,26 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
   const [selectedOrgId, setSelectedOrgId] = useState(null);
   const [section, setSection] = useState("torneos"); // torneos | circuitos
   const [filter, setFilter] = useState(STATUS.EN_CURSO); // todos | Próximo | En curso | Finalizado
+  const [registeringId, setRegisteringId] = useState(null);
+  const registering = tournaments.find((t) => t.id === registeringId);
+  const registrationSheet = registering && (
+    <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
+  );
+  const onRegister = (t) => setRegisteringId(t.id);
 
   if (!selectedOrgId) {
     return (
-      <OrganizerSelectScreen
-        organizers={organizers}
-        tournaments={tournaments}
-        circuits={circuits}
-        ads={ads}
-        onSelect={setSelectedOrgId}
-        onGoLogin={onGoLogin}
-      />
+      <>
+        <OrganizerSelectScreen
+          organizers={organizers}
+          tournaments={tournaments}
+          ads={ads}
+          onSelect={setSelectedOrgId}
+          onGoLogin={onGoLogin}
+          onRegister={onRegister}
+        />
+        {registrationSheet}
+      </>
     );
   }
 
@@ -2453,15 +3766,11 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
 
   return (
     <div>
-      <header className="px-6 pt-10 pb-8 border-b border-teal-900">
-        <div className="flex items-center justify-between">
-          <button onClick={() => setSelectedOrgId(null)} className="text-sm text-teal-400 hover:text-lime-400 flex items-center gap-1" style={F.body}>
-            ← Organizadores
-          </button>
-          <button onClick={onGoLogin} className="text-sm px-4 py-2 rounded border border-teal-700 hover:bg-teal-900 transition" style={F.body}>
-            Organizadores
-          </button>
-        </div>
+      <SiteHeader onGoLogin={onGoLogin} />
+      <header className="px-6 pt-2 pb-8 border-b border-teal-900">
+        <button onClick={() => setSelectedOrgId(null)} className="text-sm text-teal-400 hover:text-lime-400 flex items-center gap-1" style={F.body}>
+          ← Todos los organizadores
+        </button>
         <div className="flex items-center gap-3 mt-6">
           {selectedOrg?.logoUrl ? (
             <img src={selectedOrg.logoUrl} alt="" className="w-12 h-12 rounded-full object-cover border border-teal-700" />
@@ -2522,10 +3831,14 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
           const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[t.status];
           const progress = tournamentProgress(t);
           return (
-          <button
+          // Es un contenedor tocable y no un <button> porque adentro va el botón "Inscribirme"
+          <div
             key={t.id}
+            role="button"
+            tabIndex={0}
             onClick={() => onOpen(t.id)}
-            className="text-left rounded-lg transition overflow-hidden"
+            onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(t.id); } }}
+            className="text-left rounded-lg transition overflow-hidden cursor-pointer"
             style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}33`, borderTop: `3px solid ${accent}` }}
           >
             {bigCards ? (
@@ -2537,6 +3850,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
                   <img src={t.coverImageUrl} alt="" className="w-full object-cover aspect-[3/4]" />
                 )}
                 <div className="p-3 sm:p-4 text-center">
+                  <div className="mb-2"><TournamentTypeTag tournament={t} /></div>
                   <p className="text-[11px] sm:text-sm text-teal-300" style={F.body}>
                     <span className="text-teal-500">Fecha: </span>
                     {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}
@@ -2557,6 +3871,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
                       <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct.toFixed(2)} %</p>
                     </>
                   )}
+                  <div className="mt-2 space-y-2">
+                    <OpenRegistrationsBadge tournament={t} />
+                    <RegisterButton tournament={t} onRegister={onRegister} full className="text-xs sm:text-sm" />
+                  </div>
                 </div>
               </>
             ) : (
@@ -2569,6 +3887,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
                     <h2 className="text-lg font-semibold" style={F.body}>{t.name}</h2>
                     <Badge status={t.status} />
                   </div>
+                  <div className="mt-2"><TournamentTypeTag tournament={t} /></div>
                   <p className="mt-2 text-sm text-teal-300" style={F.body}>
                     {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}
                     {t.venue ? ` · ${t.venue}` : ""}
@@ -2576,24 +3895,33 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
                   <p className="mt-3 text-sm text-teal-400" style={F.body}>
                     {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {t.categories.reduce((sum, c) => sum + c.pairs.length, 0)} parejas anotadas
                   </p>
+                  <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
+                    <OpenRegistrationsBadge tournament={t} />
+                    <RegisterButton tournament={t} onRegister={onRegister} />
+                  </div>
                 </div>
               </>
             )}
-          </button>
+          </div>
           );
         })}
       </main>
       </>
       )}
+      <div className="px-6 pb-10">
+        <AdBanner ads={ads} />
+      </div>
+      {registrationSheet}
     </div>
   );
 }
 
 /* ---------- Vista pública: detalle de torneo ---------- */
 
-/* Súper 8: lista de todos los partidos agrupados por ronda y, debajo, la tabla de posiciones (se
-   recalcula sola con cada resultado). Con onSetScore/onWalkover muestra la carga de resultados
-   para el organizador; sin ellos es la vista de solo lectura para el público. */
+/* Súper 8: lista simple de todos los partidos, uno por renglón y en orden de juego
+   ("Elías - Martín vs Juan - Negro"), y debajo la tabla de posiciones (se recalcula sola con cada
+   resultado). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
+   ellos es la vista de solo lectura para el público. */
 function Super8View({ category, format, onSetScore, onWalkover }) {
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
   const group = category.groups[0];
@@ -2601,57 +3929,39 @@ function Super8View({ category, format, onSetScore, onWalkover }) {
   const editable = !!onSetScore;
   const individual = category.format === "super8_individual";
   const standingsGroup = individual ? super8IndividualStandingsGroup(category, group) : group;
-  const rounds = [];
-  group.matches.forEach((m) => { (rounds[m.round - 1] = rounds[m.round - 1] || []).push(m); });
+  const nameOf = (id) => pairsById[id]?.name || "—";
 
   return (
     <div>
-      <div className="space-y-5">
-        {rounds.map((matches, ri) => {
-          const color = GROUP_COLORS[ri % GROUP_COLORS.length];
+      <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
+        {group.matches.map((m, i) => {
+          const hasResult = matchIsPlayed(m);
+          const w = hasResult ? matchWinnerId(m) : null;
+          const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
           return (
-            <div key={ri} className="rounded-xl p-4 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
-              <div className="mb-3"><SkewPill color={color}>Ronda {ri + 1}</SkewPill></div>
-              <div className="space-y-3">
-                {matches.map((m) => {
-                  const hasResult = matchIsPlayed(m);
-                  const w = hasResult ? matchWinnerId(m) : null;
-                  const winnerIsA = w == null ? null : w === m.pairA;
-                  return (
-                    <div key={m.id} className="flex items-start justify-between gap-3 text-sm flex-wrap" style={F.body}>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {w === m.pairA && <WinnerCheck />}
-                          <GroupPairName id={m.pairA} pairsById={pairsById} />
-                        </div>
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {w === m.pairB && <WinnerCheck />}
-                          <GroupPairName id={m.pairB} pairsById={pairsById} />
-                        </div>
-                        <div className="flex items-center gap-2 flex-wrap mt-0.5">
-                          {hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>}
-                          <ScheduleLabel schedule={m.schedule} />
-                        </div>
-                      </div>
-                      {editable && (
-                        <div className="flex flex-col items-end gap-1">
-                          <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, side, value) => onSetScore(group.id, m.id, setIndex, side, value)} />
-                          <div className="flex gap-2 flex-wrap justify-end text-[10px]">
-                            {m.walkover ? (
-                              <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                            ) : (
-                              <>
-                                <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "lado 1"}</button>
-                                <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "lado 2"}</button>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+            <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
+              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+                <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>
+                {side(m.pairA)}
+                <span className="text-xs text-teal-500">vs</span>
+                {side(m.pairB)}
+                {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
               </div>
+              {editable && (
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
+                  <div className="flex flex-col gap-0.5 text-[10px]">
+                    {m.walkover ? (
+                      <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairA)} className="text-amber-400 underline text-left" title={`WO de ${nameOf(m.pairA)}`}>WO izq.</button>
+                        <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairB)} className="text-amber-400 underline text-left" title={`WO de ${nameOf(m.pairB)}`}>WO der.</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -2676,8 +3986,9 @@ function CategoryGroupsPublicView({ category, format }) {
             <div key={g.id} className="rounded-xl p-4 min-w-0" style={{ backgroundColor: color + "0d", border: `1px solid ${color}33` }}>
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <SkewPill color={color}>{g.name}</SkewPill>
+                <span className="text-[11px] text-teal-500" style={F.body}>Clasifican {groupQualifiersCount(g)}</span>
               </div>
-              <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} />
+              <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} highlightCount={groupQualifiersCount(g)} />
               <div className="mt-3 space-y-2">
                 {g.matches.map((m) => {
                   const hasResult = matchIsPlayed(m);
@@ -2775,13 +4086,30 @@ function CategoryBracketPublicView({ category }) {
 
 function PublicTournament({ tournament, ads, organizers, onBack }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
-  const [view, setView] = useState("horarios"); // horarios | grupos | llaves
+  const usesSchedule = tournamentUsesSchedule(tournament);
+  const super8Tournament = tournamentType(tournament) === "super8";
+  const [view, setView] = useState(usesSchedule ? "horarios" : "grupos"); // horarios | grupos | llaves
+  const viewTabs = super8Tournament
+    ? [["grupos", "Partidos y posiciones"]]
+    : [...(usesSchedule ? [["horarios", "Horarios"]] : []), ["grupos", "Grupos"], ["llaves", "Llaves finales"]];
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;
-  const organizerName = (organizers || []).find((o) => o.id === tournament.organizerId)?.name;
+  const organizer = (organizers || []).find((o) => o.id === tournament.organizerId);
+  const organizerName = organizer?.name;
+  const [registering, setRegistering] = useState(false);
+  const showRegister = registrationStatus(tournament) !== "cerrado";
 
   return (
     <div className="px-6 py-8 max-w-4xl mx-auto">
+      {/* Inscripción: botón fijo abajo, por encima de la barra del celular (safe area) */}
+      {showRegister && (
+        <div className="fixed inset-x-0 bottom-0 z-40 px-4 pt-3" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)", background: "linear-gradient(0deg, rgba(8,18,24,0.98) 60%, rgba(8,18,24,0))" }}>
+          <div className="max-w-md mx-auto">
+            <RegisterButton tournament={tournament} onRegister={() => setRegistering(true)} full className="py-3.5 text-base" />
+          </div>
+        </div>
+      )}
+      {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} />}
       <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
       {tournament.coverImageUrl && (
         <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
@@ -2791,17 +4119,17 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
         <Badge status={tournament.status} />
       </div>
       <p className="text-xs text-teal-500 mt-2" style={F.body}>
-        {formatSummary(format)}
+        {tournamentTypeSummary(tournament)}
         {tournament.venue ? ` · Sede: ${tournament.venue}` : ""}
       </p>
       {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
 
-      <div className="flex gap-2 mt-4">
-        {[["horarios", "Horarios"], ["grupos", "Grupos"], ["llaves", "Llaves finales"]].map(([key, label]) => (
+      <div className="flex gap-2 mt-4 overflow-x-auto">
+        {viewTabs.map(([key, label]) => (
           <button
             key={key}
             onClick={() => setView(key)}
-            className={`px-3 py-1.5 rounded text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+            className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
             style={F.body}
           >
             {label}
@@ -2815,7 +4143,7 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
         <p className="opacity-60 text-sm mt-8" style={F.body}>Todavía no se cargaron categorías para este torneo.</p>
       ) : (
         <>
-          <div className="flex gap-2 mt-6 flex-wrap">
+          <div className="flex gap-2 mt-6 overflow-x-auto pb-1 sm:flex-wrap">
             {tournament.categories.map((c, ci) => {
               const color = GROUP_COLORS[ci % GROUP_COLORS.length];
               const active = c.id === category?.id;
@@ -2823,7 +4151,7 @@ function PublicTournament({ tournament, ads, organizers, onBack }) {
                 <button
                   key={c.id}
                   onClick={() => setCategoryId(c.id)}
-                  className="px-4 py-2 rounded-full text-sm border transition font-medium"
+                  className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
                   style={
                     active
                       ? { backgroundColor: color, color: "#14181f", borderColor: color }
@@ -3083,6 +4411,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(o.name);
   const [profileLogo, setProfileLogo] = useState(o.logoUrl || "");
+  const [profileCover, setProfileCover] = useState(o.coverUrl || "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -3093,7 +4422,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
     setSaving(true);
     setSaveError("");
     try {
-      await onUpdateOrganizer(o.id, { name: profileName.trim() || o.name, logoUrl: profileLogo.trim() });
+      await onUpdateOrganizer(o.id, { name: profileName.trim() || o.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
       setEditingProfile(false);
     } catch (e) {
       setSaveError(e.message || "No se pudo guardar.");
@@ -3154,6 +4483,9 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
           </div>
           <div className="min-w-[220px]">
             <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={accessToken} folder="logos" />
+          </div>
+          <div className="min-w-[220px]">
+            <ImageUploadField label="Foto de portada" value={profileCover} onChange={setProfileCover} accessToken={accessToken} folder="covers" />
           </div>
           <button type="button" disabled={saving} onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: saving ? 0.6 : 1 }}>
             {saving ? "Guardando…" : "Guardar"}
@@ -3513,14 +4845,23 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
   );
 }
 
-function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken }) {
+function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, pendingCount = 0 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(t.name);
   const [date, setDate] = useState(t.date);
   const [venue, setVenue] = useState(t.venue || "");
   const [coverImageUrl, setCoverImageUrl] = useState(t.coverImageUrl || "");
   const [circuitId, setCircuitId] = useState(t.circuitId || "");
+  const [registrationOpen, setRegistrationOpen] = useState(!!t.inscripcionesAbiertas);
+  const [cupoTexts, setCupoTexts] = useState({}); // { [categoryId]: texto del cupo }
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const clasico = tournamentType(t) === "clasico";
+
+  const startEditing = () => {
+    setRegistrationOpen(!!t.inscripcionesAbiertas);
+    setCupoTexts(Object.fromEntries(t.categories.map((c) => [c.id, c.cupo ? String(c.cupo) : ""])));
+    setEditing(true);
+  };
 
   if (editing) {
     return (
@@ -3529,10 +4870,12 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken })
         <div className="flex flex-wrap gap-2 items-end mb-2">
           <input value={name} onChange={(e) => setName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
-          <select value={circuitId} onChange={(e) => setCircuitId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
-            <option value="">Torneo relámpago (sin circuito)</option>
-            {(circuits || []).map((c) => <option key={c.id} value={c.id}>{c.name} {c.year}</option>)}
-          </select>
+          {clasico && (
+            <select value={circuitId} onChange={(e) => setCircuitId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
+              <option value="">Sin circuito (torneo independiente)</option>
+              {(circuits || []).map((c) => <option key={c.id} value={c.id}>{c.name} {c.year}</option>)}
+            </select>
+          )}
         </div>
         <label className="block text-xs text-teal-400 mb-1" style={F.body}>Sede (club / complejo donde se juega)</label>
         <input
@@ -3543,10 +4886,30 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken })
         />
         <label className="block text-xs text-teal-400 mb-1" style={F.body}>Imagen de portada (se ve en la tarjeta pública)</label>
         <ImageUploadField value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="tournaments" />
+        <div className="mt-3">
+          <RegistrationSettings
+            open={registrationOpen}
+            onOpenChange={setRegistrationOpen}
+            rows={t.categories.map((c) => ({ key: c.id, name: c.name, fixed: isSuper8(c) ? "8 (Súper 8)" : null, value: cupoTexts[c.id] ?? "" }))}
+            onCupoChange={(key, text) => setCupoTexts({ ...cupoTexts, [key]: text })}
+          />
+        </div>
         <div className="flex flex-wrap gap-2 items-end mt-3">
           <button
             type="button"
-            onClick={() => { if (name.trim() && date) { onUpdate({ ...t, name: name.trim(), date, venue: venue.trim(), coverImageUrl: coverImageUrl.trim(), circuitId: circuitId || null }); setEditing(false); } }}
+            onClick={() => {
+              if (!name.trim() || !date) return;
+              // El Americano se juega en un solo día: si cambia la fecha del torneo, se mueve su día de juego
+              const playDates = tournamentType(t) === "americano" && (t.playDates || []).length === 1 ? [{ ...t.playDates[0], date }] : t.playDates;
+              const categories = t.categories.map((c) => {
+                if (isSuper8(c)) return c;
+                const { cupo, ...rest } = c;
+                const next = parseCupo(cupoTexts[c.id] ?? "");
+                return next ? { ...rest, cupo: next } : rest;
+              });
+              onUpdate({ ...t, name: name.trim(), date, venue: venue.trim(), coverImageUrl: coverImageUrl.trim(), circuitId: clasico ? circuitId || null : null, playDates, categories, inscripcionesAbiertas: registrationOpen });
+              setEditing(false);
+            }}
             className="px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
           >
             Guardar
@@ -3578,6 +4941,13 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken })
               {bracketsGenerated > 0 ? ` · ${bracketsGenerated} llave${bracketsGenerated !== 1 ? "s" : ""} generada${bracketsGenerated !== 1 ? "s" : ""}` : ""}
               {t.venue ? ` · ${t.venue}` : ""}
             </span>
+            <span className="inline-block mt-1 mr-1"><TournamentTypeTag tournament={t} /></span>
+            {t.inscripcionesAbiertas && <span className="inline-block mt-1 mr-1"><OpenRegistrationsBadge tournament={t} /></span>}
+            {pendingCount > 0 && (
+              <span className="inline-block mt-1 mr-1 px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold" style={{ ...F.body, backgroundColor: "#fb923c", color: "#14181f" }}>
+                {pendingCount} {pendingCount === 1 ? "nueva" : "nuevas"}
+              </span>
+            )}
             {circuit && <span className="inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full border border-lime-800 text-lime-400" style={F.body}>Fecha de: {circuit.name}</span>}
           </div>
         </div>
@@ -3594,7 +4964,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken })
           Cargar parejas y grupos →
         </button>
         <div className="flex gap-3 items-center">
-          <button type="button" onClick={() => setEditing(true)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar nombre/fecha</button>
+          <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>
           {!confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
@@ -3756,7 +5126,7 @@ function CircuitManager({ circuits, tournaments, onAdd, onUpdate, onDelete }) {
   return (
     <div>
       <p className="text-sm text-teal-400 mb-4" style={F.body}>
-        Un circuito agrupa varias fechas (torneos) que suman puntos individuales durante la temporada. Al crear o editar un torneo, elegís a qué circuito pertenece esa fecha (o "Torneo relámpago" si es independiente).
+        Un circuito agrupa varias fechas (torneos) que suman puntos individuales durante la temporada. Al crear o editar un torneo, elegís a qué circuito pertenece esa fecha (o "Sin circuito" si es independiente).
       </p>
       <div className="border border-teal-800 rounded-lg p-4 mb-6">
         <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Nuevo circuito</h2>
@@ -3789,23 +5159,16 @@ function CircuitManager({ circuits, tournaments, onAdd, onUpdate, onDelete }) {
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile }) {
+function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones }) {
   const [tab, setTab] = useState("torneos"); // torneos | circuitos
-  const [name, setName] = useState("");
-  const [date, setDate] = useState("");
-  const [circuitId, setCircuitId] = useState("");
+  const [creating, setCreating] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(organizer.name);
   const [profileLogo, setProfileLogo] = useState(organizer.logoUrl || "");
-
-  const create = () => {
-    if (!name || !date) return;
-    onCreate({ name, date, circuitId: circuitId || null });
-    setName(""); setDate(""); setCircuitId("");
-  };
+  const [profileCover, setProfileCover] = useState(organizer.coverUrl || "");
 
   const saveProfile = () => {
-    onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim() });
+    onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
     setEditingProfile(false);
   };
 
@@ -3820,7 +5183,7 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
       </div>
 
       <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-xs text-teal-400 hover:text-lime-400 mb-6" style={F.body}>
-        {editingProfile ? "Ocultar" : "Editar nombre y logo"}
+        {editingProfile ? "Ocultar" : "Editar nombre, logo y portada"}
       </button>
 
       {editingProfile && (
@@ -3831,6 +5194,9 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
           </div>
           <div className="min-w-[220px]">
             <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={organizer.accessToken} folder="logos" />
+          </div>
+          <div className="min-w-[220px]">
+            <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={setProfileCover} accessToken={organizer.accessToken} folder="covers" />
           </div>
           <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
             Guardar
@@ -3855,29 +5221,15 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
         <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
       ) : (
         <>
-          <div className="border border-teal-800 rounded-lg p-4 mb-8 flex flex-wrap gap-3 items-end">
-            <div>
-              <label className="block text-xs text-teal-400 mb-1" style={F.body}>Nombre del torneo</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
-            </div>
-            <div>
-              <label className="block text-xs text-teal-400 mb-1" style={F.body}>Fecha</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
-            </div>
-            <div>
-              <label className="block text-xs text-teal-400 mb-1" style={F.body}>Circuito (opcional)</label>
-              <select value={circuitId} onChange={(e) => setCircuitId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}>
-                <option value="">Torneo relámpago (sin circuito)</option>
-                {circuits.map((c) => <option key={c.id} value={c.id}>{c.name} {c.year}</option>)}
-              </select>
-            </div>
-            <button type="button" onClick={create} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>Crear torneo</button>
-          </div>
+          <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+            + Crear torneo
+          </button>
+          {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
 
           <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
           <div className="space-y-2">
             {tournaments.map((t) => (
-              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} />
+              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} />
             ))}
             {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
           </div>
@@ -3887,10 +5239,118 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
   );
 }
 
+/* Pestaña "Inscripciones" de un torneo: abrir/cerrar inscripciones y aceptar o rechazar las
+   pendientes. Aceptar agrega la pareja a su categoría (lo hace el servidor, junto con marcarla como
+   aceptada) y avisa antes si se pasa el cupo o si alguno de los jugadores ya juega otra categoría. */
+function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
+  const [busyId, setBusyId] = useState(null);
+  const [confirmRejectId, setConfirmRejectId] = useState(null);
+  const [errors, setErrors] = useState({});
+  const [showHistory, setShowHistory] = useState(false);
+  const categoriesById = Object.fromEntries(tournament.categories.map((c) => [c.id, c]));
+  const pending = inscripciones.filter((i) => i.estado === "pendiente").sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  const history = inscripciones.filter((i) => i.estado !== "pendiente");
+  const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
+
+  const resolve = async (i, accept) => {
+    setBusyId(i.id);
+    setErrors((e) => ({ ...e, [i.id]: null }));
+    try {
+      await onResolve(i, accept);
+      setConfirmRejectId(null);
+    } catch (err) {
+      setErrors((e) => ({ ...e, [i.id]: inscripcionErrorText(err) }));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div style={F.body}>
+      <div className="mb-5">
+        <Toggle
+          checked={!!tournament.inscripcionesAbiertas}
+          onChange={(v) => update({ ...tournament, inscripcionesAbiertas: v })}
+          label="Inscripciones abiertas"
+          description={tournament.inscripcionesAbiertas ? "El torneo aparece en la página pública con el botón \"Inscribirme\"." : "Nadie puede inscribirse desde la página pública."}
+        />
+        <p className="text-xs text-teal-500 mt-2">El cupo de cada categoría se cambia en "Editar datos e inscripciones", desde la lista de torneos.</p>
+      </div>
+
+      <h3 className="text-xs uppercase tracking-wide font-bold mb-2" style={{ color: "#fb923c" }}>Pendientes ({pending.length})</h3>
+      {pending.length === 0 && <p className="text-sm opacity-60 mb-4">No hay inscripciones pendientes.</p>}
+      <div className="space-y-3">
+        {pending.map((i) => {
+          const category = categoriesById[i.categoria_id];
+          const left = category ? categorySpotsLeft(category) : null;
+          const conflict = category ? findPlayerCategoryConflict(names(i), tournament, category.id) : null;
+          const busy = busyId === i.id;
+          return (
+            <div key={i.id} className="rounded-xl p-3" style={{ ...neonStyle("#fb923c"), backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <div className="flex items-start justify-between gap-2 flex-wrap">
+                <p className="text-base font-semibold">{names(i)}</p>
+                <span className="text-[11px] text-teal-500">{when(i.created_at)}</span>
+              </div>
+              <p className="text-sm text-teal-300">{category ? category.name : <span className="text-amber-400">Categoría eliminada</span>}</p>
+              <a href={`https://wa.me/${i.telefono}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-1 text-sm underline" style={{ color: BRAND.lime }}>
+                WhatsApp {formatArPhone(i.telefono)}
+              </a>
+              {category && left === 0 && (
+                <p className="text-xs text-amber-400 mt-2">
+                  {isSuper8(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
+                </p>
+              )}
+              {conflict && <p className="text-xs text-amber-400 mt-1">Uno de los jugadores ya está anotado en "{conflict}".</p>}
+              {errors[i.id] && <p className="text-xs text-red-400 mt-1" role="alert">{errors[i.id]}</p>}
+              <div className="flex gap-2 mt-3 flex-wrap">
+                {confirmRejectId === i.id ? (
+                  <>
+                    <span className="text-sm text-teal-300 self-center mr-1">¿Rechazar esta inscripción?</span>
+                    <button type="button" disabled={busy} onClick={() => resolve(i, false)} className="px-4 py-2 rounded-lg text-sm font-semibold border border-red-400 text-red-400 disabled:opacity-50">Sí, rechazar</button>
+                    <button type="button" disabled={busy} onClick={() => setConfirmRejectId(null)} className="px-4 py-2 rounded-lg text-sm text-teal-300">Cancelar</button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" disabled={busy || !category} onClick={() => resolve(i, true)} className="flex-1 min-w-[7rem] px-4 py-2.5 rounded-lg text-sm font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+                      {busy ? "Guardando…" : "Aceptar"}
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => setConfirmRejectId(i.id)} className="flex-1 min-w-[7rem] px-4 py-2.5 rounded-lg text-sm font-semibold border border-red-400 text-red-400 disabled:opacity-50">
+                      Rechazar
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {history.length > 0 && (
+        <div className="mt-6">
+          <button type="button" onClick={() => setShowHistory((v) => !v)} className="text-sm text-teal-300 underline">
+            {showHistory ? "Ocultar resueltas" : `Ver resueltas (${history.length})`}
+          </button>
+          {showHistory && (
+            <ul className="mt-2 space-y-1 text-sm">
+              {history.map((i) => (
+                <li key={i.id} className="flex justify-between gap-2 border-b border-teal-900 py-1.5">
+                  <span className="min-w-0 truncate">{names(i)} <span className="text-teal-500">· {categoriesById[i.categoria_id]?.name || "—"}</span></span>
+                  <span className={`shrink-0 text-xs font-semibold ${i.estado === "aceptada" ? "text-lime-400" : "text-red-400"}`}>{i.estado === "aceptada" ? "Aceptada" : "Rechazada"}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* Pestaña "Partidos y posiciones" de una categoría Súper 8: genera el cuadro fijo de partidos
    (numerando a los jugadores/parejas por orden de inscripción o por sorteo) y después muestra la
    carga de resultados ronda por ronda con la tabla de posiciones debajo. */
-function Super8AdminPanel({ category, format, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover }) {
+function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const individual = category.format === "super8_individual";
   const entryWord = individual ? "jugadores" : "parejas";
@@ -3923,7 +5383,7 @@ function Super8AdminPanel({ category, format, onUpdateCategory, onGroupsLocked, 
       <div className="border border-lime-800 rounded-lg p-4" style={{ backgroundColor: "rgba(163,230,53,0.05)" }}>
         <p className="text-sm font-semibold mb-1" style={F.body}>Generar partidos</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Se numera a los {entryWord} del 1 al {SUPER8_SIZE} y se arma el cuadro fijo de {individual ? 14 : 28} partidos en 7 rondas. Si ya cargaste fechas y canchas, los horarios se asignan solos.
+          Se numera a los {entryWord} del 1 al {SUPER8_SIZE} y se arma el cuadro fijo de {individual ? 14 : 28} partidos en 7 rondas.{scheduled ? " Si ya cargaste fechas y canchas, los horarios se asignan solos." : ""}
         </p>
         {!ready && (
           <p className="text-xs text-amber-400 mb-3" style={F.body}>
@@ -3987,6 +5447,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const super8 = isSuper8(category);
   const individual = category.format === "super8_individual";
   const super8Generated = super8 && category.groups.length > 0;
+  const usesSchedule = tournamentUsesSchedule(tournament);
 
   const addPair = () => {
     if (!pairName.trim()) return;
@@ -4204,7 +5665,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       {!super8Generated && <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>}
                     </div>
                   </div>
-                  <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />
+                  {usesSchedule && <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />}
                 </li>
               );
             })}
@@ -4222,6 +5683,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
         <Super8AdminPanel
           category={category}
           format={format}
+          scheduled={usesSchedule}
           onUpdateCategory={onUpdateCategory}
           onGroupsLocked={onGroupsLocked}
           onSetScore={setMatchSetScore}
@@ -4305,7 +5767,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                     </select>
                   </label>
                 </div>
-                <div className="mb-4"><StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} /></div>
+                <div className="mb-4"><StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} highlightCount={groupQualifiersCount(g)} /></div>
                 <div className="space-y-3">
                   {g.matches.map((m) => {
                     const stageLabel = groupMatchStageLabel(g, m);
@@ -4402,7 +5864,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
       {tab === "llave" && (
         <div>
-          {!category.bracket && category.groups.length > 0 && (
+          {usesSchedule && !category.bracket && category.groups.length > 0 && (
             <div className="border border-purple-800 rounded-lg p-4 mb-4">
               <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
                 Todavía no terminaron los grupos, pero ya podés precargar la estructura de la llave (fechas, horarios y canchas de octavos, cuartos, semis y final) usando "1°, 2°..." de cada grupo. Cuando se sepan las parejas clasificadas, se completan solas en los horarios que ya hayas cargado.
@@ -4419,7 +5881,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           {!category.bracket && (
             <div className="border border-teal-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-teal-300 mb-3" style={F.body}>
-                Generá la llave final con el 1° y 2° puesto de cada grupo (si no hay grupos, se usan todas las parejas). Los cruces se arman entre grupos distintos, para que un 1° nunca se enfrente con el 2° de su propio grupo en la primera ronda.
+                Generá la llave final con los clasificados de cada grupo: pasan tantas parejas como elegiste en "Clasifican" de cada grupo (si no hay grupos, se usan todas las parejas). Los cruces se arman entre grupos distintos, para que un 1° nunca se enfrente con el 2° de su propio grupo en la primera ronda, y si la cantidad no cierra, los mejor ubicados pasan directo a la ronda siguiente.
               </p>
               <button
                 onClick={() => {
@@ -4565,23 +6027,22 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelete }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
-  const [newFormat, setNewFormat] = useState("zonas");
   const [editingId, setEditingId] = useState(null);
   const submitNew = () => {
     if (!newName.trim()) return;
-    onAdd(newName.trim(), newFormat);
-    setNewName(""); setNewFormat("zonas"); setAdding(false);
+    onAdd(newName.trim());
+    setNewName(""); setAdding(false);
   };
   const [editName, setEditName] = useState("");
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
 
   return (
     <div className="mb-6">
-      <div className="flex flex-wrap gap-2 items-center">
+      <div className="flex gap-2 items-center overflow-x-auto pb-1 sm:flex-wrap">
         {categories.map((c, ci) => {
           const color = GROUP_COLORS[ci % GROUP_COLORS.length];
           return (
-          <div key={c.id} className="flex items-center">
+          <div key={c.id} className="flex items-center shrink-0">
             {editingId === c.id ? (
               <span className="flex items-center gap-1">
                 <input
@@ -4597,7 +6058,7 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
                 type="button"
                 onClick={() => onSelect(c.id)}
                 onDoubleClick={() => { setEditingId(c.id); setEditName(c.name); }}
-                className="px-4 py-2 rounded-full text-sm border transition font-medium"
+                className="whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
                 style={
                   c.id === activeId
                     ? { backgroundColor: color, color: "#14181f", borderColor: color }
@@ -4625,7 +6086,7 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
         })}
 
         {adding ? (
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1 shrink-0">
             <input
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
@@ -4634,14 +6095,6 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
               autoFocus
               className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
             />
-            <select
-              value={newFormat}
-              onChange={(e) => setNewFormat(e.target.value)}
-              className="px-2 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-              title="Formato de la categoría"
-            >
-              {Object.entries(CATEGORY_FORMAT_LABEL).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            </select>
             <button
               type="button"
               onClick={submitNew}
@@ -4649,10 +6102,10 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
             >
               Agregar
             </button>
-            <button type="button" onClick={() => { setAdding(false); setNewName(""); setNewFormat("zonas"); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
+            <button type="button" onClick={() => { setAdding(false); setNewName(""); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
           </span>
         ) : (
-          <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded-full text-sm border border-dashed border-teal-700 text-teal-400 hover:border-lime-400 hover:text-lime-400" style={F.body}>
+          <button type="button" onClick={() => setAdding(true)} className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border border-dashed border-teal-700 text-teal-400 hover:border-lime-400 hover:text-lime-400" style={F.body}>
             + Agregar categoría
           </button>
         )}
@@ -4664,15 +6117,28 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
   );
 }
 
-function AdminTournament({ tournament, update, onBack }) {
-  const [view, setView] = useState("horarios"); // categorias | horarios
+function AdminTournament({ tournament, update, onBack, inscripciones = [], onResolveInscripcion }) {
+  const usesSchedule = tournamentUsesSchedule(tournament);
+  const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
+  // Con el torneo en curso arranca en "En cancha", que es lo que se usa desde el celular en el club;
+  // si hay inscripciones nuevas y todavía no empezó, arranca ahí
+  const [chosenView, setView] = useState(
+    tournament.status === STATUS.EN_CURSO ? "encancha" : pendingCount > 0 ? "inscripciones" : "horarios"
+  ); // encancha | horarios | categorias | inscripciones
+  // El Súper 8 no tiene grilla de horarios: los partidos se juegan uno atrás del otro
+  const view = usesSchedule || chosenView === "inscripciones" ? chosenView : "categorias";
+  const tabs = [
+    ...(usesSchedule ? [["encancha", "En cancha"], ["horarios", "Horarios"]] : []),
+    ["categorias", "Categorías"],
+    ["inscripciones", "Inscripciones"],
+  ];
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || null;
 
   const setCategories = (categories) => update({ ...tournament, categories });
 
-  const addCategory = (name, format = "zonas") => {
-    const cat = { id: uid(), name, pairs: [], groups: [], bracket: null, ...(format !== "zonas" ? { format, teams: [] } : {}) };
+  const addCategory = (name) => {
+    const cat = newCategory(name, categoryFormatForConfig(tournamentConfig(tournament)));
     setCategories([...tournament.categories, cat]);
     setCategoryId(cat.id);
   };
@@ -4713,27 +6179,36 @@ function AdminTournament({ tournament, update, onBack }) {
         </select>
       </div>
       <p className="text-sm text-teal-400 mb-4" style={F.body}>
-        Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual.
+        {usesSchedule
+          ? "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual."
+          : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan uno atrás del otro en la cancha disponible."}
       </p>
 
-      <div className="flex gap-2 mb-6">
-        {[["horarios", "Horarios"], ["categorias", "Categorías"]].map(([key, label]) => (
+      <div className="flex gap-2 mb-6 overflow-x-auto">
+        {tabs.map(([key, label]) => (
           <button
             key={key}
             onClick={() => setView(key)}
-            className={`px-4 py-2 rounded text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 rounded text-sm border flex items-center gap-1.5 ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
             style={F.body}
           >
             {label}
+            {key === "inscripciones" && pendingCount > 0 && (
+              <span className="px-1.5 rounded-full text-[10px] font-bold" style={{ backgroundColor: "#fb923c", color: "#14181f" }}>{pendingCount}</span>
+            )}
           </button>
         ))}
       </div>
 
-      {view === "horarios" ? (
+      {view === "inscripciones" ? (
+        <InscripcionesPanel tournament={tournament} update={update} inscripciones={inscripciones} onResolve={onResolveInscripcion} />
+      ) : view === "encancha" ? (
+        <OnCourtView tournament={tournament} update={update} />
+      ) : view === "horarios" ? (
         <ScheduleAdminView tournament={tournament} update={update} />
       ) : (
         <>
-          <MatchFormatEditor format={tournament.matchFormat} onChange={(mf) => update({ ...tournament, matchFormat: mf })} />
+          <TournamentTypeEditor tournament={tournament} update={update} />
 
           <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Categorías</h2>
           <CategoryTabs
@@ -4773,6 +6248,44 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+/* Completa y migra los torneos leídos de Supabase: torneos de antes de las categorías, partidos
+   sin sets, fechas guardadas como texto y valores por defecto de formato, canchas y duración */
+function normalizeLoadedTournaments(tours) {
+  const fixMatches = (matches) => (matches || []).map((m) => (m.sets ? m : { ...m, sets: [] }));
+  const fixBracket = (bracket) => (bracket ? bracket.map((round) => round.map((m) => (m.sets ? m : { ...m, sets: [] }))) : bracket);
+  const fixPlayDates = (pd) => (pd || []).map((d) => (typeof d === "string" ? { date: d, from: "09:00", to: "22:00" } : d));
+
+  return tours.map((t) => {
+    const { pairs, groups, bracket, ...rest } = t;
+    let categories = t.categories;
+    if (!categories) {
+      // Migración: torneos de antes de "categorías" pasan a tener una única categoría "General"
+      categories = [{
+        id: uid(),
+        name: "General",
+        pairs: (pairs || []).map((p) => ({ ...p, availability: p.availability || [] })),
+        groups: (groups || []).map((g) => ({ ...g, matches: fixMatches(g.matches) })),
+        bracket: fixBracket(bracket),
+      }];
+    } else {
+      categories = categories.map((c) => ({
+        ...c,
+        pairs: (c.pairs || []).map((p) => ({ ...p, availability: p.availability || [] })),
+        groups: (c.groups || []).map((g) => ({ ...g, matches: fixMatches(g.matches) })),
+        bracket: fixBracket(c.bracket),
+      }));
+    }
+    return {
+      ...rest,
+      matchFormat: t.matchFormat || { ...DEFAULT_MATCH_FORMAT },
+      courtsCount: t.courtsCount ?? 4,
+      matchDurationMinutes: t.matchDurationMinutes ?? 90,
+      playDates: fixPlayDates(t.playDates),
+      categories,
+    };
+  });
+}
+
 /* ---------- App raíz ---------- */
 
 function SmashPointAppInner() {
@@ -4793,6 +6306,10 @@ function SmashPointAppInner() {
         try {
           orgs = await fetchOrganizers();
         } catch { orgs = []; }
+        try {
+          const covers = (await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {};
+          orgs = orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" }));
+        } catch {}
 
         let tours;
         try {
@@ -4802,39 +6319,7 @@ function SmashPointAppInner() {
           const firstOrganizer = orgs.find((o) => o.role === "organizador") || orgs[0] || { id: "sin-organizador" };
           tours = seedTournaments(firstOrganizer.id);
         } else {
-          const fixMatches = (matches) => (matches || []).map((m) => (m.sets ? m : { ...m, sets: [] }));
-          const fixBracket = (bracket) => (bracket ? bracket.map((round) => round.map((m) => (m.sets ? m : { ...m, sets: [] }))) : bracket);
-          const fixPlayDates = (pd) => (pd || []).map((d) => (typeof d === "string" ? { date: d, from: "09:00", to: "22:00" } : d));
-
-          tours = tours.map((t) => {
-            const { pairs, groups, bracket, ...rest } = t;
-            let categories = t.categories;
-            if (!categories) {
-              // Migración: torneos de antes de "categorías" pasan a tener una única categoría "General"
-              categories = [{
-                id: uid(),
-                name: "General",
-                pairs: (pairs || []).map((p) => ({ ...p, availability: p.availability || [] })),
-                groups: (groups || []).map((g) => ({ ...g, matches: fixMatches(g.matches) })),
-                bracket: fixBracket(bracket),
-              }];
-            } else {
-              categories = categories.map((c) => ({
-                ...c,
-                pairs: (c.pairs || []).map((p) => ({ ...p, availability: p.availability || [] })),
-                groups: (c.groups || []).map((g) => ({ ...g, matches: fixMatches(g.matches) })),
-                bracket: fixBracket(c.bracket),
-              }));
-            }
-            return {
-              ...rest,
-              matchFormat: t.matchFormat || { ...DEFAULT_MATCH_FORMAT },
-              courtsCount: t.courtsCount ?? 4,
-              matchDurationMinutes: t.matchDurationMinutes ?? 90,
-              playDates: fixPlayDates(t.playDates),
-              categories,
-            };
-          });
+          tours = normalizeLoadedTournaments(tours);
         }
 
         let loadedAds;
@@ -4874,6 +6359,43 @@ function SmashPointAppInner() {
     try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); } catch {}
   }, [session]);
 
+  /* Vuelve a leer los torneos de Supabase. Se usa después de aceptar una inscripción (la pareja la
+     agrega el servidor) y al volver a la pestaña del panel, para no guardar encima una copia vieja. */
+  const reloadTournaments = useCallback(async () => {
+    try {
+      const tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
+      if (Array.isArray(tours)) setTournaments(normalizeLoadedTournaments(tours));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const onVisible = () => { if (document.visibilityState === "visible") reloadTournaments(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [session, reloadTournaments]);
+
+  // Inscripciones de los torneos del organizador logueado (para los avisos de "nuevas" y su pestaña)
+  const [inscripciones, setInscripciones] = useState([]);
+  const reloadInscripciones = useCallback(async () => {
+    if (!session?.accessToken || session.role === "creador") { setInscripciones([]); return; }
+    try { setInscripciones(await fetchInscripciones(session.accessToken)); } catch { /* la migración todavía no está aplicada o el token venció */ }
+  }, [session]);
+
+  useEffect(() => {
+    reloadInscripciones();
+    if (!session) return;
+    const id = setInterval(reloadInscripciones, 60000);
+    const onVisible = () => { if (document.visibilityState === "visible") reloadInscripciones(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session, reloadInscripciones]);
+
+  const resolveInscripcion = async (inscripcion, accept) => {
+    await supabaseRpc(accept ? "aceptar_inscripcion" : "rechazar_inscripcion", { p_id: inscripcion.id }, session.accessToken);
+    await Promise.all([accept ? reloadTournaments() : null, reloadInscripciones()]);
+  };
+
   const updateTournament = (updated) => {
     persistTournaments(tournaments.map((t) => (t.id === updated.id ? updated : t)));
   };
@@ -4882,13 +6404,22 @@ function SmashPointAppInner() {
     persistTournaments(tournaments.filter((t) => t.id !== id));
   };
 
-  const createTournament = ({ name, date, circuitId }) => {
-    const t = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [] };
+  const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas }) => {
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}) };
+    const categoryFormat = categoryFormatForConfig(config);
+    const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
+    const t = withTournamentConfig({ ...base, categories: newCategories }, config);
     persistTournaments([...tournaments, t]);
   };
 
   const updateOrganizerProfile = async (id, patch) => {
-    await updateOrganizerProfileRemote(id, session.accessToken, patch);
+    const { coverUrl, ...profilePatch } = patch;
+    if (Object.keys(profilePatch).length > 0) await updateOrganizerProfileRemote(id, session.accessToken, profilePatch);
+    if (coverUrl !== undefined) {
+      // Se relee antes de guardar para no pisar la portada que otro organizador haya cambiado
+      const covers = { ...((await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {}), [id]: coverUrl };
+      await kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session.accessToken);
+    }
     setOrganizers((orgs) => orgs.map((o) => (o.id === id ? { ...o, ...patch } : o)));
     setSession((s) => (s && s.id === id ? { ...s, ...patch } : s));
   };
@@ -4936,7 +6467,7 @@ function SmashPointAppInner() {
   };
 
   if (!ready) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ backgroundImage: "linear-gradient(135deg, #14181f, #1b2027)", color: "#e2e8f0" }}>Cargando…</div>;
+    return <div className="min-h-screen flex items-center justify-center" style={{ background: APP_BACKGROUND, color: "#e2e8f0" }}>Cargando…</div>;
   }
 
   const selected = tournaments.find((t) => t.id === selectedId) || null;
@@ -4944,7 +6475,10 @@ function SmashPointAppInner() {
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
+  // En la pantalla de inicio las publicidades van en el carrusel de arriba, no al pie
+  let onHome = false;
   if (route === "public-home") {
+    onHome = true;
     content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   } else if (route === "public-tournament" && selected) {
     content = <PublicTournament tournament={selected} ads={ads} organizers={organizers} onBack={() => setRoute("public-home")} />;
@@ -4973,7 +6507,7 @@ function SmashPointAppInner() {
   } else if (route === "admin-home" && session) {
     content = (
       <AdminHome
-        organizer={session}
+        organizer={{ ...session, coverUrl: session.coverUrl ?? organizers.find((o) => o.id === session.id)?.coverUrl ?? "" }}
         tournaments={myTournaments}
         circuits={myCircuits}
         onCreate={createTournament}
@@ -4985,20 +6519,33 @@ function SmashPointAppInner() {
         onUpdateCircuit={updateCircuit}
         onDeleteCircuit={deleteCircuit}
         onUpdateProfile={(patch) => updateOrganizerProfile(session.id, patch)}
+        inscripciones={inscripciones}
       />
     );
   } else if (route === "admin-tournament" && selected) {
-    content = <AdminTournament tournament={selected} update={updateTournament} onBack={() => setRoute("admin-home")} />;
+    content = (
+      <AdminTournament
+        tournament={selected}
+        update={updateTournament}
+        onBack={() => setRoute("admin-home")}
+        inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
+        onResolveInscripcion={resolveInscripcion}
+      />
+    );
   } else {
+    onHome = true;
     content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   }
 
   return (
-    <div className="min-h-screen overflow-x-hidden" style={{ backgroundImage: "linear-gradient(135deg, #14181f, #1b2027)", color: "#e2e8f0", ...F.body }}>
+    <div className="min-h-screen overflow-x-hidden" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
-      <div className="px-6 pb-10 max-w-4xl mx-auto">
-        <AdBanner ads={ads} />
-      </div>
+      {!onHome && (
+        // En el detalle de un torneo con inscripciones, deja lugar para el botón fijo de abajo
+        <div className={`px-6 max-w-4xl mx-auto ${route === "public-tournament" && selected && registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
+          <AdBanner ads={ads} />
+        </div>
+      )}
     </div>
   );
 }
