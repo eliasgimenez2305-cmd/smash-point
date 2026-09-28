@@ -3214,7 +3214,7 @@ function ScheduleAdminView({ tournament, update }) {
               disabled={playDates.length === 0}
               className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
             >
-              Generar horarios automáticamente
+              Generar horarios de grupos
             </button>
             {scheduled.length > 0 && (confirmingReschedule ? (
               <span className="text-xs" style={F.body}>
@@ -3229,7 +3229,7 @@ function ScheduleAdminView({ tournament, update }) {
             ))}
           </div>
           <p className="text-xs text-teal-500 mt-2 mb-3" style={F.body}>
-            "Generar" solo completa los partidos de grupos sin horario (y se repite solo apenas se cierra un grupo). "Rearmar" vuelve a ubicar desde cero todos los que todavía no se jugaron, incluida la llave: usalo si cambiaste el horario de arranque, las canchas o el tiempo entre partidos. Arrastrá las tarjetas para reubicarlas.
+            "Generar horarios de grupos" solo completa los partidos de grupos sin horario (y se repite solo apenas se cierra un grupo). "Rearmar" vuelve a ubicar desde cero todos los que todavía no se jugaron, incluida la llave: usalo si cambiaste el horario de arranque, las canchas o el tiempo entre partidos. Arrastrá las tarjetas para reubicarlas.
           </p>
           {offGrid.length > 0 && (
             <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
@@ -3529,7 +3529,7 @@ function CircuitPublicCard({ circuit, tournaments, accentColor = "#9fe022" }) {
 }
 
 /* Todos los circuitos activos, agrupados por el organizador que los creó */
-function CircuitsPublicView({ circuits, tournaments, organizers, ads }) {
+function CircuitsPublicView({ circuits, tournaments, organizers }) {
   const byOrganizer = {};
   circuits.forEach((c) => { (byOrganizer[c.organizerId] = byOrganizer[c.organizerId] || []).push(c); });
 
@@ -3817,7 +3817,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin 
 
       {section === "circuitos" ? (
         <div className="pt-8">
-          <CircuitsPublicView circuits={orgCircuits} tournaments={tournaments} organizers={organizers} ads={ads} />
+          <CircuitsPublicView circuits={orgCircuits} tournaments={tournaments} organizers={organizers} />
         </div>
       ) : (
       <>
@@ -4084,7 +4084,7 @@ function CategoryBracketPublicView({ category }) {
 }
 
 
-function PublicTournament({ tournament, ads, organizers, onBack }) {
+function PublicTournament({ tournament, organizers, onBack }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
   const usesSchedule = tournamentUsesSchedule(tournament);
   const super8Tournament = tournamentType(tournament) === "super8";
@@ -4192,7 +4192,6 @@ function Login({ onLogin, onBack }) {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState("login"); // login | recuperar
   const [recoverMsg, setRecoverMsg] = useState("");
-  const [confirmingReset, setConfirmingReset] = useState(false);
 
   const submit = async () => {
     if (!email.trim() || !password) { setError("Completá email y contraseña."); return; }
@@ -4656,7 +4655,9 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
   const [pasteText, setPasteText] = useState("");
 
   const downloadBackup = () => {
-    const data = { organizers, tournaments, circuits, ads, exportedAt: new Date().toISOString() };
+    // Los organizadores van solo como referencia (no se restauran); sus portadas sí
+    const organizerCovers = Object.fromEntries(organizers.filter((o) => o.coverUrl).map((o) => [o.id, o.coverUrl]));
+    const data = { organizers, tournaments, circuits, ads, organizerCovers, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -4722,7 +4723,10 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Descargar respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Baja un archivo con todos los organizadores, torneos, circuitos y anuncios cargados hasta ahora. Guardalo en tu celular o computadora.
+          Baja un archivo con todos los torneos, circuitos, anuncios y fotos de portada de los organizadores, más la lista de organizadores como referencia. Guardalo en tu celular o computadora.
+        </p>
+        <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
+          No incluye las inscripciones online, porque tienen los WhatsApp de los jugadores.
         </p>
         <button type="button" onClick={downloadBackup} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
           Descargar respaldo (.json)
@@ -4732,7 +4736,10 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Restaurar desde un respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar todo.
+          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar torneos, circuitos, anuncios y fotos de portada.
+        </p>
+        <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
+          Los organizadores no se restauran: son cuentas de acceso con contraseña que viven en Supabase y no se pueden recrear desde un archivo. Si falta alguno, crealo de nuevo en "Organizadores".
         </p>
         <input type="file" accept=".json,application/json,text/plain" onChange={handleFile} className="text-sm" style={F.body} />
         {pickedFileName && <p className="text-xs text-teal-500 mt-2" style={F.body}>Archivo elegido: {pickedFileName}</p>}
@@ -6460,10 +6467,17 @@ function SmashPointAppInner() {
     persistTournaments(tournaments.map((t) => (t.circuitId === id ? { ...t, circuitId: null } : t)));
   };
 
+  /* Los organizadores del archivo no se restauran: son cuentas de Supabase Auth que no se pueden
+     recrear desde acá. Sí se restauran sus fotos de portada. */
   const restoreBackup = (data) => {
     if (Array.isArray(data.tournaments)) persistTournaments(data.tournaments);
     if (Array.isArray(data.circuits)) persistCircuits(data.circuits);
     if (Array.isArray(data.ads)) persistAds(data.ads);
+    if (data.organizerCovers && typeof data.organizerCovers === "object") {
+      const covers = data.organizerCovers;
+      setOrganizers((orgs) => orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" })));
+      kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session?.accessToken).catch(() => {});
+    }
   };
 
   if (!ready) {
@@ -6475,13 +6489,14 @@ function SmashPointAppInner() {
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
-  // En la pantalla de inicio las publicidades van en el carrusel de arriba, no al pie
-  let onHome = false;
+  // Publicidad al pie solo en el detalle público de un torneo: el inicio y la pantalla de cada
+  // organizador ya la muestran adentro, y en el login y los paneles no va
+  let showFooterAds = false;
   if (route === "public-home") {
-    onHome = true;
     content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   } else if (route === "public-tournament" && selected) {
-    content = <PublicTournament tournament={selected} ads={ads} organizers={organizers} onBack={() => setRoute("public-home")} />;
+    showFooterAds = true;
+    content = <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
     content = <Login onBack={() => setRoute("public-home")} onLogin={(org) => { setSession(org); setRoute(org.role === "creador" ? "creator-home" : "admin-home"); }} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
@@ -6533,16 +6548,15 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    onHome = true;
     content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   }
 
   return (
     <div className="min-h-screen overflow-x-hidden" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
-      {!onHome && (
-        // En el detalle de un torneo con inscripciones, deja lugar para el botón fijo de abajo
-        <div className={`px-6 max-w-4xl mx-auto ${route === "public-tournament" && selected && registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
+      {showFooterAds && (
+        // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
+        <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
           <AdBanner ads={ads} />
         </div>
       )}
