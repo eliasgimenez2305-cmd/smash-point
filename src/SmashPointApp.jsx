@@ -12,6 +12,9 @@ const STORAGE_KEY_CIRCUITS = "sp:circuits";
 // Foto de portada de cada organizador ({ [organizerId]: url }): se guarda aparte porque la tabla
 // organizers de Supabase solo tiene nombre y logo
 const STORAGE_KEY_ORGANIZER_COVERS = "sp:organizer_covers";
+// Directorios públicos que carga el creador: complejos de pádel y profesores
+const STORAGE_KEY_VENUES = "sp:venues";
+const STORAGE_KEY_COACHES = "sp:coaches";
 
 /* ---------- Supabase (login y perfiles de organizador) ---------- */
 /* Usamos fetch directo a la API REST de Supabase (sin el SDK) para que
@@ -197,7 +200,7 @@ function categorySpotsLeft(category) {
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
    categorías llenas) o "cerrado" (no se muestra el botón) */
 function registrationStatus(t) {
-  if (!t.inscripcionesAbiertas || t.status === STATUS.FINALIZADO) return "cerrado";
+  if (isInfoOnly(t) || !t.inscripcionesAbiertas || t.status === STATUS.FINALIZADO) return "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
   if (categories.length === 0) return "cerrado";
   return categories.some((c) => categorySpotsLeft(c) !== 0) ? "abierto" : "completo";
@@ -319,6 +322,58 @@ function withTournamentConfig(t, config) {
 function tournamentConfigChangeBlocked(t, config) {
   const categoryFormat = categoryFormatForConfig(config);
   return t.categories.some((c) => (c.format || "zonas") !== categoryFormat && (c.groups.length > 0 || c.bracket));
+}
+
+/* ---------- Contenido público que carga el creador ---------- */
+
+/* Torneos "solo información": de organizadores que no usan la plataforma. Los carga el creador y
+   no tienen organizador, parejas, grupos, llave, resultados ni inscripciones. Traen infoOnly: true,
+   venueLogoUrl, organizerName (opcional) y sus días en playDates. */
+function isInfoOnly(t) {
+  return !!t?.infoOnly;
+}
+
+/* Estado de un torneo para la parte pública. Los informativos no los maneja nadie, así que el
+   estado sale de sus fechas: antes del primer día es Próximo, hasta el último En curso, después
+   Finalizado. Los gestionados usan el estado que elige el organizador. */
+function tournamentStatusOf(t) {
+  if (!isInfoOnly(t)) return t.status;
+  const dates = (t.playDates || []).map((d) => d.date).sort();
+  if (dates.length === 0) return STATUS.PROXIMO;
+  const today = todayISO();
+  if (today < dates[0]) return STATUS.PROXIMO;
+  if (today > dates[dates.length - 1]) return STATUS.FINALIZADO;
+  return STATUS.EN_CURSO;
+}
+
+/* Días de un torneo informativo en una línea: "Sáb 04/10 · 09:00 a 20:00 — Dom 05/10 · 09:00 a 18:00" */
+function playDatesSummary(playDates) {
+  return (playDates || []).map((d) => `${formatDateShort(d.date)} · ${d.from} a ${d.to}`).join(" — ");
+}
+
+const WEEKDAY_FULL = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0]; // la semana arranca el lunes
+
+/* Horario semanal de un profe agrupado y legible: los días con el mismo horario van juntos.
+   [{weekday:2,...18-21},{weekday:4,...18-21}] → ["Martes y Jueves · 18:00 a 21:00"] */
+function weeklyScheduleLines(availability) {
+  const groups = new Map();
+  [...(availability || [])]
+    .sort((a, b) => WEEKDAY_ORDER.indexOf(a.weekday) - WEEKDAY_ORDER.indexOf(b.weekday))
+    .forEach((a) => {
+      const key = `${a.from} a ${a.to}`;
+      groups.set(key, [...(groups.get(key) || []), WEEKDAY_FULL[a.weekday]]);
+    });
+  const joinDays = (days) => (days.length === 1 ? days[0] : `${days.slice(0, -1).join(", ")} y ${days[days.length - 1]}`);
+  return [...groups.entries()].map(([hours, days]) => `${joinDays(days)} · ${hours}`);
+}
+
+/* Instagram: acepta usuario (con o sin @) o link, y devuelve { url, handle } */
+function instagramLink(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return null;
+  const handle = raw.replace(/^https?:\/\/(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
+  return handle ? { url: `https://instagram.com/${handle}`, handle: `@${handle}` } : null;
 }
 
 /* Un set único a N games está completo y bien cargado si el ganador llegó a N y el otro quedó
@@ -587,6 +642,7 @@ function matchIsPlayed(match) {
 /* Avance del torneo: cuántos partidos ya se jugaron sobre el total (grupos + llave con ambas parejas definidas) */
 function tournamentProgress(t) {
   let total = 0, played = 0;
+  if (isInfoOnly(t)) return { total, played, pct: 0 }; // los informativos no tienen partidos
   (t.categories || []).forEach((c) => {
     (c.groups || []).forEach((g) => g.matches.forEach((m) => { total++; if (matchIsPlayed(m)) played++; }));
     (c.bracket || []).forEach((round) => round.forEach((m) => {
@@ -911,6 +967,7 @@ function minutesToTime(mins) {
 /* Junta todos los partidos con ambas parejas ya definidas (de grupos y de la llave) de todas las categorías */
 function collectScheduleableMatches(tournament) {
   const list = [];
+  if (isInfoOnly(tournament)) return list;
   (tournament.categories || []).forEach((c) => {
     (c.groups || []).forEach((g) => {
       g.matches.forEach((m) => {
@@ -1461,7 +1518,8 @@ function computeCircuitStandings(circuit, tournaments) {
   const table = {}; // { [categoryName]: { [playerKey]: { name, points, fechas } } }
   circuit.categoryNames.forEach((cn) => { table[cn] = {}; });
 
-  tournaments.filter((t) => t.circuitId === circuit.id).forEach((t) => {
+  // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito
+  tournaments.filter((t) => t.circuitId === circuit.id && !isInfoOnly(t)).forEach((t) => {
     t.categories.forEach((cat) => {
       if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
@@ -1878,37 +1936,6 @@ function OpenRegistrationsBadge({ tournament }) {
   );
 }
 
-/* Franja del inicio con los torneos que tienen inscripciones abiertas (no se muestra si no hay) */
-function OpenRegistrationsStrip({ tournaments, organizers, onRegister }) {
-  const open = tournaments.filter((t) => registrationStatus(t) !== "cerrado").sort((a, b) => (a.date < b.date ? -1 : 1));
-  if (open.length === 0) return null;
-  return (
-    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" aria-labelledby="insc-abiertas">
-      <h2 id="insc-abiertas" className="text-sm uppercase tracking-wide mb-3 flex items-center gap-2" style={{ ...F.display, color: BRAND.lime }}>
-        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: BRAND.lime, boxShadow: `0 0 8px ${BRAND.lime}` }} /> Inscripciones abiertas
-      </h2>
-      <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1" style={{ scrollbarWidth: "none" }}>
-        {open.map((t, i) => {
-          const organizer = organizers.find((o) => o.id === t.organizerId);
-          const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
-          return (
-            <div key={t.id} className="snap-start shrink-0 w-[85%] sm:w-[48%] lg:w-[32%] rounded-2xl p-4 flex gap-3 items-center" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.75)" }}>
-              <OrganizerAvatar organizer={organizer} size={52} color={color} />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold truncate" style={{ ...F.body, color: BRAND.ink }}>{t.name}</p>
-                <p className="text-xs text-teal-300 truncate" style={F.body}>{organizer?.name || "Organizador"}</p>
-                <p className="text-xs text-teal-400" style={F.body}>📅 {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { weekday: "short", day: "2-digit", month: "short" })}</p>
-                <div className="mt-1"><TournamentTypeTag tournament={t} /></div>
-              </div>
-              <RegisterButton tournament={t} onRegister={onRegister} className="shrink-0" />
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
 /* "Cartel" inclinado estilo cancha/vidriera, para títulos de sección con más pegada visual
    (ej: "ZONA A", "CANCHA 1", la fecha). Envuelve el contenido dos veces para poder inclinar
    el fondo sin inclinar el texto de adentro. */
@@ -2289,13 +2316,22 @@ function tournamentTypeName(t) {
    "Americano · A7". Cada tipo tiene su color. */
 const TOURNAMENT_TYPE_COLOR = { clasico: "#38bdf8", super8: "#e879f9", americano: "#fb923c" };
 
-function TournamentTypeTag({ tournament }) {
+function TournamentTypeTag({ tournament, short = false }) {
+  const size = short ? "px-2 py-0.5 text-[9px]" : "px-2.5 py-0.5 text-[10px] sm:text-xs";
+  if (isInfoOnly(tournament)) {
+    return (
+      <span className={`inline-block rounded-full font-bold uppercase tracking-wide whitespace-nowrap ${size}`} style={{ ...F.body, color: "#e2e8f0", border: "1px solid #94a3b880", backgroundColor: "#94a3b81a" }}>
+        Solo información
+      </span>
+    );
+  }
   const { type, games } = tournamentConfig(tournament);
   const color = TOURNAMENT_TYPE_COLOR[type];
   const detail = type === "americano" && games ? ` · A${games}` : type === "super8" && games ? ` · ${games} games` : "";
+  // short: solo el tipo, para tarjetas angostas (el detalle está en el torneo)
   return (
-    <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wide" style={{ ...F.body, color, border: `1px solid ${color}80`, backgroundColor: color + "1a" }}>
-      {tournamentTypeName(tournament)}{detail}
+    <span className={`inline-block rounded-full font-bold uppercase tracking-wide ${short ? "whitespace-nowrap" : ""} ${size}`} style={{ ...F.body, color, border: `1px solid ${color}80`, backgroundColor: color + "1a" }}>
+      {short ? TOURNAMENT_TYPE_LABEL[type] : `${tournamentTypeName(tournament)}${detail}`}
     </span>
   );
 }
@@ -3585,24 +3621,46 @@ function ChevronCircle({ color }) {
   );
 }
 
-/* Encabezado de la app: logo grande y el acceso de organizadores con borde de neón */
-function SiteHeader({ onGoLogin }) {
+const PUBLIC_TABS = [["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"]];
+
+/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Canchas · Profes junto al
+   acceso de organizadores (en el celular, solo el ícono, para que entre todo en una fila) */
+function SiteHeader({ tab, onTab, onGoLogin }) {
   return (
-    <header className="px-4 sm:px-6 py-4 flex items-center justify-between gap-3 max-w-5xl mx-auto">
-      <div className="flex items-center gap-2 min-w-0">
-        <Logo size={38} />
-        <div className="min-w-0">
-          <p className="leading-none text-[15px] sm:text-xl whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</p>
-          <p className="text-[8px] sm:text-[10px] mt-1 whitespace-nowrap tracking-[2px] sm:tracking-[3px]" style={{ ...F.body, color: BRAND.logoLime }}>EVENTOS DE PADEL</p>
+    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
+      <div className="flex items-center justify-center gap-2">
+        <Logo size={44} />
+        <div>
+          <p className="leading-none text-lg sm:text-2xl whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</p>
+          <p className="text-[9px] sm:text-[11px] mt-1 whitespace-nowrap tracking-[3px]" style={{ ...F.body, color: BRAND.logoLime }}>EVENTOS DE PADEL</p>
         </div>
       </div>
-      <button
-        onClick={onGoLogin}
-        className="flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-full text-xs sm:text-sm font-semibold shrink-0 transition hover:brightness-125"
-        style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
-      >
-        <PeopleIcon /> Organizadores
-      </button>
+      <nav className="mt-4 flex items-center gap-2 max-w-xl mx-auto" aria-label="Secciones">
+        <div className="flex-1 grid grid-cols-3 gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+          {PUBLIC_TABS.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onTab(key)}
+              aria-current={tab === key ? "page" : undefined}
+              className="py-2 rounded-full text-sm font-semibold transition"
+              style={tab === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f", boxShadow: `0 0 12px ${BRAND.lime}66` } : { ...F.body, color: "#cbd5e1" }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={onGoLogin}
+          aria-label="Organizadores"
+          title="Acceso de organizadores"
+          className="flex items-center justify-center gap-2 w-11 h-11 sm:w-auto sm:h-auto sm:px-4 sm:py-2.5 rounded-full text-sm font-semibold shrink-0 transition hover:brightness-125"
+          style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
+        >
+          <PeopleIcon /> <span className="hidden sm:inline">Organizadores</span>
+        </button>
+      </nav>
     </header>
   );
 }
@@ -3610,7 +3668,8 @@ function SiteHeader({ onGoLogin }) {
 /* Números de la portada, calculados con los datos reales: torneos que no terminaron, jugadores
    anotados en ellos y partidos con horario para hoy */
 function homeStats(tournaments) {
-  const active = tournaments.filter((t) => t.status !== STATUS.FINALIZADO);
+  // Los informativos cuentan como torneos activos (se muestran en "Próximos torneos"), pero no suman jugadores
+  const active = tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO);
   const players = active.reduce((sum, t) => sum + t.categories.reduce((s, c) => s + c.pairs.length * (c.format === "super8_individual" ? 1 : 2), 0), 0);
   const today = todayISO();
   const matchesToday = tournaments.reduce((sum, t) => sum + collectScheduleableMatches(t).filter((m) => m.schedule && m.schedule.date === today && !m.draft).length, 0);
@@ -3693,225 +3752,408 @@ function OrganizerCard({ organizer, count, color, onSelect }) {
   );
 }
 
-function OrganizerSelectScreen({ organizers, tournaments, ads, onSelect, onGoLogin, onRegister }) {
-  const visible = organizers.filter((o) => o.role !== "creador");
+const STATUS_ACCENT = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" };
+const STATUS_FILTERS = [[STATUS.EN_CURSO, "En curso"], [STATUS.PROXIMO, "Próximos"], [STATUS.FINALIZADO, "Finalizados"], ["todos", "Todos"]];
 
+function filterByStatus(tournaments, filter) {
+  return filter === "todos" ? tournaments : tournaments.filter((t) => tournamentStatusOf(t) === filter);
+}
+
+/* Filtro que arranca en "En curso" si hay alguno y, si no, en "Próximos" */
+function defaultStatusFilter(tournaments) {
+  return tournaments.some((t) => tournamentStatusOf(t) === STATUS.EN_CURSO) ? STATUS.EN_CURSO : STATUS.PROXIMO;
+}
+
+function TournamentFilterChips({ tournaments, filter, onFilter }) {
   return (
-    <div>
-      <SiteHeader onGoLogin={onGoLogin} />
-      <HomeHero tournaments={tournaments} />
-      <OpenRegistrationsStrip tournaments={tournaments} organizers={organizers} onRegister={onRegister} />
-      <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" />
-
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 pb-10">
-        {visible.length === 0 ? (
-          <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
-        ) : (
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
-            {visible.map((o, i) => (
-              <OrganizerCard
-                key={o.id}
-                organizer={o}
-                count={tournaments.filter((t) => t.organizerId === o.id).length}
-                color={(Math.floor(i / 2) + i) % 2 === 0 ? BRAND.lime : BRAND.cyan}
-                onSelect={() => onSelect(o.id)}
-              />
-            ))}
-          </div>
-        )}
-      </main>
+    <div className="flex gap-2 mt-4 overflow-x-auto pb-1 sm:flex-wrap">
+      {STATUS_FILTERS.map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onFilter(key)}
+          className="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border transition"
+          style={filter === key ? { backgroundColor: "#9fe022", color: "#14181f", borderColor: "#9fe022" } : { backgroundColor: "transparent", color: "#5eead4", borderColor: "#115e59" }}
+        >
+          {label} ({filterByStatus(tournaments, key).length})
+        </button>
+      ))}
     </div>
   );
 }
 
-function PublicHome({ tournaments, ads, circuits, organizers, onOpen, onGoLogin }) {
+/* Tarjeta pública de un torneo. "big" es la tarjeta grande (portada vertical), la que usan el
+   carrusel y los filtros En curso / Próximos; la chica se usa en Finalizados y Todos. Los
+   torneos informativos muestran el logo del club, sus días y la etiqueta "Solo información". */
+/* Versión chica de la tarjeta para el carrusel "Próximos torneos": portada cuadrada, nombre, tipo,
+   fecha y quién organiza, con el botón de inscripción si corresponde */
+function CompactTournamentCard({ t, organizerLabel, onOpen, onRegister, className = "" }) {
+  const status = tournamentStatusOf(t);
+  const accent = STATUS_ACCENT[status];
+  const info = isInfoOnly(t);
+  const open = () => onOpen(t.id);
+  const shortDate = info && t.playDates?.length > 1
+    ? t.playDates.map((d) => formatDateShort(d.date)).join(" y ")
+    : formatDateShort(t.date);
+  return (
+    // Es un contenedor tocable y no un <button> porque adentro va el botón "Inscribirme"
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(); } }}
+      className={`text-left rounded-xl overflow-hidden cursor-pointer flex flex-col ${className}`}
+      style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}40`, borderTop: `3px solid ${accent}` }}
+    >
+      <div className="relative w-full aspect-square" style={{ background: COURT_FALLBACK_BACKGROUND }}>
+        {t.coverImageUrl
+          ? <img src={t.coverImageUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+          : info && t.venueLogoUrl && <img src={t.venueLogoUrl} alt="" className="absolute inset-0 m-auto w-16 h-16 rounded-full object-cover" />}
+        {status === STATUS.EN_CURSO && (
+          <span className="absolute top-1.5 left-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ backgroundColor: accent, color: "#14181f", ...F.body }}>● EN CURSO</span>
+        )}
+      </div>
+      <div className="p-2 flex flex-col gap-1 flex-1" style={F.body}>
+        <p className="text-xs font-semibold leading-tight line-clamp-2" style={{ color: BRAND.ink }}>{t.name}</p>
+        <div><TournamentTypeTag tournament={t} short /></div>
+        <p className="text-[10px] text-teal-300 truncate">{shortDate}{organizerLabel ? ` · ${organizerLabel}` : ""}</p>
+        <div className="mt-auto pt-1">
+          <RegisterButton tournament={t} onRegister={onRegister} full className="!px-2 !py-1.5 text-[11px]" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PublicTournamentCard({ t, big, organizerLabel, onOpen, onRegister, className = "" }) {
+  const status = tournamentStatusOf(t);
+  const accent = STATUS_ACCENT[status];
+  const info = isInfoOnly(t);
+  const progress = tournamentProgress(t);
+  const longDate = new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" });
+  const open = () => onOpen(t.id);
+  const venueLogo = info && t.venueLogoUrl && (
+    <img src={t.venueLogoUrl} alt="" className="w-10 h-10 rounded-full object-cover shrink-0" style={{ ...neonStyle(accent), backgroundColor: "#081218" }} />
+  );
+
+  return (
+    // Es un contenedor tocable y no un <button> porque adentro va el botón "Inscribirme"
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(); } }}
+      className={`text-left rounded-lg transition overflow-hidden cursor-pointer ${className}`}
+      style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}33`, borderTop: `3px solid ${accent}` }}
+    >
+      {big ? (
+        <>
+          <h2 className="text-sm sm:text-lg font-semibold text-center py-2 px-2 border-b" style={{ ...F.body, color: accent, borderColor: accent + "33" }}>
+            {t.name}
+          </h2>
+          {t.coverImageUrl
+            ? <img src={t.coverImageUrl} alt="" className="w-full object-cover aspect-[3/4]" />
+            : info && t.venueLogoUrl && <div className="w-full aspect-[3/4] flex items-center justify-center" style={{ background: COURT_FALLBACK_BACKGROUND }}><img src={t.venueLogoUrl} alt="" className="w-24 h-24 rounded-full object-cover" /></div>}
+          <div className="p-3 sm:p-4 text-center">
+            <div className="mb-2"><TournamentTypeTag tournament={t} /></div>
+            {organizerLabel && <p className="text-[11px] sm:text-sm text-teal-200 mb-0.5 truncate" style={F.body}><span className="text-teal-500">Organiza: </span>{organizerLabel}</p>}
+            <p className="text-[11px] sm:text-sm text-teal-300" style={F.body}>
+              <span className="text-teal-500">Fecha: </span>
+              {info && t.playDates?.length > 1 ? t.playDates.map((d) => formatDateShort(d.date)).join(" y ") : longDate}
+            </p>
+            {t.venue && (
+              <p className="text-[11px] sm:text-sm text-teal-300 mt-0.5" style={F.body}>
+                <span className="text-teal-500">Localidad: </span>{t.venue} <span style={{ color: accent }}>[SEDE]</span>
+              </p>
+            )}
+            <p className="text-xs sm:text-base font-bold mt-2" style={{ ...F.body, color: accent }}>
+              {status === STATUS.EN_CURSO ? "● EN CURSO" : status.toUpperCase()}
+            </p>
+            {progress.total > 0 && (
+              <>
+                <p className="text-[11px] sm:text-sm text-teal-400 mt-1" style={F.body}>Avance: {progress.played} / {progress.total}</p>
+                <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct.toFixed(2)} %</p>
+              </>
+            )}
+            <div className="mt-2 space-y-2">
+              <OpenRegistrationsBadge tournament={t} />
+              <RegisterButton tournament={t} onRegister={onRegister} full className="text-xs sm:text-sm" />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {t.coverImageUrl && <img src={t.coverImageUrl} alt="" className="w-full h-32 object-cover" />}
+          <div className="p-5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                {venueLogo}
+                <h2 className="text-lg font-semibold" style={F.body}>{t.name}</h2>
+              </div>
+              <Badge status={status} />
+            </div>
+            <div className="mt-2"><TournamentTypeTag tournament={t} /></div>
+            {organizerLabel && <p className="mt-2 text-sm text-teal-200" style={F.body}><span className="text-teal-500">Organiza: </span>{organizerLabel}</p>}
+            <p className="mt-2 text-sm text-teal-300" style={F.body}>
+              {info && t.playDates?.length ? playDatesSummary(t.playDates) : longDate}
+              {t.venue ? ` · ${t.venue}` : ""}
+            </p>
+            {!info && (
+              <p className="mt-3 text-sm text-teal-400" style={F.body}>
+                {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {t.categories.reduce((sum, c) => sum + c.pairs.length, 0)} parejas anotadas
+              </p>
+            )}
+            <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
+              <OpenRegistrationsBadge tournament={t} />
+              <RegisterButton tournament={t} onRegister={onRegister} />
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Grilla de tarjetas según el filtro elegido (grandes en En curso / Próximos) */
+function TournamentsGrid({ tournaments, filter, emptyText, organizerLabel, onOpen, onRegister }) {
+  const list = filterByStatus(tournaments, filter);
+  const big = filter === STATUS.EN_CURSO || filter === STATUS.PROXIMO;
+  return (
+    <main className={`px-4 sm:px-6 py-8 grid gap-5 ${big ? "grid-cols-2 lg:grid-cols-3" : "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"}`}>
+      {list.length === 0 && <p className="opacity-60 col-span-full" style={F.body}>{tournaments.length === 0 ? emptyText : "No hay torneos en este estado."}</p>}
+      {list.map((t) => <PublicTournamentCard key={t.id} t={t} big={big} organizerLabel={organizerLabel?.(t)} onOpen={onOpen} onRegister={onRegister} />)}
+    </main>
+  );
+}
+
+/* Carrusel "Próximos torneos" del inicio: en curso y próximos de todos los organizadores, más los
+   informativos. Primero los que se están jugando y después por fecha. No se muestra si no hay. */
+function UpcomingTournamentsCarousel({ tournaments, organizerLabel, onOpen, onRegister, onSeeAll }) {
+  const upcoming = tournaments
+    .filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO)
+    .sort((a, b) => {
+      const liveA = tournamentStatusOf(a) === STATUS.EN_CURSO, liveB = tournamentStatusOf(b) === STATUS.EN_CURSO;
+      if (liveA !== liveB) return liveA ? -1 : 1;
+      return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+    });
+  if (upcoming.length === 0) return null;
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" aria-labelledby="proximos-torneos">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h2 id="proximos-torneos" className="text-base sm:text-lg uppercase" style={{ ...F.display, color: BRAND.ink }}>Próximos torneos</h2>
+        <button type="button" onClick={onSeeAll} className="text-sm font-semibold shrink-0" style={{ ...F.body, color: BRAND.lime }}>Ver todos ›</button>
+      </div>
+      <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1" style={{ scrollbarWidth: "none" }}>
+        {upcoming.map((t) => (
+          <CompactTournamentCard
+            key={t.id}
+            t={t}
+            organizerLabel={organizerLabel(t)}
+            onOpen={onOpen}
+            onRegister={onRegister}
+            className="snap-start shrink-0 w-[40%] sm:w-[24%] lg:w-[18%]"
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* Botones de redes de una ficha (Instagram y WhatsApp) */
+function SocialButtons({ instagram, whatsapp, color }) {
+  const ig = instagramLink(instagram);
+  const wa = normalizeArPhone(whatsapp);
+  if (!ig && !wa) return null;
+  const btn = "flex-1 min-w-[7.5rem] text-center px-3 py-2 rounded-full text-sm font-semibold";
+  return (
+    <div className="flex gap-2 flex-wrap mt-3">
+      {ig && <a href={ig.url} target="_blank" rel="noopener noreferrer" className={btn} style={{ ...F.body, ...neonStyle(color), color: BRAND.ink }}>Instagram</a>}
+      {wa && <a href={`https://wa.me/${wa}`} target="_blank" rel="noopener noreferrer" className={btn} style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>WhatsApp</a>}
+    </div>
+  );
+}
+
+/* Foto o logo redondo de una ficha, con su inicial si no hay imagen */
+function DirectoryAvatar({ url, name, color, size = 64 }) {
+  const style = { width: size, height: size, ...neonStyle(color), backgroundColor: "#081218" };
+  if (url) return <img src={url} alt="" className="rounded-full object-cover shrink-0" style={style} />;
+  return <span className="rounded-full flex items-center justify-center shrink-0" style={{ ...style, ...F.display, color, fontSize: size * 0.4 }}>{(name || "?").trim().charAt(0).toUpperCase()}</span>;
+}
+
+/* Pestaña pública "Canchas": fichas de los complejos (logo, nombre, dirección, Instagram, WhatsApp) */
+function VenuesPublicView({ venues }) {
+  const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
+      <p className="text-sm text-teal-300 mb-5" style={F.body}>Dónde jugar en Gualeguaychú.</p>
+      {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá los complejos de la ciudad.</p>}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {sorted.map((v, i) => {
+          const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
+          return (
+            <article key={v.id} className="rounded-2xl p-4" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
+              <div className="flex items-center gap-3">
+                <DirectoryAvatar url={v.logoUrl} name={v.name} color={color} />
+                <div className="min-w-0">
+                  <h2 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{v.name}</h2>
+                  {v.address && (
+                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${v.address}, Gualeguaychú`)}`} target="_blank" rel="noopener noreferrer" className="text-sm text-teal-300 underline decoration-teal-700" style={F.body}>
+                      📍 {v.address}
+                    </a>
+                  )}
+                </div>
+              </div>
+              <SocialButtons instagram={v.instagram} whatsapp={v.whatsapp} color={color} />
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* Pestaña pública "Profes": fichas de profesores (foto, nombre, días y horarios, redes) */
+function CoachesPublicView({ coaches }) {
+  const sorted = [...coaches].sort((a, b) => a.name.localeCompare(b.name, "es"));
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Profesores</h1>
+      <p className="text-sm text-teal-300 mb-5" style={F.body}>Clases de pádel: días, horarios y contacto.</p>
+      {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá a los profes de la ciudad.</p>}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {sorted.map((c, i) => {
+          const color = i % 2 === 0 ? BRAND.cyan : BRAND.lime;
+          const lines = weeklyScheduleLines(c.availability);
+          return (
+            <article key={c.id} className="rounded-2xl p-4" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
+              <div className="flex items-center gap-3">
+                <DirectoryAvatar url={c.photoUrl} name={c.name} color={color} />
+                <div className="min-w-0">
+                  <h2 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{c.name}</h2>
+                  {c.brandName && <p className="text-sm" style={{ ...F.body, color }}>{c.brandName}</p>}
+                </div>
+              </div>
+              {lines.length > 0 && (
+                <ul className="mt-3 space-y-1 text-sm text-teal-200" style={F.body}>
+                  {lines.map((l) => <li key={l}>🕒 {l}</li>)}
+                </ul>
+              )}
+              <SocialButtons instagram={c.instagram} whatsapp={c.whatsapp} color={color} />
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Canchas · Profes.
+   En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
+   a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, onOpen, onGoLogin }) {
+  const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   const [selectedOrgId, setSelectedOrgId] = useState(null);
-  const [section, setSection] = useState("torneos"); // torneos | circuitos
-  const [filter, setFilter] = useState(STATUS.EN_CURSO); // todos | Próximo | En curso | Finalizado
+  const [showAll, setShowAll] = useState(false);
+  const [section, setSection] = useState("torneos"); // torneos | circuitos (dentro de un organizador)
+  const [filter, setFilter] = useState(STATUS.EN_CURSO);
   const [registeringId, setRegisteringId] = useState(null);
   const registering = tournaments.find((t) => t.id === registeringId);
-  const registrationSheet = registering && (
-    <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
-  );
   const onRegister = (t) => setRegisteringId(t.id);
+  const organizerLabel = (t) => (isInfoOnly(t) ? t.organizerName || null : organizers.find((o) => o.id === t.organizerId)?.name || null);
 
-  if (!selectedOrgId) {
-    return (
+  const goTab = (key) => { setTab(key); setSelectedOrgId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
+  const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
+  const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
+  const backLink = (
+    <button type="button" onClick={backHome} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al inicio</button>
+  );
+
+  let body;
+  if (tab === "canchas") {
+    body = <VenuesPublicView venues={venues} />;
+  } else if (tab === "profes") {
+    body = <CoachesPublicView coaches={coaches} />;
+  } else if (showAll) {
+    body = (
       <>
-        <OrganizerSelectScreen
-          organizers={organizers}
-          tournaments={tournaments}
-          ads={ads}
-          onSelect={setSelectedOrgId}
-          onGoLogin={onGoLogin}
-          onRegister={onRegister}
-        />
-        {registrationSheet}
+        <header className="px-4 sm:px-6 pt-2 pb-6 border-b border-teal-900 max-w-5xl mx-auto">
+          {backLink}
+          <h1 className="text-xl mt-5" style={F.display}>TODOS LOS TORNEOS</h1>
+          <TournamentFilterChips tournaments={tournaments} filter={filter} onFilter={setFilter} />
+        </header>
+        <div className="max-w-5xl mx-auto">
+          <TournamentsGrid tournaments={tournaments} filter={filter} emptyText="Todavía no hay torneos cargados." organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} />
+        </div>
+      </>
+    );
+  } else if (selectedOrgId) {
+    const selectedOrg = organizers.find((o) => o.id === selectedOrgId);
+    const orgTournaments = tournaments.filter((t) => t.organizerId === selectedOrgId);
+    const orgCircuits = circuits.filter((c) => c.organizerId === selectedOrgId);
+    body = (
+      <>
+        <header className="px-4 sm:px-6 pt-2 pb-6 border-b border-teal-900 max-w-5xl mx-auto">
+          {backLink}
+          <div className="flex items-center gap-3 mt-5">
+            <OrganizerAvatar organizer={selectedOrg} size={48} />
+            <h1 className="text-xl" style={F.display}>{(selectedOrg?.name || "").toUpperCase()}</h1>
+          </div>
+          <div className="flex gap-2 mt-5">
+            {[["torneos", "Torneos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
+              <button key={key} type="button" onClick={() => setSection(key)} className={`px-4 py-2 rounded text-sm border ${section === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`} style={F.body}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {section === "torneos" && <TournamentFilterChips tournaments={orgTournaments} filter={filter} onFilter={setFilter} />}
+        </header>
+        <div className="max-w-5xl mx-auto">
+          {section === "circuitos"
+            ? <div className="pt-8"><CircuitsPublicView circuits={orgCircuits} tournaments={tournaments} organizers={organizers} /></div>
+            : <TournamentsGrid tournaments={orgTournaments} filter={filter} emptyText="Todavía no hay torneos cargados." onOpen={onOpen} onRegister={onRegister} />}
+        </div>
+      </>
+    );
+  } else {
+    const visible = organizers.filter((o) => o.role !== "creador");
+    body = (
+      <>
+        <HomeHero tournaments={tournaments} />
+        <UpcomingTournamentsCarousel tournaments={tournaments} organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} onSeeAll={openAll} />
+        <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" />
+        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+          <h2 className="text-base sm:text-lg uppercase mb-3" style={{ ...F.display, color: BRAND.ink }}>Organizadores</h2>
+          {visible.length === 0 ? (
+            <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
+              {visible.map((o, i) => (
+                <OrganizerCard
+                  key={o.id}
+                  organizer={o}
+                  count={tournaments.filter((t) => t.organizerId === o.id).length}
+                  color={(Math.floor(i / 2) + i) % 2 === 0 ? BRAND.lime : BRAND.cyan}
+                  onSelect={() => openOrganizer(o.id)}
+                />
+              ))}
+            </div>
+          )}
+        </main>
       </>
     );
   }
 
-  const selectedOrg = organizers.find((o) => o.id === selectedOrgId);
-  const orgTournaments = tournaments.filter((t) => t.organizerId === selectedOrgId);
-  const orgCircuits = circuits.filter((c) => c.organizerId === selectedOrgId);
-
-  const filtered = filter === "todos" ? orgTournaments : orgTournaments.filter((t) => t.status === filter);
-  const bigCards = filter === STATUS.EN_CURSO || filter === STATUS.PROXIMO;
-  const counts = {
-    todos: orgTournaments.length,
-    [STATUS.EN_CURSO]: orgTournaments.filter((t) => t.status === STATUS.EN_CURSO).length,
-    [STATUS.PROXIMO]: orgTournaments.filter((t) => t.status === STATUS.PROXIMO).length,
-    [STATUS.FINALIZADO]: orgTournaments.filter((t) => t.status === STATUS.FINALIZADO).length,
-  };
-
+  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId;
   return (
-    <div>
-      <SiteHeader onGoLogin={onGoLogin} />
-      <header className="px-6 pt-2 pb-8 border-b border-teal-900">
-        <button onClick={() => setSelectedOrgId(null)} className="text-sm text-teal-400 hover:text-lime-400 flex items-center gap-1" style={F.body}>
-          ← Todos los organizadores
-        </button>
-        <div className="flex items-center gap-3 mt-6">
-          {selectedOrg?.logoUrl ? (
-            <img src={selectedOrg.logoUrl} alt="" className="w-12 h-12 rounded-full object-cover border border-teal-700" />
-          ) : (
-            <div className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-semibold" style={{ backgroundColor: "#115e59", color: "#9fe022" }}>
-              {(selectedOrg?.name || "?").trim().charAt(0).toUpperCase()}
-            </div>
-          )}
-          <h1 className="text-xl" style={F.display}>{(selectedOrg?.name || "").toUpperCase()}</h1>
-        </div>
-
-        <div className="flex gap-2 mt-6">
-          {[["torneos", "Torneos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setSection(key)}
-              className={`px-4 py-2 rounded text-sm border ${section === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-              style={F.body}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {section === "torneos" && (
-          <div className="flex gap-2 mt-4 flex-wrap">
-            {[[STATUS.EN_CURSO, "En curso"], [STATUS.PROXIMO, "Próximos"], [STATUS.FINALIZADO, "Finalizados"], ["todos", "Todos"]].map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setFilter(key)}
-                className="px-3 py-1.5 rounded-full text-sm border transition"
-                style={
-                  filter === key
-                    ? { backgroundColor: "#9fe022", color: "#14181f", borderColor: "#9fe022" }
-                    : { backgroundColor: "transparent", color: "#5eead4", borderColor: "#115e59" }
-                }
-              >
-                {label} ({counts[key] ?? 0})
-              </button>
-            ))}
-          </div>
-        )}
-      </header>
-
-      {section === "circuitos" ? (
-        <div className="pt-8">
-          <CircuitsPublicView circuits={orgCircuits} tournaments={tournaments} organizers={organizers} />
-        </div>
-      ) : (
-      <>
-      <main className={`px-6 py-8 grid gap-5 ${bigCards ? "grid-cols-2" : "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"}`}>
-        {filtered.length === 0 && (
-          <p className="opacity-60" style={F.body}>
-            {orgTournaments.length === 0 ? "Todavía no hay torneos cargados." : "No hay torneos en este estado."}
-          </p>
-        )}
-        {filtered.map((t) => {
-          const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[t.status];
-          const progress = tournamentProgress(t);
-          return (
-          // Es un contenedor tocable y no un <button> porque adentro va el botón "Inscribirme"
-          <div
-            key={t.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => onOpen(t.id)}
-            onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(t.id); } }}
-            className="text-left rounded-lg transition overflow-hidden cursor-pointer"
-            style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}33`, borderTop: `3px solid ${accent}` }}
-          >
-            {bigCards ? (
-              <>
-                <h2 className="text-sm sm:text-lg font-semibold text-center py-2 border-b" style={{ ...F.body, color: accent, borderColor: accent + "33" }}>
-                  {t.name}
-                </h2>
-                {t.coverImageUrl && (
-                  <img src={t.coverImageUrl} alt="" className="w-full object-cover aspect-[3/4]" />
-                )}
-                <div className="p-3 sm:p-4 text-center">
-                  <div className="mb-2"><TournamentTypeTag tournament={t} /></div>
-                  <p className="text-[11px] sm:text-sm text-teal-300" style={F.body}>
-                    <span className="text-teal-500">Fecha: </span>
-                    {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}
-                  </p>
-                  {t.venue && (
-                    <p className="text-[11px] sm:text-sm text-teal-300 mt-0.5" style={F.body}>
-                      <span className="text-teal-500">Localidad: </span>{t.venue} <span style={{ color: accent }}>[SEDE]</span>
-                    </p>
-                  )}
-                  <p className="text-xs sm:text-base font-bold mt-2" style={{ ...F.body, color: accent }}>
-                    {t.status === STATUS.EN_CURSO ? "● EN CURSO" : t.status.toUpperCase()}
-                  </p>
-                  {progress.total > 0 && (
-                    <>
-                      <p className="text-[11px] sm:text-sm text-teal-400 mt-1" style={F.body}>
-                        Avance: {progress.played} / {progress.total}
-                      </p>
-                      <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct.toFixed(2)} %</p>
-                    </>
-                  )}
-                  <div className="mt-2 space-y-2">
-                    <OpenRegistrationsBadge tournament={t} />
-                    <RegisterButton tournament={t} onRegister={onRegister} full className="text-xs sm:text-sm" />
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                {t.coverImageUrl && (
-                  <img src={t.coverImageUrl} alt="" className="w-full h-32 object-cover" />
-                )}
-                <div className="p-5">
-                  <div className="flex items-start justify-between gap-2">
-                    <h2 className="text-lg font-semibold" style={F.body}>{t.name}</h2>
-                    <Badge status={t.status} />
-                  </div>
-                  <div className="mt-2"><TournamentTypeTag tournament={t} /></div>
-                  <p className="mt-2 text-sm text-teal-300" style={F.body}>
-                    {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}
-                    {t.venue ? ` · ${t.venue}` : ""}
-                  </p>
-                  <p className="mt-3 text-sm text-teal-400" style={F.body}>
-                    {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {t.categories.reduce((sum, c) => sum + c.pairs.length, 0)} parejas anotadas
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
-                    <OpenRegistrationsBadge tournament={t} />
-                    <RegisterButton tournament={t} onRegister={onRegister} />
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-          );
-        })}
-      </main>
-      </>
+    <div className="pb-10">
+      <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
+      {body}
+      {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
+      {registering && (
+        <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
       )}
-      <div className="px-6 pb-10">
-        <AdBanner ads={ads} />
-      </div>
-      {registrationSheet}
     </div>
   );
 }
@@ -4083,6 +4325,46 @@ function CategoryBracketPublicView({ category }) {
   );
 }
 
+
+/* Detalle público de un torneo "solo información": portada, logo del club, sede, organizador y
+   días con horarios. Sin pestañas de horarios, grupos ni llaves, porque no se gestiona acá. */
+function InfoTournamentDetail({ tournament, onBack }) {
+  const status = tournamentStatusOf(tournament);
+  const accent = STATUS_ACCENT[status];
+  return (
+    <div className="px-4 sm:px-6 py-8 max-w-3xl mx-auto" style={F.body}>
+      <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4">← Todos los torneos</button>
+      {tournament.coverImageUrl && (
+        <img src={tournament.coverImageUrl} alt="" className="w-full max-h-[70vh] object-contain rounded-xl border border-teal-800 mb-5" style={{ backgroundColor: "#081218" }} />
+      )}
+      <div className="flex items-center gap-3 mb-2">
+        {tournament.venueLogoUrl && <img src={tournament.venueLogoUrl} alt="" className="w-14 h-14 rounded-full object-cover shrink-0" style={{ ...neonStyle(accent), backgroundColor: "#081218" }} />}
+        <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap mb-5">
+        <TournamentTypeTag tournament={tournament} />
+        <Badge status={status} />
+      </div>
+      <dl className="rounded-2xl p-4 space-y-3" style={{ ...neonStyle(accent), backgroundColor: "rgba(8,18,24,0.7)" }}>
+        {tournament.organizerName && (
+          <div><dt className="text-xs text-teal-500">Organiza</dt><dd className="text-base">{tournament.organizerName}</dd></div>
+        )}
+        {tournament.venue && (
+          <div><dt className="text-xs text-teal-500">Sede</dt><dd className="text-base">{tournament.venue}</dd></div>
+        )}
+        {(tournament.playDates || []).length > 0 && (
+          <div>
+            <dt className="text-xs text-teal-500">Días y horarios</dt>
+            {tournament.playDates.map((d) => (
+              <dd key={d.date} className="text-base">{formatDateShort(d.date)} · {d.from} a {d.to} hs</dd>
+            ))}
+          </div>
+        )}
+      </dl>
+      <p className="text-xs text-teal-500 mt-4">Este torneo no se gestiona en Smash Point: acá solo están sus datos. Para inscribirte, contactá al organizador.</p>
+    </div>
+  );
+}
 
 function PublicTournament({ tournament, organizers, onBack }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
@@ -4598,20 +4880,279 @@ function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
   );
 }
 
-/* Fila de torneo en el panel del creador: solo lectura + eliminar (la edición es tarea del organizador) */
-function CreatorTournamentRow({ t, organizerName, onDelete }) {
+const adminInput = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+
+/* Formulario del creador para crear o editar un torneo "solo información" (de un organizador que
+   no usa la plataforma). Sus días usan el mismo formato que playDates: fecha, desde y hasta. */
+function InfoTournamentForm({ initial, onSave, onCancel, accessToken }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [organizerName, setOrganizerName] = useState(initial?.organizerName || "");
+  const [venueLogoUrl, setVenueLogoUrl] = useState(initial?.venueLogoUrl || "");
+  const [coverImageUrl, setCoverImageUrl] = useState(initial?.coverImageUrl || "");
+  const [venue, setVenue] = useState(initial?.venue || "");
+  const [playDates, setPlayDates] = useState(initial?.playDates?.length ? initial.playDates : [{ date: "", from: "09:00", to: "20:00" }]);
+  const [error, setError] = useState("");
+
+  const setDay = (i, field, value) => setPlayDates(playDates.map((d, j) => (j === i ? { ...d, [field]: value } : d)));
+  const save = () => {
+    const days = playDates.filter((d) => d.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (!name.trim()) { setError("Poné el nombre del torneo."); return; }
+    if (days.length === 0) { setError("Cargá al menos un día."); return; }
+    if (new Set(days.map((d) => d.date)).size !== days.length) { setError("Hay un día repetido."); return; }
+    onSave({
+      // Mismo objeto que un torneo gestionado, sin organizador ni categorías
+      ...(initial || { status: STATUS.PROXIMO, circuitId: null, organizerId: null, categories: [], matchFormat: { ...DEFAULT_MATCH_FORMAT } }),
+      id: initial?.id || uid(),
+      infoOnly: true,
+      name: name.trim(),
+      organizerName: organizerName.trim(),
+      venueLogoUrl: venueLogoUrl.trim(),
+      coverImageUrl: coverImageUrl.trim(),
+      venue: venue.trim(),
+      playDates: days,
+      date: days[0].date,
+    });
+  };
+
+  return (
+    <div className="border border-lime-800 rounded-lg p-4 mb-6 space-y-3" style={{ backgroundColor: "rgba(163,230,53,0.05)", ...F.body }}>
+      <p className="text-sm font-semibold">{initial ? "Editar torneo informativo" : "Nuevo torneo informativo"}</p>
+      <p className="text-xs text-teal-400">Para torneos de organizadores que no usan Smash Point. Se muestran en "Próximos torneos" con la etiqueta "Solo información", sin parejas, grupos ni llaves.</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre del torneo</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Torneo Aniversario" />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Organiza (opcional)</label>
+          <input value={organizerName} onChange={(e) => setOrganizerName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Club Náutico" />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-xs text-teal-400 mb-1">Sede / localidad</label>
+          <input value={venue} onChange={(e) => setVenue(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Complejo Los Sauces, Gualeguaychú" />
+        </div>
+        <ImageUploadField label="Logo del club o cancha" value={venueLogoUrl} onChange={setVenueLogoUrl} accessToken={accessToken} folder="venues" />
+        <ImageUploadField label="Imagen de portada" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="tournaments" />
+      </div>
+      <div>
+        <p className="text-xs text-teal-400 mb-1">Días y horarios</p>
+        <div className="space-y-2">
+          {playDates.map((d, i) => (
+            <div key={i} className="flex flex-wrap items-center gap-2">
+              <input type="date" value={d.date} onChange={(e) => setDay(i, "date", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+              <input type="time" lang="es-AR" value={d.from} onChange={(e) => setDay(i, "from", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+              <span className="text-xs text-teal-500">a</span>
+              <input type="time" lang="es-AR" value={d.to} onChange={(e) => setDay(i, "to", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+              {playDates.length > 1 && <button type="button" onClick={() => setPlayDates(playDates.filter((_, j) => j !== i))} className="text-xs text-red-400">Quitar</button>}
+            </div>
+          ))}
+        </div>
+        <button type="button" onClick={() => setPlayDates([...playDates, { date: "", from: "09:00", to: "20:00" }])} className="mt-2 text-sm text-teal-300 underline">+ Agregar día</button>
+      </div>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" onClick={save} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{initial ? "Guardar cambios" : "Agregar torneo"}</button>
+        <button type="button" onClick={onCancel} className="text-sm text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* Días de la semana con horario (checkbox por día y, si está marcado, desde / hasta) */
+function WeeklyAvailabilityEditor({ value, onChange }) {
+  const byDay = Object.fromEntries((value || []).map((a) => [a.weekday, a]));
+  const toggle = (weekday, checked) => {
+    const next = checked ? [...(value || []), { weekday, from: "18:00", to: "21:00" }] : (value || []).filter((a) => a.weekday !== weekday);
+    onChange(next.sort((a, b) => WEEKDAY_ORDER.indexOf(a.weekday) - WEEKDAY_ORDER.indexOf(b.weekday)));
+  };
+  const setHour = (weekday, field, v) => onChange((value || []).map((a) => (a.weekday === weekday ? { ...a, [field]: v } : a)));
+  return (
+    <div className="space-y-1.5" style={F.body}>
+      {WEEKDAY_ORDER.map((wd) => (
+        <div key={wd} className="flex flex-wrap items-center gap-2 text-sm">
+          <label className="flex items-center gap-2 w-28">
+            <input type="checkbox" checked={!!byDay[wd]} onChange={(e) => toggle(wd, e.target.checked)} />
+            {WEEKDAY_FULL[wd]}
+          </label>
+          {byDay[wd] && (
+            <>
+              <input type="time" lang="es-AR" value={byDay[wd].from} onChange={(e) => setHour(wd, "from", e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} />
+              <span className="text-xs text-teal-500">a</span>
+              <input type="time" lang="es-AR" value={byDay[wd].to} onChange={(e) => setHour(wd, "to", e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} />
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Fila de una ficha del directorio (cancha o profe) con Editar y Eliminar */
+function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  return (
+    <div className="border border-teal-800 rounded-lg p-3 flex justify-between items-center flex-wrap gap-2" style={F.body}>
+      <div className="flex items-center gap-3 min-w-0">
+        <DirectoryAvatar url={imageUrl} name={title} color={BRAND.cyan} size={40} />
+        <div className="min-w-0">
+          <p className="font-medium truncate">{title}</p>
+          {subtitle && <p className="text-xs text-teal-500">{subtitle}</p>}
+        </div>
+      </div>
+      <div className="flex items-center gap-3 text-sm">
+        <button type="button" onClick={onEdit} className="text-teal-300">Editar</button>
+        {!confirmingDelete ? (
+          <button type="button" onClick={() => setConfirmingDelete(true)} className="text-red-400">Eliminar</button>
+        ) : (
+          <span className="whitespace-nowrap">
+            <button type="button" onClick={onDelete} className="text-red-400 font-semibold mr-2">Confirmar</button>
+            <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400">Cancelar</button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Pestaña "Canchas" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
+function VenueManager({ venues, onSave, onDelete, accessToken }) {
+  const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
+  const [form, setForm] = useState(empty);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState("");
+  const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
+
+  const submit = () => {
+    if (!form.name.trim()) { setError("Poné el nombre del complejo."); return; }
+    if (form.whatsapp.trim() && !normalizeArPhone(form.whatsapp)) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    onSave({ id: editingId || uid(), ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
+    setForm(empty); setEditingId(null); setError("");
+  };
+  const edit = (v) => { setForm({ ...empty, ...v }); setEditingId(v.id); setError(""); window.scrollTo(0, 0); };
+
+  return (
+    <div style={F.body}>
+      <div className="border border-teal-800 rounded-lg p-4 mb-6">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">{editingId ? "Editar complejo" : "Nuevo complejo"}</h2>
+        <div className="grid gap-3 sm:grid-cols-2 mb-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre del complejo</label>
+            <input value={form.name} onChange={set("name")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Complejo Los Sauces" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Dirección</label>
+            <input value={form.address} onChange={set("address")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Av. del Valle 1234" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Instagram (usuario o link)</label>
+            <input value={form.instagram} onChange={set("instagram")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="@complejo" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+            <input type="tel" value={form.whatsapp} onChange={set("whatsapp")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: 3446 123456" />
+          </div>
+          <ImageUploadField label="Logo" value={form.logoUrl} onChange={(url) => setForm((f) => ({ ...f, logoUrl: url }))} accessToken={accessToken} folder="venues" />
+        </div>
+        {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
+        <div className="flex gap-3 items-center">
+          <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Agregar complejo"}</button>
+          {editingId && <button type="button" onClick={() => { setForm(empty); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
+        </div>
+      </div>
+
+      <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Complejos cargados</h2>
+      <div className="space-y-2">
+        {venues.map((v) => <DirectoryRow key={v.id} title={v.name} subtitle={v.address} imageUrl={v.logoUrl} onEdit={() => edit(v)} onDelete={() => onDelete(v.id)} />)}
+        {venues.length === 0 && <p className="opacity-60 text-sm">Todavía no cargaste ningún complejo.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* Pestaña "Profes" del creador: mismo patrón que Canchas, con horario semanal */
+function CoachManager({ coaches, onSave, onDelete, accessToken }) {
+  const empty = { name: "", brandName: "", photoUrl: "", instagram: "", whatsapp: "", availability: [] };
+  const [form, setForm] = useState(empty);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState("");
+  const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
+
+  const submit = () => {
+    if (!form.name.trim()) { setError("Poné el nombre del profe."); return; }
+    if (form.whatsapp.trim() && !normalizeArPhone(form.whatsapp)) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    if (form.availability.some((a) => !a.from || !a.to || a.from >= a.to)) { setError("Revisá los horarios: el \"desde\" tiene que ser antes del \"hasta\"."); return; }
+    const trimmed = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, typeof v === "string" ? v.trim() : v]));
+    onSave({ ...trimmed, id: editingId || uid() });
+    setForm(empty); setEditingId(null); setError("");
+  };
+  const edit = (c) => { setForm({ ...empty, ...c }); setEditingId(c.id); setError(""); window.scrollTo(0, 0); };
+
+  return (
+    <div style={F.body}>
+      <div className="border border-teal-800 rounded-lg p-4 mb-6">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">{editingId ? "Editar profe" : "Nuevo profe"}</h2>
+        <div className="grid gap-3 sm:grid-cols-2 mb-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre del profesor</label>
+            <input value={form.name} onChange={set("name")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Juan Pérez" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre de fantasía (opcional)</label>
+            <input value={form.brandName} onChange={set("brandName")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: JP Pádel Academy" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Instagram (usuario o link)</label>
+            <input value={form.instagram} onChange={set("instagram")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="@profe" />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">WhatsApp</label>
+            <input type="tel" value={form.whatsapp} onChange={set("whatsapp")} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: 3446 123456" />
+          </div>
+          <ImageUploadField label="Logo o foto" value={form.photoUrl} onChange={(url) => setForm((f) => ({ ...f, photoUrl: url }))} accessToken={accessToken} folder="coaches" />
+        </div>
+        <p className="text-xs text-teal-400 mb-2">Días y horarios de clases</p>
+        <WeeklyAvailabilityEditor value={form.availability} onChange={(availability) => setForm((f) => ({ ...f, availability }))} />
+        {form.availability.length > 0 && (
+          <p className="text-xs text-teal-500 mt-2">Se va a ver así: {weeklyScheduleLines(form.availability).join(" — ")}</p>
+        )}
+        {error && <p className="text-sm text-red-400 mt-2">{error}</p>}
+        <div className="flex gap-3 items-center mt-3">
+          <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Agregar profe"}</button>
+          {editingId && <button type="button" onClick={() => { setForm(empty); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
+        </div>
+      </div>
+
+      <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Profes cargados</h2>
+      <div className="space-y-2">
+        {coaches.map((c) => (
+          <DirectoryRow key={c.id} title={c.name} subtitle={[c.brandName, weeklyScheduleLines(c.availability).join(" — ")].filter(Boolean).join(" · ")} imageUrl={c.photoUrl} onEdit={() => edit(c)} onDelete={() => onDelete(c.id)} />
+        ))}
+        {coaches.length === 0 && <p className="opacity-60 text-sm">Todavía no cargaste ningún profe.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* Fila de torneo en el panel del creador. Los gestionados son de solo lectura + eliminar (la
+   edición es tarea del organizador); los informativos los carga el creador y se pueden editar. */
+function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const info = isInfoOnly(t);
   const totalPairs = t.categories.reduce((sum, c) => sum + c.pairs.length, 0);
   return (
     <div className="border border-teal-800 rounded-lg p-3 flex justify-between items-center flex-wrap gap-2">
       <div>
         <p className="font-medium" style={F.body}>{t.name}</p>
+        {info && <div className="my-1"><TournamentTypeTag tournament={t} /></div>}
         <p className="text-xs text-teal-500" style={F.body}>
-          {organizerName} · {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })} · {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {totalPairs} pareja{totalPairs !== 1 ? "s" : ""}
+          {info
+            ? `${t.organizerName || "Sin organizador"} · ${playDatesSummary(t.playDates)}${t.venue ? ` · ${t.venue}` : ""}`
+            : `${organizerName} · ${new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })} · ${t.categories.length} categoría${t.categories.length !== 1 ? "s" : ""} · ${totalPairs} pareja${totalPairs !== 1 ? "s" : ""}`}
         </p>
       </div>
       <div className="flex items-center gap-3">
-        <Badge status={t.status} />
+        <Badge status={tournamentStatusOf(t)} />
+        {info && onEdit && <button type="button" onClick={() => onEdit(t)} className="text-sm text-teal-300" style={F.body}>Editar</button>}
         {!confirmingDelete ? (
           <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
         ) : (
@@ -4647,7 +5188,7 @@ function CreatorCircuitRow({ circuit, organizerName, tournaments, onDelete }) {
   );
 }
 
-function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
+function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches, onRestore }) {
   const [importError, setImportError] = useState("");
   const [pendingData, setPendingData] = useState(null);
   const [pickedFileName, setPickedFileName] = useState("");
@@ -4657,7 +5198,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
   const downloadBackup = () => {
     // Los organizadores van solo como referencia (no se restauran); sus portadas sí
     const organizerCovers = Object.fromEntries(organizers.filter((o) => o.coverUrl).map((o) => [o.id, o.coverUrl]));
-    const data = { organizers, tournaments, circuits, ads, organizerCovers, exportedAt: new Date().toISOString() };
+    const data = { organizers, tournaments, circuits, ads, venues, coaches, organizerCovers, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -4723,7 +5264,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Descargar respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Baja un archivo con todos los torneos, circuitos, anuncios y fotos de portada de los organizadores, más la lista de organizadores como referencia. Guardalo en tu celular o computadora.
+          Baja un archivo con todos los torneos (también los informativos), circuitos, anuncios, canchas, profes y fotos de portada de los organizadores, más la lista de organizadores como referencia. Guardalo en tu celular o computadora.
         </p>
         <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
           No incluye las inscripciones online, porque tienen los WhatsApp de los jugadores.
@@ -4736,7 +5277,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Restaurar desde un respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar torneos, circuitos, anuncios y fotos de portada.
+          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar torneos, circuitos, anuncios, canchas, profes y fotos de portada.
         </p>
         <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
           Los organizadores no se restauran: son cuentas de acceso con contraseña que viven en Supabase y no se pueden recrear desde un archivo. Si falta alguno, crealo de nuevo en "Organizadores".
@@ -4778,8 +5319,9 @@ function BackupManager({ organizers, tournaments, circuits, ads, onRestore }) {
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onRestoreBackup, onLogout }) {
-  const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | circuitos | respaldo
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
+  const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
+  const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
   const staff = organizers.filter((o) => o.role !== "creador");
   const organizerName = (id) => organizers.find((o) => o.id === id)?.name || "Organizador";
@@ -4792,7 +5334,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
       </div>
 
       <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
+        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -4807,13 +5349,30 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, onUpdate
       {tab === "publicidad" ? (
         <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
-        <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} onRestore={onRestoreBackup} />
+        <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} onRestore={onRestoreBackup} />
+      ) : tab === "canchas" ? (
+        <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} />
+      ) : tab === "profes" ? (
+        <CoachManager coaches={coaches} onSave={onSaveCoach} onDelete={onDeleteCoach} accessToken={creator.accessToken} />
       ) : tab === "torneos" ? (
         <div>
-          <p className="text-sm text-teal-400 mb-4" style={F.body}>Todos los torneos de la plataforma, de cualquier organizador. Podés eliminarlos si hace falta; editarlos sigue siendo tarea de cada organizador.</p>
+          {infoForm ? (
+            <InfoTournamentForm
+              key={infoForm === "nuevo" ? "nuevo" : infoForm.id}
+              initial={infoForm === "nuevo" ? null : infoForm}
+              onSave={(t) => { onSaveInfoTournament(t); setInfoForm(null); }}
+              onCancel={() => setInfoForm(null)}
+              accessToken={creator.accessToken}
+            />
+          ) : (
+            <button type="button" onClick={() => setInfoForm("nuevo")} className="mb-4 px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+              + Agregar torneo informativo
+            </button>
+          )}
+          <p className="text-sm text-teal-400 mb-4" style={F.body}>Todos los torneos de la plataforma, de cualquier organizador, más los informativos que cargás vos. Los de los organizadores podés eliminarlos si hace falta; editarlos sigue siendo tarea de cada organizador.</p>
           <div className="space-y-2">
             {tournaments.map((t) => (
-              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} />
+              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} onEdit={(it) => { setInfoForm(it); window.scrollTo(0, 0); }} />
             ))}
             {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay torneos cargados.</p>}
           </div>
@@ -6302,6 +6861,8 @@ function SmashPointAppInner() {
   const [organizers, setOrganizers] = useState([]);
   const [ads, setAds] = useState([]);
   const [circuits, setCircuits] = useState([]);
+  const [venues, setVenues] = useState([]);
+  const [coaches, setCoaches] = useState([]);
   const [route, setRoute] = useState("public-home");
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
@@ -6341,6 +6902,12 @@ function SmashPointAppInner() {
         } catch { loadedCircuits = null; }
         if (!Array.isArray(loadedCircuits)) loadedCircuits = [];
 
+        let loadedVenues, loadedCoaches;
+        try { loadedVenues = await kvGet(STORAGE_KEY_VENUES); } catch { loadedVenues = null; }
+        try { loadedCoaches = await kvGet(STORAGE_KEY_COACHES); } catch { loadedCoaches = null; }
+        setVenues(Array.isArray(loadedVenues) ? loadedVenues : []);
+        setCoaches(Array.isArray(loadedCoaches) ? loadedCoaches : []);
+
         setOrganizers(orgs);
         setTournaments(tours);
         setAds(loadedAds);
@@ -6355,6 +6922,23 @@ function SmashPointAppInner() {
     setAds(next);
     try { await kvSet(STORAGE_KEY_ADS, next, session?.accessToken); } catch {}
   }, [session]);
+
+  const persistVenues = useCallback(async (next) => {
+    setVenues(next);
+    try { await kvSet(STORAGE_KEY_VENUES, next, session?.accessToken); } catch {}
+  }, [session]);
+
+  const persistCoaches = useCallback(async (next) => {
+    setCoaches(next);
+    try { await kvSet(STORAGE_KEY_COACHES, next, session?.accessToken); } catch {}
+  }, [session]);
+
+  // Alta o edición de una ficha (se reconoce por id)
+  const upsertById = (list, item) => (list.some((x) => x.id === item.id) ? list.map((x) => (x.id === item.id ? item : x)) : [...list, item]);
+  const saveVenue = (v) => persistVenues(upsertById(venues, v));
+  const deleteVenue = (id) => persistVenues(venues.filter((v) => v.id !== id));
+  const saveCoach = (c) => persistCoaches(upsertById(coaches, c));
+  const deleteCoach = (id) => persistCoaches(coaches.filter((c) => c.id !== id));
 
   const persistCircuits = useCallback(async (next) => {
     setCircuits(next);
@@ -6473,6 +7057,8 @@ function SmashPointAppInner() {
     if (Array.isArray(data.tournaments)) persistTournaments(data.tournaments);
     if (Array.isArray(data.circuits)) persistCircuits(data.circuits);
     if (Array.isArray(data.ads)) persistAds(data.ads);
+    if (Array.isArray(data.venues)) persistVenues(data.venues);
+    if (Array.isArray(data.coaches)) persistCoaches(data.coaches);
     if (data.organizerCovers && typeof data.organizerCovers === "object") {
       const covers = data.organizerCovers;
       setOrganizers((orgs) => orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" })));
@@ -6493,10 +7079,12 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   } else if (route === "public-tournament" && selected) {
     showFooterAds = true;
-    content = <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
+    content = isInfoOnly(selected)
+      ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
+      : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
     content = <Login onBack={() => setRoute("public-home")} onLogin={(org) => { setSession(org); setRoute(org.role === "creador" ? "creator-home" : "admin-home"); }} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
@@ -6511,6 +7099,13 @@ function SmashPointAppInner() {
         onCreateOrganizer={createOrganizer}
         onDeleteOrganizer={deleteOrganizer}
         onDeleteTournament={deleteTournament}
+        onSaveInfoTournament={(t) => persistTournaments(upsertById(tournaments, t))}
+        venues={venues}
+        coaches={coaches}
+        onSaveVenue={saveVenue}
+        onDeleteVenue={deleteVenue}
+        onSaveCoach={saveCoach}
+        onDeleteCoach={deleteCoach}
         onDeleteCircuit={deleteCircuit}
         onAddAd={addAd}
         onUpdateAd={updateAd}
@@ -6548,7 +7143,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   }
 
   return (
