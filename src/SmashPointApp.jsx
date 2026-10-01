@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
+import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -15,6 +16,9 @@ const STORAGE_KEY_ORGANIZER_COVERS = "sp:organizer_covers";
 // Directorios públicos que carga el creador: complejos de pádel y profesores
 const STORAGE_KEY_VENUES = "sp:venues";
 const STORAGE_KEY_COACHES = "sp:coaches";
+// Eventos: agrupan torneos de un organizador ({ id, name, organizerId, coverImageUrl }); cada
+// torneo del evento guarda su eventId
+const STORAGE_KEY_EVENTS = "sp:events";
 
 /* ---------- Supabase (login y perfiles de organizador) ---------- */
 /* Usamos fetch directo a la API REST de Supabase (sin el SDK) para que
@@ -130,6 +134,7 @@ async function supabaseRpc(fn, params, accessToken) {
   if (!res.ok) {
     const err = new Error(data?.message || "No se pudo completar la operación.");
     err.code = data?.message;
+    err.pgCode = data?.code; // PGRST202 = no existe una función con esos parámetros
     throw err;
   }
   return data;
@@ -156,6 +161,7 @@ const INSCRIPCION_ERRORES = {
   ya_resuelta: "Esta inscripción ya fue aceptada o rechazada.",
   partidos_generados: "Los partidos de esa categoría ya están generados: no se pueden sumar inscriptos.",
   torneo_no_encontrado: "No se encontró el torneo de esta inscripción.",
+  disponibilidad_invalida: "Marcá al menos un día en que puedan jugar, con un horario válido.",
 };
 const inscripcionErrorText = (e) => INSCRIPCION_ERRORES[e?.code] || "No se pudo completar. Probá de nuevo en un rato.";
 
@@ -197,10 +203,20 @@ function categorySpotsLeft(category) {
   return cupo == null ? null : Math.max(0, cupo - category.pairs.length);
 }
 
+/* Abre o cierra las inscripciones de un torneo. Si se cierran después de haber estado abiertas,
+   queda marcado (inscripcionesCerradas) para mostrar el cartel "Inscripciones cerradas" en lugar
+   del botón; un torneo que nunca las tuvo no muestra nada. */
+function withRegistrationOpen(t, open) {
+  return { ...t, inscripcionesAbiertas: open, inscripcionesCerradas: !open && !!(t.inscripcionesAbiertas || t.inscripcionesCerradas) };
+}
+
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
-   categorías llenas) o "cerrado" (no se muestra el botón) */
+   categorías llenas), "cerradas" (el organizador las cerró: cartel) o "cerrado" (nunca tuvo, o ya
+   terminó: no se muestra nada) */
 function registrationStatus(t) {
-  if (isInfoOnly(t) || !t.inscripcionesAbiertas || t.status === STATUS.FINALIZADO) return "cerrado";
+  if (isInfoOnly(t) || t.status === STATUS.FINALIZADO) return "cerrado";
+  // Tuvo inscripciones y el organizador las cerró: se muestra el cartel "Inscripciones cerradas"
+  if (!t.inscripcionesAbiertas) return t.inscripcionesCerradas ? "cerradas" : "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
   if (categories.length === 0) return "cerrado";
   return categories.some((c) => categorySpotsLeft(c) !== 0) ? "abierto" : "completo";
@@ -241,7 +257,6 @@ const STATUS = {
   FINALIZADO: "Finalizado",
 };
 
-const DEFAULT_MATCH_FORMAT = { setsToPlay: 3, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: true };
 
 /* ---------- Tipo de torneo ---------- */
 
@@ -623,21 +638,7 @@ function super8IndividualStandingsGroup(category, group) {
   return { ...group, matches };
 }
 
-/* Cuenta sets ganados por cada lado a partir de los games/puntos cargados set por set */
-function setsWon(match) {
-  let a = 0, b = 0;
-  (match.sets || []).forEach((s) => {
-    if (!s || s.a == null || s.b == null) return;
-    if (s.a > s.b) a++; else if (s.b > s.a) b++;
-  });
-  return { a, b };
-}
 
-function matchIsPlayed(match) {
-  if (match && match.walkover) return true;
-  const { a, b } = setsWon(match);
-  return a + b > 0;
-}
 
 /* Avance del torneo: cuántos partidos ya se jugaron sobre el total (grupos + llave con ambas parejas definidas) */
 function tournamentProgress(t) {
@@ -652,12 +653,6 @@ function tournamentProgress(t) {
   return { total, played, pct: total > 0 ? Math.round((played / total) * 100) : 0 };
 }
 
-function matchWinnerId(match) {
-  if (match && match.walkover) return match.walkover === match.pairA ? match.pairB : match.pairA;
-  const { a, b } = setsWon(match);
-  if (a === b) return null;
-  return a > b ? match.pairA : match.pairB;
-}
 
 /* Estado visual de un partido para la tabla de horarios: "finalizado" se calcula solo al cargar
    resultado o walkover; "en_curso" lo marca el organizador a mano mientras no haya resultado. */
@@ -683,66 +678,6 @@ function withSetScore(sets, setIndex, side, value) {
   return next;
 }
 
-function computeStandings(group, pairsById, format) {
-  const f = format || DEFAULT_MATCH_FORMAT;
-  const stbIndex = f.finalSuperTiebreak ? f.setsToPlay - 1 : -1; // índice del set que es el super tie-break (si aplica)
-
-  const table = {};
-  group.pairIds.forEach((pid) => {
-    table[pid] = { pairId: pid, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0 };
-  });
-  group.matches.forEach((m) => {
-    if (!matchIsPlayed(m)) return;
-    const a = table[m.pairA];
-    const b = table[m.pairB];
-    if (!a || !b) return;
-    const { a: sa, b: sb } = setsWon(m);
-    a.pj++; b.pj++;
-    a.setsF += sa; a.setsC += sb;
-    b.setsF += sb; b.setsC += sa;
-    (m.sets || []).forEach((s, i) => {
-      if (!s || s.a == null || s.b == null) return;
-      if (i === stbIndex) {
-        // Es el super tie-break: son puntos, no games — solo cuenta quién lo ganó
-        if (s.a > s.b) a.stb++; else if (s.b > s.a) b.stb++;
-      } else {
-        a.gamesF += s.a; a.gamesC += s.b;
-        b.gamesF += s.b; b.gamesC += s.a;
-      }
-    });
-    // Un WO cuenta como partido ganado para el rival de quien no se presentó (sin sets ni games)
-    const woWinner = m.walkover ? (m.walkover === m.pairA ? b : a) : null;
-    if (woWinner) { const woLoser = woWinner === a ? b : a; woWinner.pg++; woWinner.pts += 2; woLoser.pp++; }
-    else if (sa > sb) { a.pg++; a.pts += 2; b.pp++; }
-    else if (sb > sa) { b.pg++; b.pts += 2; a.pp++; }
-  });
-  const rows = Object.values(table);
-
-  if (group.format === "bracket4" && group.matches.length === 4) {
-    // El orden sale directo del cruce de ganadores/perdedores, no de la tabla de puntos:
-    // 1° = ganó el cruce de ganadores, 2° = lo perdió, 3° = ganó el de perdedores, 4° = lo perdió.
-    const [, , mw, ml] = group.matches;
-    const order = [winnerOf(mw), loserOf(mw), winnerOf(ml), loserOf(ml)];
-    return rows.sort((x, y) => {
-      const rx = order.indexOf(x.pairId), ry = order.indexOf(y.pairId);
-      const px = rx === -1 ? 99 : rx, py = ry === -1 ? 99 : ry;
-      if (px !== py) return px - py;
-      // Todavía sin definir (partidos no jugados): dejamos la tabla de puntos como orden provisorio
-      if (y.pts !== x.pts) return y.pts - x.pts;
-      const setsDiff = (y.setsF - y.setsC) - (x.setsF - x.setsC);
-      if (setsDiff !== 0) return setsDiff;
-      return (y.gamesF - y.gamesC) - (x.gamesF - x.gamesC);
-    });
-  }
-
-  return rows.sort((x, y) => {
-    if (y.pts !== x.pts) return y.pts - x.pts;
-    const setsDiff = (y.setsF - y.setsC) - (x.setsF - x.setsC);
-    if (setsDiff !== 0) return setsDiff;
-    // Desempate final: diferencia de games ganados (típico en grupos de 3 donde todos ganan 1 partido)
-    return (y.gamesF - y.gamesC) - (x.gamesF - x.gamesC);
-  });
-}
 
 /* Cuántas parejas pasan de un grupo a la llave final: lo elige el organizador en cada grupo por
    separado (g.qualifiersCount, por defecto 2), nunca más que las parejas que tiene el grupo. */
@@ -813,7 +748,8 @@ function seedKnockoutRound1(entries, compareSamePlace) {
 function buildKnockoutSeeding(groups, pairsById, format) {
   const entries = groups.flatMap((g, gi) => {
     const table = computeStandings(g, pairsById, format);
-    return table.slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
+    // La pareja que dio W.O. queda eliminada: no clasifica aunque el grupo pase a 3 de 4
+    return table.filter((row) => !row.wo).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
   });
   const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC];
   const compareMerit = (a, b) => {
@@ -877,18 +813,7 @@ function buildSeededBracket(round1Pairs) {
   return buildBracket(round1Pairs.flat());
 }
 
-function winnerOf(m) {
-  if (m.pairA && !m.pairB) return m.pairA;
-  if (m.pairB && !m.pairA) return m.pairB;
-  return matchWinnerId(m);
-}
 
-function loserOf(m) {
-  if (!matchIsPlayed(m) || !m.pairA || !m.pairB) return null;
-  const w = matchWinnerId(m);
-  if (!w) return null;
-  return w === m.pairA ? m.pairB : m.pairA;
-}
 
 /* En un grupo de 4 parejas, arma solos los cruces de ganadores y de perdedores apenas se cargan
    los dos primeros resultados (partido 1 y partido 2 del sorteo inicial) */
@@ -1783,27 +1708,44 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, sending]);
 
+  // Torneos clásicos: disponibilidad por cada día que cargó el organizador (nunca se asume qué días
+  // son) y si pueden jugar el primer cruce de llave el mismo día que termina la zona
+  const playDates = tournamentType(tournament) === "clasico" ? tournament.playDates || [] : [];
+  const askAvailability = playDates.length > 0;
+  const [availability, setAvailability] = useState(() => Object.fromEntries(playDates.map((d) => [d.date, { on: true, from: d.from, to: d.to }])));
+  const [sameDayBracket, setSameDayBracket] = useState(null); // null = sin responder
+  const setDay = (date, patch) => setAvailability((a) => ({ ...a, [date]: { ...a[date], ...patch } }));
+  const chosenDays = playDates.filter((d) => availability[d.date]?.on).map((d) => ({ date: d.date, from: availability[d.date].from, to: availability[d.date].to }));
+  const availabilityOk = !askAvailability || (chosenDays.length > 0 && chosenDays.every((d) => d.from && d.to && d.from < d.to) && sameDayBracket !== null);
+
   const category = categories.find((c) => c.id === categoryId);
   const individual = category?.format === "super8_individual";
   const full = category ? categorySpotsLeft(category) === 0 : false;
   const normalizedPhone = normalizeArPhone(phone);
   const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
-  const ready = category && !full && validName(player1) && (individual || validName(player2)) && normalizedPhone;
+  const ready = category && !full && validName(player1) && (individual || validName(player2)) && normalizedPhone && availabilityOk;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!ready || sending) return;
     setSending(true);
     setError("");
+    const params = {
+      p_torneo_id: tournament.id,
+      p_categoria_id: category.id,
+      p_jugador1: player1.trim(),
+      p_jugador2: individual ? null : player2.trim(),
+      p_telefono: normalizedPhone,
+      p_honeypot: website,
+    };
     try {
-      await supabaseRpc("crear_inscripcion", {
-        p_torneo_id: tournament.id,
-        p_categoria_id: category.id,
-        p_jugador1: player1.trim(),
-        p_jugador2: individual ? null : player2.trim(),
-        p_telefono: normalizedPhone,
-        p_honeypot: website,
-      });
+      try {
+        await supabaseRpc("crear_inscripcion", askAvailability ? { ...params, p_disponibilidad: chosenDays, p_cruce_mismo_dia: sameDayBracket } : params);
+      } catch (err) {
+        // Si la base todavía no tiene la migración de disponibilidad, se inscribe igual sin ella
+        if (askAvailability && err.pgCode === "PGRST202") await supabaseRpc("crear_inscripcion", params);
+        else throw err;
+      }
       setDone(true);
     } catch (err) {
       setError(inscripcionErrorText(err));
@@ -1886,6 +1828,51 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
               </p>
             </div>
 
+            {askAvailability && (
+              <fieldset className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
+                <legend className="px-1 text-xs text-teal-300">Disponibilidad horaria de la pareja</legend>
+                <p className="text-[11px] text-teal-500">Marcá los días que pueden jugar y en qué horario.</p>
+                {playDates.map((d) => {
+                  const day = availability[d.date];
+                  return (
+                    <div key={d.date} className="flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-2 w-28 text-sm">
+                        <input type="checkbox" checked={day.on} onChange={(e) => setDay(d.date, { on: e.target.checked })} className="w-4 h-4" />
+                        {formatDateShort(d.date)}
+                      </label>
+                      {day.on ? (
+                        <span className="flex items-center gap-1">
+                          <input type="time" lang="es-AR" value={day.from} onChange={(e) => setDay(d.date, { from: e.target.value })} className="px-2 py-1.5 rounded border text-sm" style={inputStyle} aria-label={`Desde, ${formatDateShort(d.date)}`} />
+                          <span className="text-xs text-teal-500">a</span>
+                          <input type="time" lang="es-AR" value={day.to} onChange={(e) => setDay(d.date, { to: e.target.value })} className="px-2 py-1.5 rounded border text-sm" style={inputStyle} aria-label={`Hasta, ${formatDateShort(d.date)}`} />
+                        </span>
+                      ) : (
+                        <span className="text-xs text-teal-600">No pueden</span>
+                      )}
+                    </div>
+                  );
+                })}
+                {chosenDays.length === 0 && <p className="text-xs text-amber-400">Marcá al menos un día.</p>}
+                <div className="pt-2">
+                  <p className="text-sm mb-1.5">Si clasifican, ¿pueden jugar el primer cruce de llave el mismo día que terminan la zona?</p>
+                  <div className="flex gap-2">
+                    {[[true, "Sí"], [false, "No"]].map(([value, text]) => (
+                      <button
+                        key={text}
+                        type="button"
+                        aria-pressed={sameDayBracket === value}
+                        onClick={() => setSameDayBracket(value)}
+                        className="flex-1 py-2 rounded-full text-sm font-semibold border"
+                        style={sameDayBracket === value ? { backgroundColor: BRAND.lime, color: "#14181f", borderColor: BRAND.lime } : { borderColor: "#475569", color: "#cbd5e1" }}
+                      >
+                        {text}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </fieldset>
+            )}
+
             {/* Honeypot: fuera de pantalla y fuera del orden de tabulación */}
             <div aria-hidden="true" style={{ position: "absolute", left: "-10000px", width: 1, height: 1, overflow: "hidden" }}>
               <label htmlFor="insc-web">No completar</label>
@@ -1913,6 +1900,14 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
 function RegisterButton({ tournament, onRegister, className = "", full = false }) {
   const status = registrationStatus(tournament);
   if (status === "cerrado") return null;
+  if (status === "cerradas") {
+    // El organizador cerró las inscripciones: cartel en lugar del botón
+    return (
+      <span className={`${full ? "w-full" : ""} inline-block text-center px-4 py-2.5 rounded-full text-sm font-semibold ${className}`} style={{ ...F.body, border: "1px solid #f8717166", color: "#fca5a5", backgroundColor: "#f8717114" }}>
+        Inscripciones cerradas
+      </span>
+    );
+  }
   const complete = status === "completo";
   return (
     <button
@@ -1991,9 +1986,12 @@ function SetsSummary({ sets, winnerIsA }) {
   );
 }
 
-/* Resultado de un partido en modo lectura: "WO" si fue por walkover, o el resultado set a set (ganador primero) */
-function MatchResultLabel({ match, winnerIsA }) {
-  if (match && match.walkover) return <span className="text-amber-400 font-semibold">WO</span>;
+/* Resultado de un partido en modo lectura, set a set y con el ganador primero. Un W.O. se muestra
+   con el resultado con que se computa y la marca: "6-0 · 6-0 · WO" (o "7-0 · WO" en un Americano a 7). */
+function MatchResultLabel({ match, winnerIsA, format }) {
+  if (match && match.walkover) {
+    return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.walkover === match.pairA ? false : true} /> · <span className="text-amber-400 font-semibold">WO</span></span>;
+  }
   return <SetsSummary sets={match.sets} winnerIsA={winnerIsA} />;
 }
 
@@ -2029,13 +2027,14 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
   return (
     <div className="rounded-lg border overflow-hidden" style={{ borderColor: accentColor + "40" }}>
       {table.map((row, i) => {
-        const qualifies = i < highlightCount;
+        // La pareja que dio W.O. queda eliminada: nunca se marca como clasificada
+        const qualifies = i < highlightCount && !row.wo;
         const ds = row.setsF - row.setsC;
         const dg = row.gamesF - row.gamesC;
         return (
           <div
             key={row.pairId}
-            className="px-3 py-2"
+            className={`px-3 py-2 ${row.wo ? "opacity-60" : ""}`}
             style={{
               backgroundColor: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.03)",
               borderLeft: qualifies ? `3px solid ${accentColor}` : "3px solid transparent",
@@ -2050,9 +2049,11 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
                 >
                   {i + 1}
                 </span>
-                <span className={`text-sm ${qualifies ? "font-semibold" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
+                <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.wo ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
                   <PairName id={row.pairId} pairsById={pairsById} />
                 </span>
+                {row.wo && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>W.O. · ELIMINADA</span>}
+                {row.byDraw && !row.wo && <span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
               </div>
               <span className="text-sm font-semibold shrink-0" style={{ color: accentColor }}>{row.pts} pts</span>
             </div>
@@ -2817,7 +2818,7 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
 /* Una fila editable (se usa solo para los partidos SIN horario todavía, en la bandeja de abajo de
    la planilla): permite asignar fecha, hora y cancha a mano, y también se puede arrastrar directo
    a una celda libre de la planilla. */
-function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive, draggable, onDragStart }) {
+function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive, draggable, onDragStart }) {
   const s = m.schedule;
   const hasResult = matchIsPlayed(m);
   const w = hasResult ? matchWinnerId(m) : null;
@@ -2843,7 +2844,7 @@ function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear, on
             <div className="text-[11px] opacity-50 flex items-center gap-2">
               <span>vs</span>
               {hasResult && (
-                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>
+                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></span>
               )}
             </div>
             <div className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
@@ -2893,7 +2894,7 @@ function ScheduleRow({ m, pairsById, playDates, courtsCount, onEdit, onClear, on
 
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
-function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear, onResult, onMove }) {
+function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, onResult, onMove }) {
   const status = m.placeholder ? "pendiente" : matchDisplayStatus(m);
   const finished = status === "finalizado";
   const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
@@ -2926,7 +2927,7 @@ function GridMatchCard({ m, pairsById, conflict, onDragStart, onClear, onResult,
           <p className="truncate opacity-60">vs <PairName id={m.pairB} pairsById={pairsById} /></p>
           {onResult && (
             <button type="button" onClick={onResult} className="mt-0.5 text-[10px] underline text-teal-300 hover:text-lime-400">
-              {finished ? <span className="font-mono"><MatchResultLabel match={m} winnerIsA={matchWinnerId(m) === m.pairA} /> ✎</span> : "+ Resultado"}
+              {finished ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={matchWinnerId(m) === m.pairA} /> ✎</span> : "+ Resultado"}
             </button>
           )}
         </>
@@ -3113,7 +3114,7 @@ function OnCourtView({ tournament, update }) {
         ) : (
           <p className="text-base leading-snug mb-2">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</p>
         )}
-        {hasResult && <p className="font-mono text-sm text-teal-300 mb-2"><MatchResultLabel match={m} winnerIsA={w === m.pairA} /></p>}
+        {hasResult && <p className="font-mono text-sm text-teal-300 mb-2"><MatchResultLabel format={tournament.matchFormat} match={m} winnerIsA={w === m.pairA} /></p>}
         <div className="flex gap-2 flex-wrap">
           {!m.placeholder && !hasResult && (kind === "live" ? (
             <button type="button" onClick={() => setLive(m, null)} className={`${btn} border border-orange-400 text-orange-300`}>Quitar en curso</button>
@@ -3359,7 +3360,7 @@ function ScheduleAdminView({ tournament, update }) {
                                     </select>
                                   ) : (
                                     cellMatches.map((m) => (
-                                      <GridMatchCard key={m.key} m={m} pairsById={pairsById} conflict={conflict} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
+                                      <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
                                     ))
                                   )}
                                 </td>
@@ -3382,7 +3383,7 @@ function ScheduleAdminView({ tournament, update }) {
                             <div key={m.key} className="flex gap-2 items-start">
                               <span className="text-xs font-bold w-11 shrink-0 pt-1.5" style={{ ...F.body, color: dateColor }}>{m.schedule.time}</span>
                               <div className="flex-1 min-w-0">
-                                <GridMatchCard m={m} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
+                                <GridMatchCard m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
                               </div>
                             </div>
                           ))}
@@ -3416,7 +3417,7 @@ function ScheduleAdminView({ tournament, update }) {
               <h3 className="text-sm font-semibold text-teal-300 mb-2" style={F.body}>Sin horario asignado ({unscheduled.length}) · arrastrá una celda libre de arriba, o soltá acá una tarjeta para quitarle el horario</h3>
               <div className="space-y-2">
                 {unscheduled.map((m) => (
-                  <ScheduleRow key={m.key} m={m} pairsById={pairsById} playDates={playDates} courtsCount={courtsCount}
+                  <ScheduleRow key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} playDates={playDates} courtsCount={courtsCount}
                     draggable onDragStart={onDragStartMatch(m.key)}
                     onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} onToggleLive={(ls) => toggleLiveStatus(m, ls)} />
                 ))}
@@ -3425,6 +3426,39 @@ function ScheduleAdminView({ tournament, update }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* Resultado en formato marcador: una pareja por renglón y los games de cada set en columnas a la
+   derecha. La pareja ganadora va en verde y el número ganador de cada set en negrita. Un W.O. se
+   muestra con el resultado con que se computa (6-0 6-0) y la marca W.O. en la pareja que no se
+   presentó. */
+function Scoreboard({ match, pairsById, format }) {
+  const sets = effectiveSets(match, format).filter((s) => s && s.a != null && s.b != null);
+  const winner = matchWinnerId(match);
+  const line = (side) => {
+    const id = side === "a" ? match.pairA : match.pairB;
+    const other = side === "a" ? "b" : "a";
+    const won = winner === id;
+    return (
+      <div className="flex items-center gap-2 min-w-0">
+        <span className={`flex-1 min-w-0 truncate ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
+          {pairsById[id]?.name || "—"}
+          {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
+        </span>
+        <span className="flex gap-1 shrink-0 font-mono">
+          {sets.map((s, i) => (
+            <span key={i} className={`w-5 text-center ${s[side] > s[other] ? "font-extrabold text-slate-100" : "text-slate-400"}`}>{s[side]}</span>
+          ))}
+        </span>
+      </div>
+    );
+  };
+  return (
+    <div className="text-sm leading-snug">
+      {line("a")}
+      {line("b")}
     </div>
   );
 }
@@ -3489,14 +3523,20 @@ function SchedulePublicView({ tournament }) {
                       const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
                       return (
                         <div key={m.key} className="text-sm min-w-0" style={F.body}>
-                          <div className="flex items-baseline gap-2 min-w-0">
-                            <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>C{m.schedule.court}</span>
-                            {m.placeholder
-                              ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
-                              : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
-                            {hasResult && <span className="font-mono text-xs text-teal-300 shrink-0 ml-auto"><MatchResultLabel match={m} winnerIsA={w === m.pairA} /></span>}
-                            {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
-                          </div>
+                          {hasResult ? (
+                            <div className="flex items-start gap-2 min-w-0">
+                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              <div className="flex-1 min-w-0"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div>
+                            </div>
+                          ) : (
+                            <div className="flex items-baseline gap-2 min-w-0">
+                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              {m.placeholder
+                                ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
+                                : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
+                              {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+                            </div>
+                          )}
                           <div className="text-[10px] truncate pl-7" style={{ color: categoryColor[m.categoryId] }}>
                             {m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
                           </div>
@@ -3622,6 +3662,22 @@ function ChevronCircle({ color }) {
 }
 
 const PUBLIC_TABS = [["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"]];
+const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
+
+/* Contacto al pie de las pantallas públicas */
+function ContactFooter() {
+  return (
+    <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-10 text-center" style={F.body}>
+      <div className="rounded-2xl px-4 py-5" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(8,18,24,0.6)" }}>
+        <p className="text-sm uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Contacto</p>
+        <p className="text-sm text-teal-300 mb-3">¿Organizás torneos, tenés un complejo o das clases? Escribinos.</p>
+        <a href={`mailto:${CONTACT_EMAIL}`} className="inline-block px-4 py-2 rounded-full text-sm font-semibold break-all" style={{ ...neonStyle(BRAND.lime), color: BRAND.ink }}>
+          {CONTACT_EMAIL}
+        </a>
+      </div>
+    </footer>
+  );
+}
 
 /* Encabezado público: el logo al medio y debajo las pestañas Torneos · Canchas · Profes junto al
    acceso de organizadores (en el celular, solo el ícono, para que entre todo en una fila) */
@@ -3914,21 +3970,93 @@ function PublicTournamentCard({ t, big, organizerLabel, onOpen, onRegister, clas
   );
 }
 
+/* Junta los torneos de un mismo evento en un solo ítem, en el lugar del primero que aparece.
+   Devuelve [{ kind: "tournament", t } | { kind: "event", event, tournaments }]. Un torneo cuyo
+   evento ya no existe se muestra suelto. */
+function groupTournamentsByEvent(tournaments, events) {
+  const eventsById = Object.fromEntries((events || []).map((e) => [e.id, e]));
+  const byEvent = new Map();
+  const items = [];
+  tournaments.forEach((t) => {
+    const event = t.eventId && eventsById[t.eventId];
+    if (!event) { items.push({ kind: "tournament", t }); return; }
+    if (!byEvent.has(event.id)) {
+      const item = { kind: "event", event, tournaments: [] };
+      byEvent.set(event.id, item);
+      items.push(item);
+    }
+    byEvent.get(event.id).tournaments.push(t);
+  });
+  return items;
+}
+
+/* Estado de un evento: en curso si alguno de sus torneos se está jugando, próximo si alguno no
+   empezó, finalizado si terminaron todos */
+function eventStatus(tournaments) {
+  const statuses = tournaments.map(tournamentStatusOf);
+  if (statuses.includes(STATUS.EN_CURSO)) return STATUS.EN_CURSO;
+  if (statuses.includes(STATUS.PROXIMO)) return STATUS.PROXIMO;
+  return STATUS.FINALIZADO;
+}
+
+/* Tarjeta de un evento: una sola tarjeta con todos sus torneos (categorías y fechas). Al tocarla
+   se abre el evento con cada torneo por separado. */
+function EventCard({ event, tournaments, compact, organizerLabel, onOpenEvent, className = "" }) {
+  const sorted = [...tournaments].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const status = eventStatus(sorted);
+  const accent = STATUS_ACCENT[status];
+  const cover = event.coverImageUrl || sorted.find((t) => t.coverImageUrl)?.coverImageUrl;
+  const first = sorted[0], last = sorted[sorted.length - 1];
+  const dates = first.date === last.date ? formatDateShort(first.date) : `${formatDateShort(first.date)} al ${formatDateShort(last.date)}`;
+  const types = [...new Set(sorted.map((t) => tournamentType(t)))];
+  const anyOpen = sorted.some((t) => registrationStatus(t) === "abierto");
+  const open = () => onOpenEvent(event.id);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
+      className={`text-left rounded-xl overflow-hidden cursor-pointer flex flex-col ${className}`}
+      style={{ ...neonStyle(accent), backgroundColor: accent + "0d" }}
+    >
+      <div className={`relative w-full ${compact ? "aspect-square" : "aspect-[4/3]"}`} style={{ background: COURT_FALLBACK_BACKGROUND }}>
+        {cover && <img src={cover} alt="" className="absolute inset-0 w-full h-full object-cover" />}
+        <span className="absolute top-1.5 left-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ backgroundColor: BRAND.cyan, color: "#0b1c24", ...F.body }}>EVENTO · {sorted.length} TORNEOS</span>
+        {status === STATUS.EN_CURSO && (
+          <span className="absolute bottom-1.5 left-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ backgroundColor: accent, color: "#14181f", ...F.body }}>● EN CURSO</span>
+        )}
+      </div>
+      <div className={`${compact ? "p-2" : "p-4"} flex flex-col gap-1 flex-1`} style={F.body}>
+        <p className={`${compact ? "text-xs" : "text-base"} font-semibold leading-tight line-clamp-2`} style={{ color: BRAND.ink }}>{event.name}</p>
+        <div className="flex flex-wrap gap-1">{types.map((type) => <TournamentTypeTag key={type} tournament={sorted.find((t) => tournamentType(t) === type)} short />)}</div>
+        <p className={`${compact ? "text-[10px]" : "text-sm"} text-teal-300 truncate`}>{dates}{organizerLabel ? ` · ${organizerLabel}` : ""}</p>
+        {!compact && <p className="text-xs text-teal-400">{sorted.map((t) => t.name).join(" · ")}</p>}
+        {anyOpen && <span className={`mt-auto pt-1 ${compact ? "text-[10px]" : "text-xs"} font-bold`} style={{ color: BRAND.lime }}>● Inscripciones abiertas</span>}
+      </div>
+    </div>
+  );
+}
+
 /* Grilla de tarjetas según el filtro elegido (grandes en En curso / Próximos) */
-function TournamentsGrid({ tournaments, filter, emptyText, organizerLabel, onOpen, onRegister }) {
+function TournamentsGrid({ tournaments, events, filter, emptyText, organizerLabel, onOpen, onOpenEvent, onRegister }) {
   const list = filterByStatus(tournaments, filter);
   const big = filter === STATUS.EN_CURSO || filter === STATUS.PROXIMO;
+  // Los torneos de un mismo evento van juntos en una sola tarjeta (si no se pasa onOpenEvent, sueltos)
+  const items = onOpenEvent ? groupTournamentsByEvent(list, events) : list.map((t) => ({ kind: "tournament", t }));
   return (
     <main className={`px-4 sm:px-6 py-8 grid gap-5 ${big ? "grid-cols-2 lg:grid-cols-3" : "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"}`}>
       {list.length === 0 && <p className="opacity-60 col-span-full" style={F.body}>{tournaments.length === 0 ? emptyText : "No hay torneos en este estado."}</p>}
-      {list.map((t) => <PublicTournamentCard key={t.id} t={t} big={big} organizerLabel={organizerLabel?.(t)} onOpen={onOpen} onRegister={onRegister} />)}
+      {items.map((item) => (item.kind === "event"
+        ? <EventCard key={`ev-${item.event.id}`} event={item.event} tournaments={item.tournaments} compact={big} organizerLabel={organizerLabel?.(item.tournaments[0])} onOpenEvent={onOpenEvent} />
+        : <PublicTournamentCard key={item.t.id} t={item.t} big={big} organizerLabel={organizerLabel?.(item.t)} onOpen={onOpen} onRegister={onRegister} />))}
     </main>
   );
 }
 
 /* Carrusel "Próximos torneos" del inicio: en curso y próximos de todos los organizadores, más los
    informativos. Primero los que se están jugando y después por fecha. No se muestra si no hay. */
-function UpcomingTournamentsCarousel({ tournaments, organizerLabel, onOpen, onRegister, onSeeAll }) {
+function UpcomingTournamentsCarousel({ tournaments, events, organizerLabel, onOpen, onOpenEvent, onRegister, onSeeAll }) {
   const upcoming = tournaments
     .filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO)
     .sort((a, b) => {
@@ -3944,16 +4072,26 @@ function UpcomingTournamentsCarousel({ tournaments, organizerLabel, onOpen, onRe
         <button type="button" onClick={onSeeAll} className="text-sm font-semibold shrink-0" style={{ ...F.body, color: BRAND.lime }}>Ver todos ›</button>
       </div>
       <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1" style={{ scrollbarWidth: "none" }}>
-        {upcoming.map((t) => (
+        {groupTournamentsByEvent(upcoming, events).map((item) => (item.kind === "event" ? (
+          <EventCard
+            key={`ev-${item.event.id}`}
+            event={item.event}
+            tournaments={item.tournaments}
+            compact
+            organizerLabel={organizerLabel(item.tournaments[0])}
+            onOpenEvent={onOpenEvent}
+            className="snap-start shrink-0 w-[40%] sm:w-[24%] lg:w-[18%]"
+          />
+        ) : (
           <CompactTournamentCard
-            key={t.id}
-            t={t}
-            organizerLabel={organizerLabel(t)}
+            key={item.t.id}
+            t={item.t}
+            organizerLabel={organizerLabel(item.t)}
             onOpen={onOpen}
             onRegister={onRegister}
             className="snap-start shrink-0 w-[40%] sm:w-[24%] lg:w-[18%]"
           />
-        ))}
+        )))}
       </div>
     </section>
   );
@@ -4051,9 +4189,10 @@ function CoachesPublicView({ coaches }) {
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Canchas · Profes.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
-function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, onOpen, onGoLogin }) {
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin }) {
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   const [selectedOrgId, setSelectedOrgId] = useState(null);
+  const [selectedEventId, setSelectedEventId] = useState(null);
   const [showAll, setShowAll] = useState(false);
   const [section, setSection] = useState("torneos"); // torneos | circuitos (dentro de un organizador)
   const [filter, setFilter] = useState(STATUS.EN_CURSO);
@@ -4062,7 +4201,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
   const onRegister = (t) => setRegisteringId(t.id);
   const organizerLabel = (t) => (isInfoOnly(t) ? t.organizerName || null : organizers.find((o) => o.id === t.organizerId)?.name || null);
 
-  const goTab = (key) => { setTab(key); setSelectedOrgId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const goTab = (key) => { setTab(key); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
+  const selectedEvent = events.find((e) => e.id === selectedEventId);
+  const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
   const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
@@ -4075,6 +4217,24 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
     body = <VenuesPublicView venues={venues} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
+  } else if (selectedEvent && eventTournaments.length > 0) {
+    // Un evento: sus torneos (categorías) juntos, cada uno con su tarjeta
+    const organizer = organizers.find((o) => o.id === eventTournaments[0].organizerId);
+    const cover = selectedEvent.coverImageUrl;
+    body = (
+      <>
+        <header className="px-4 sm:px-6 pt-2 pb-6 border-b border-teal-900 max-w-5xl mx-auto">
+          <button type="button" onClick={() => setSelectedEventId(null)} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver</button>
+          {cover && <img src={cover} alt="" className="w-full max-h-64 object-cover rounded-xl border border-teal-800 mt-4" />}
+          <p className="text-[10px] font-bold mt-4" style={{ ...F.body, color: BRAND.cyan }}>EVENTO · {eventTournaments.length} TORNEOS</p>
+          <h1 className="text-xl mt-1" style={F.display}>{selectedEvent.name.toUpperCase()}</h1>
+          {organizer && <p className="text-sm text-teal-300 mt-1" style={F.body}>Organiza: {organizer.name}</p>}
+        </header>
+        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8 grid gap-5 grid-cols-2 lg:grid-cols-3">
+          {eventTournaments.map((t) => <PublicTournamentCard key={t.id} t={t} big onOpen={onOpen} onRegister={onRegister} />)}
+        </main>
+      </>
+    );
   } else if (showAll) {
     body = (
       <>
@@ -4084,7 +4244,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
           <TournamentFilterChips tournaments={tournaments} filter={filter} onFilter={setFilter} />
         </header>
         <div className="max-w-5xl mx-auto">
-          <TournamentsGrid tournaments={tournaments} filter={filter} emptyText="Todavía no hay torneos cargados." organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} />
+          <TournamentsGrid tournaments={tournaments} events={events} onOpenEvent={openEvent} filter={filter} emptyText="Todavía no hay torneos cargados." organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} />
         </div>
       </>
     );
@@ -4112,7 +4272,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
         <div className="max-w-5xl mx-auto">
           {section === "circuitos"
             ? <div className="pt-8"><CircuitsPublicView circuits={orgCircuits} tournaments={tournaments} organizers={organizers} /></div>
-            : <TournamentsGrid tournaments={orgTournaments} filter={filter} emptyText="Todavía no hay torneos cargados." onOpen={onOpen} onRegister={onRegister} />}
+            : <TournamentsGrid tournaments={orgTournaments} events={events} onOpenEvent={openEvent} filter={filter} emptyText="Todavía no hay torneos cargados." onOpen={onOpen} onRegister={onRegister} />}
         </div>
       </>
     );
@@ -4121,7 +4281,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
     body = (
       <>
         <HomeHero tournaments={tournaments} />
-        <UpcomingTournamentsCarousel tournaments={tournaments} organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} onSeeAll={openAll} />
+        <UpcomingTournamentsCarousel tournaments={tournaments} events={events} onOpenEvent={openEvent} organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} onSeeAll={openAll} />
         <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" />
         <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
           <h2 className="text-base sm:text-lg uppercase mb-3" style={{ ...F.display, color: BRAND.ink }}>Organizadores</h2>
@@ -4151,6 +4311,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, o
       <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
+      <ContactFooter />
       {registering && (
         <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
       )}
@@ -4187,21 +4348,15 @@ function Super8View({ category, format, onSetScore, onWalkover }) {
                 {side(m.pairA)}
                 <span className="text-xs text-teal-500">vs</span>
                 {side(m.pairB)}
-                {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+                {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
               </div>
               {editable && (
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                   <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
-                  <div className="flex flex-col gap-0.5 text-[10px]">
-                    {m.walkover ? (
-                      <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                    ) : (
-                      <>
-                        <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairA)} className="text-amber-400 underline text-left" title={`WO de ${nameOf(m.pairA)}`}>WO izq.</button>
-                        <button type="button" onClick={() => onWalkover(group.id, m.id, m.pairB)} className="text-amber-400 underline text-left" title={`WO de ${nameOf(m.pairB)}`}>WO der.</button>
-                      </>
-                    )}
-                  </div>
+                  {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
+                  {m.walkover && (
+                    <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
+                  )}
                 </div>
               )}
             </div>
@@ -4258,7 +4413,7 @@ function CategoryGroupsPublicView({ category, format }) {
                             <GroupPairName id={m.pairB} pairsById={pairsById} />
                           </div>
                           <div className="flex justify-between items-baseline gap-3 mt-0.5">
-                            <span className="font-mono text-xs text-teal-300">{hasResult && <MatchResultLabel match={m} winnerIsA={winnerIsA} />}</span>
+                            <span className="font-mono text-xs text-teal-300">{hasResult && <MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} />}</span>
                             <span className="text-right"><ScheduleLabel schedule={m.schedule} /></span>
                           </div>
                         </>
@@ -4276,7 +4431,7 @@ function CategoryGroupsPublicView({ category, format }) {
   );
 }
 
-function CategoryBracketPublicView({ category }) {
+function CategoryBracketPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
 
   return (
@@ -4311,7 +4466,7 @@ function CategoryBracketPublicView({ category }) {
                         <span>{m.walkover ? "" : matchIsPlayed(m) ? setsB : ""}</span>
                       </div>
                       {matchIsPlayed(m) && (
-                        <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></p>
+                        <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
                       )}
                     </div>
                   );
@@ -4459,7 +4614,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
           ) : (
             <>
               {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
-              {category && view === "llaves" && <CategoryBracketPublicView category={category} />}
+              {category && view === "llaves" && <CategoryBracketPublicView category={category} format={format} />}
             </>
           )}
         </>
@@ -5188,7 +5343,7 @@ function CreatorCircuitRow({ circuit, organizerName, tournaments, onDelete }) {
   );
 }
 
-function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches, onRestore }) {
+function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches, events, onRestore }) {
   const [importError, setImportError] = useState("");
   const [pendingData, setPendingData] = useState(null);
   const [pickedFileName, setPickedFileName] = useState("");
@@ -5198,7 +5353,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   const downloadBackup = () => {
     // Los organizadores van solo como referencia (no se restauran); sus portadas sí
     const organizerCovers = Object.fromEntries(organizers.filter((o) => o.coverUrl).map((o) => [o.id, o.coverUrl]));
-    const data = { organizers, tournaments, circuits, ads, venues, coaches, organizerCovers, exportedAt: new Date().toISOString() };
+    const data = { organizers, tournaments, circuits, ads, venues, coaches, events, organizerCovers, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -5264,7 +5419,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Descargar respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Baja un archivo con todos los torneos (también los informativos), circuitos, anuncios, canchas, profes y fotos de portada de los organizadores, más la lista de organizadores como referencia. Guardalo en tu celular o computadora.
+          Baja un archivo con todos los torneos (también los informativos), eventos, circuitos, anuncios, canchas, profes y fotos de portada de los organizadores, más la lista de organizadores como referencia. Guardalo en tu celular o computadora.
         </p>
         <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
           No incluye las inscripciones online, porque tienen los WhatsApp de los jugadores.
@@ -5277,7 +5432,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
       <div className="border border-teal-800 rounded-lg p-4">
         <p className="text-sm font-semibold mb-1" style={F.body}>Restaurar desde un respaldo</p>
         <p className="text-xs text-teal-400 mb-3" style={F.body}>
-          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar torneos, circuitos, anuncios, canchas, profes y fotos de portada.
+          Si algún día la app vuelve a los datos de ejemplo, subí acá el último archivo que hayas descargado para recuperar torneos, eventos, circuitos, anuncios, canchas, profes y fotos de portada.
         </p>
         <p className="text-[11px] text-teal-600 mb-3" style={F.body}>
           Los organizadores no se restauran: son cuentas de acceso con contraseña que viven en Supabase y no se pueden recrear desde un archivo. Si falta alguno, crealo de nuevo en "Organizadores".
@@ -5319,7 +5474,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
   const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
@@ -5349,7 +5504,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
       {tab === "publicidad" ? (
         <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
-        <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} onRestore={onRestoreBackup} />
+        <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} events={events} onRestore={onRestoreBackup} />
       ) : tab === "canchas" ? (
         <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} />
       ) : tab === "profes" ? (
@@ -5473,7 +5628,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
                 const next = parseCupo(cupoTexts[c.id] ?? "");
                 return next ? { ...rest, cupo: next } : rest;
               });
-              onUpdate({ ...t, name: name.trim(), date, venue: venue.trim(), coverImageUrl: coverImageUrl.trim(), circuitId: clasico ? circuitId || null : null, playDates, categories, inscripcionesAbiertas: registrationOpen });
+              onUpdate(withRegistrationOpen({ ...t, name: name.trim(), date, venue: venue.trim(), coverImageUrl: coverImageUrl.trim(), circuitId: clasico ? circuitId || null : null, playDates, categories }, registrationOpen));
               setEditing(false);
             }}
             className="px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
@@ -5725,7 +5880,83 @@ function CircuitManager({ circuits, tournaments, onAdd, onUpdate, onDelete }) {
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones }) {
+/* Pestaña "Eventos" del organizador: un evento agrupa varios torneos (por ejemplo, cuatro Súper 8
+   seguidos de distintas categorías) para mostrarlos juntos en la parte pública. Es solo un
+   contenedor: no sabe nada del formato de cada torneo y no suma puntos entre ellos. */
+function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournament, accessToken }) {
+  const [name, setName] = useState("");
+  const [coverImageUrl, setCoverImageUrl] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  const submit = () => {
+    if (!name.trim()) return;
+    const prev = events.find((e) => e.id === editingId);
+    onSave({ ...(prev || {}), id: editingId || uid(), name: name.trim(), coverImageUrl: coverImageUrl.trim() });
+    setName(""); setCoverImageUrl(""); setEditingId(null);
+  };
+  const edit = (ev) => { setName(ev.name); setCoverImageUrl(ev.coverImageUrl || ""); setEditingId(ev.id); window.scrollTo(0, 0); };
+  const toggle = (t, ev, checked) => onUpdateTournament({ ...t, eventId: checked ? ev.id : null });
+
+  return (
+    <div style={F.body}>
+      <div className="border border-teal-800 rounded-lg p-4 mb-6 space-y-3">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">{editingId ? "Editar evento" : "Nuevo evento"}</h2>
+        <p className="text-xs text-teal-500">Agrupá varios torneos (Americanos, Súper 8 o Clásicos, mezclados si hace falta) para que en la página pública aparezcan juntos en una sola tarjeta. No suman puntos entre sí.</p>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre del evento</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Semana de Súper 8" />
+        </div>
+        <ImageUploadField label="Portada (opcional)" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="events" />
+        <div className="flex gap-3 items-center">
+          <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Crear evento"}</button>
+          {editingId && <button type="button" onClick={() => { setName(""); setCoverImageUrl(""); setEditingId(null); }} className="text-sm text-teal-400">Cancelar</button>}
+        </div>
+      </div>
+
+      <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Mis eventos</h2>
+      {events.length === 0 && <p className="opacity-60 text-sm">Todavía no creaste eventos.</p>}
+      <div className="space-y-4">
+        {events.map((ev) => (
+          <div key={ev.id} className="border border-teal-800 rounded-lg p-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+              <p className="font-semibold">{ev.name}</p>
+              <div className="flex items-center gap-3 text-sm">
+                <button type="button" onClick={() => edit(ev)} className="text-teal-300">Editar</button>
+                {confirmDeleteId === ev.id ? (
+                  <span className="whitespace-nowrap">
+                    <button type="button" onClick={() => { onDelete(ev.id); setConfirmDeleteId(null); }} className="text-red-400 font-semibold mr-2">Confirmar</button>
+                    <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-teal-400">Cancelar</button>
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => setConfirmDeleteId(ev.id)} className="text-red-400">Eliminar</button>
+                )}
+              </div>
+            </div>
+            <p className="text-xs text-teal-500 mb-1">Torneos del evento (tildá los que van juntos):</p>
+            <div className="space-y-1">
+              {tournaments.map((t) => {
+                const inOther = t.eventId && t.eventId !== ev.id && events.some((e) => e.id === t.eventId);
+                return (
+                  <label key={t.id} className={`flex items-center gap-2 text-sm ${inOther ? "opacity-50" : ""}`}>
+                    <input type="checkbox" checked={t.eventId === ev.id} disabled={inOther} onChange={(e) => toggle(t, ev, e.target.checked)} />
+                    <span>{t.name}</span>
+                    <span className="text-xs text-teal-600">· {formatDateShort(t.date)}</span>
+                    <TournamentTypeTag tournament={t} short />
+                    {inOther && <span className="text-[10px] text-teal-600">(en otro evento)</span>}
+                  </label>
+                );
+              })}
+              {tournaments.length === 0 && <p className="text-xs opacity-60">Todavía no tenés torneos.</p>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones }) {
   const [tab, setTab] = useState("torneos"); // torneos | circuitos
   const [creating, setCreating] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
@@ -5770,12 +6001,12 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
         </div>
       )}
 
-      <div className="flex gap-2 mb-6">
-        {[["torneos", "Torneos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
+      <div className="flex gap-2 mb-6 overflow-x-auto">
+        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
-            className={`px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+            className={`shrink-0 px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
             style={F.body}
           >
             {label}
@@ -5783,7 +6014,9 @@ function AdminHome({ organizer, tournaments, circuits, onCreate, onOpen, onLogou
         ))}
       </div>
 
-      {tab === "circuitos" ? (
+      {tab === "eventos" ? (
+        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} accessToken={organizer.accessToken} />
+      ) : tab === "circuitos" ? (
         <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
       ) : (
         <>
@@ -5819,12 +6052,15 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
 
+  const [justAccepted, setJustAccepted] = useState([]); // aceptadas recién, para ofrecer el aviso por WhatsApp
+
   const resolve = async (i, accept) => {
     setBusyId(i.id);
     setErrors((e) => ({ ...e, [i.id]: null }));
     try {
       await onResolve(i, accept);
       setConfirmRejectId(null);
+      if (accept) setJustAccepted((list) => [i, ...list]);
     } catch (err) {
       setErrors((e) => ({ ...e, [i.id]: inscripcionErrorText(err) }));
     } finally {
@@ -5832,12 +6068,38 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
     }
   };
 
+  /* Aviso opcional al jugador: abre el WhatsApp del organizador con el número y el mensaje ya
+     escritos; él decide si lo envía. Nunca frena la aprobación. */
+  const whatsappLink = (i) => {
+    const category = categoriesById[i.categoria_id]?.name;
+    const text = `¡Hola! Te confirmamos la inscripción de ${names(i)}${category ? ` en ${category}` : ""} para el torneo "${tournament.name}" (${formatDateShort(tournament.date)}). ¡Nos vemos en la cancha!`;
+    return `https://wa.me/${i.telefono}?text=${encodeURIComponent(text)}`;
+  };
+  const whatsappButton = (i, label = "Avisar por WhatsApp") => (
+    <a href={whatsappLink(i)} target="_blank" rel="noopener noreferrer" className="inline-block px-3 py-1.5 rounded-full text-xs font-semibold" style={{ backgroundColor: "#25d366", color: "#0b1c24" }}>
+      {label}
+    </a>
+  );
+
   return (
     <div style={F.body}>
+      {justAccepted.length > 0 && (
+        <div className="mb-5 space-y-2">
+          {justAccepted.map((i) => (
+            <div key={i.id} className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap" style={{ ...neonStyle(BRAND.lime), backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <span className="text-sm"><span className="text-lime-400 font-semibold">✓ Aceptada:</span> {names(i)}</span>
+              <span className="flex items-center gap-2">
+                {whatsappButton(i)}
+                <button type="button" onClick={() => setJustAccepted((list) => list.filter((x) => x.id !== i.id))} className="text-xs text-teal-400" aria-label="Cerrar aviso">✕</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="mb-5">
         <Toggle
           checked={!!tournament.inscripcionesAbiertas}
-          onChange={(v) => update({ ...tournament, inscripcionesAbiertas: v })}
+          onChange={(v) => update(withRegistrationOpen(tournament, v))}
           label="Inscripciones abiertas"
           description={tournament.inscripcionesAbiertas ? "El torneo aparece en la página pública con el botón \"Inscribirme\"." : "Nadie puede inscribirse desde la página pública."}
         />
@@ -5862,6 +6124,12 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
               <a href={`https://wa.me/${i.telefono}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-1 text-sm underline" style={{ color: BRAND.lime }}>
                 WhatsApp {formatArPhone(i.telefono)}
               </a>
+              {Array.isArray(i.disponibilidad) && i.disponibilidad.length > 0 && (
+                <p className="text-xs text-teal-300 mt-1">Disponibilidad: {i.disponibilidad.map((d) => `${formatDateShort(d.date)} ${d.from} a ${d.to}`).join(" · ")}</p>
+              )}
+              {i.cruce_mismo_dia != null && (
+                <p className="text-xs text-teal-300">Cruce de llave el mismo día que la zona: <span className="font-semibold">{i.cruce_mismo_dia ? "Sí" : "No"}</span></p>
+              )}
               {category && left === 0 && (
                 <p className="text-xs text-amber-400 mt-2">
                   {isSuper8(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
@@ -5900,9 +6168,12 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
           {showHistory && (
             <ul className="mt-2 space-y-1 text-sm">
               {history.map((i) => (
-                <li key={i.id} className="flex justify-between gap-2 border-b border-teal-900 py-1.5">
+                <li key={i.id} className="flex justify-between items-center gap-2 border-b border-teal-900 py-1.5">
                   <span className="min-w-0 truncate">{names(i)} <span className="text-teal-500">· {categoriesById[i.categoria_id]?.name || "—"}</span></span>
-                  <span className={`shrink-0 text-xs font-semibold ${i.estado === "aceptada" ? "text-lime-400" : "text-red-400"}`}>{i.estado === "aceptada" ? "Aceptada" : "Rechazada"}</span>
+                  <span className="shrink-0 flex items-center gap-2">
+                    {i.estado === "aceptada" && whatsappButton(i, "WhatsApp")}
+                    <span className={`text-xs font-semibold ${i.estado === "aceptada" ? "text-lime-400" : "text-red-400"}`}>{i.estado === "aceptada" ? "Aceptada" : "Rechazada"}</span>
+                  </span>
                 </li>
               ))}
             </ul>
@@ -6354,7 +6625,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             <GroupPairName id={m.pairB} pairsById={pairsById} />
                           </div>
                           <div className="flex items-center gap-2 flex-wrap mt-0.5" style={F.body}>
-                            {hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel match={m} winnerIsA={winnerIsA} /></span>}
+                            {hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></span>}
                             {m.schedule && <ScheduleLabel schedule={m.schedule} />}
                           </div>
                         </div>
@@ -6750,6 +7021,27 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
           : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan uno atrás del otro en la cancha disponible."}
       </p>
 
+      {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
+      {tournamentType(tournament) !== "super8" && tournament.categories.length > 0 && (
+        <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={F.body}>
+          <span className="shrink-0 self-center text-xs text-teal-400">Inscriptas:</span>
+          {tournament.categories.map((c) => {
+            const cupo = categoryCupo(c);
+            const full = cupo != null && c.pairs.length >= cupo;
+            return (
+              <span key={c.id} className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${full ? "#fb923c" : BRAND.cyan}55`, color: full ? "#fdba74" : BRAND.ink }}>
+                {c.name} · <span className="font-semibold">{c.pairs.length}{cupo != null ? `/${cupo}` : ""}</span> pareja{c.pairs.length !== 1 ? "s" : ""}
+              </span>
+            );
+          })}
+          {tournament.categories.length > 1 && (
+            <span className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime + "22", color: BRAND.lime }}>
+              Total · {tournament.categories.reduce((sum, c) => sum + c.pairs.length, 0)}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2 mb-6 overflow-x-auto">
         {tabs.map(([key, label]) => (
           <button
@@ -6863,6 +7155,7 @@ function SmashPointAppInner() {
   const [circuits, setCircuits] = useState([]);
   const [venues, setVenues] = useState([]);
   const [coaches, setCoaches] = useState([]);
+  const [events, setEvents] = useState([]);
   const [route, setRoute] = useState("public-home");
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
@@ -6907,6 +7200,9 @@ function SmashPointAppInner() {
         try { loadedCoaches = await kvGet(STORAGE_KEY_COACHES); } catch { loadedCoaches = null; }
         setVenues(Array.isArray(loadedVenues) ? loadedVenues : []);
         setCoaches(Array.isArray(loadedCoaches) ? loadedCoaches : []);
+        let loadedEvents;
+        try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
+        setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
 
         setOrganizers(orgs);
         setTournaments(tours);
@@ -6937,6 +7233,17 @@ function SmashPointAppInner() {
   const upsertById = (list, item) => (list.some((x) => x.id === item.id) ? list.map((x) => (x.id === item.id ? item : x)) : [...list, item]);
   const saveVenue = (v) => persistVenues(upsertById(venues, v));
   const deleteVenue = (id) => persistVenues(venues.filter((v) => v.id !== id));
+  const persistEvents = useCallback(async (next) => {
+    setEvents(next);
+    try { await kvSet(STORAGE_KEY_EVENTS, next, session?.accessToken); } catch {}
+  }, [session]);
+  const saveEvent = (ev) => persistEvents(upsertById(events, { ...ev, organizerId: ev.organizerId || session?.id }));
+  // Al borrar un evento, sus torneos vuelven a mostrarse sueltos
+  const deleteEvent = (id) => {
+    persistEvents(events.filter((e) => e.id !== id));
+    if (tournaments.some((t) => t.eventId === id)) persistTournaments(tournaments.map((t) => (t.eventId === id ? { ...t, eventId: null } : t)));
+  };
+
   const saveCoach = (c) => persistCoaches(upsertById(coaches, c));
   const deleteCoach = (id) => persistCoaches(coaches.filter((c) => c.id !== id));
 
@@ -7059,6 +7366,7 @@ function SmashPointAppInner() {
     if (Array.isArray(data.ads)) persistAds(data.ads);
     if (Array.isArray(data.venues)) persistVenues(data.venues);
     if (Array.isArray(data.coaches)) persistCoaches(data.coaches);
+    if (Array.isArray(data.events)) persistEvents(data.events);
     if (data.organizerCovers && typeof data.organizerCovers === "object") {
       const covers = data.organizerCovers;
       setOrganizers((orgs) => orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" })));
@@ -7079,7 +7387,7 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   } else if (route === "public-tournament" && selected) {
     showFooterAds = true;
     content = isInfoOnly(selected)
@@ -7102,6 +7410,7 @@ function SmashPointAppInner() {
         onSaveInfoTournament={(t) => persistTournaments(upsertById(tournaments, t))}
         venues={venues}
         coaches={coaches}
+        events={events}
         onSaveVenue={saveVenue}
         onDeleteVenue={deleteVenue}
         onSaveCoach={saveCoach}
@@ -7130,6 +7439,9 @@ function SmashPointAppInner() {
         onDeleteCircuit={deleteCircuit}
         onUpdateProfile={(patch) => updateOrganizerProfile(session.id, patch)}
         inscripciones={inscripciones}
+        events={events.filter((e) => e.organizerId === session.id)}
+        onSaveEvent={saveEvent}
+        onDeleteEvent={deleteEvent}
       />
     );
   } else if (route === "admin-tournament" && selected) {
@@ -7143,7 +7455,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   }
 
   return (
@@ -7153,6 +7465,7 @@ function SmashPointAppInner() {
         // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
           <AdBanner ads={ads} />
+          <ContactFooter />
         </div>
       )}
     </div>
