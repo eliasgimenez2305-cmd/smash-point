@@ -91,14 +91,25 @@ Deno.serve(async (req) => {
       if (!id) return json({ error: "Falta el id." }, 400);
       if (id === callerId) return json({ error: "No podés borrar tu propia cuenta de creador." }, 400);
 
-      await fetch(`${SUPABASE_URL}/rest/v1/organizers?id=eq.${id}`, {
+      const profileRes = await fetch(`${SUPABASE_URL}/rest/v1/organizers?id=eq.${id}`, {
         method: "DELETE",
         headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
       });
-      await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${id}`, {
+      if (!profileRes.ok) {
+        const detail = await profileRes.text();
+        return json({ error: `No se pudo borrar el perfil del organizador: ${detail}` }, 500);
+      }
+
+      const userDelRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${id}`, {
         method: "DELETE",
         headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
       });
+      if (!userDelRes.ok) {
+        const detail = await userDelRes.text();
+        return json({
+          error: `Se borró el perfil pero no el usuario de Auth: ${detail}`,
+        }, 500);
+      }
 
       return json({ success: true });
     }
