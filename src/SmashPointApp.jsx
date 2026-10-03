@@ -8228,10 +8228,38 @@ function SmashPointAppInner() {
     setEvents(next);
     try { await kvSet(STORAGE_KEY_EVENTS, next, session?.accessToken); } catch {}
   }, [session]);
-  const saveEvent = (ev) => persistEvents(upsertById(events, { ...ev, organizerId: ev.organizerId || session?.id }));
+  /* Eventos y circuitos se guardan de a uno, y la base controla que sean de quien guarda (ver
+     supabase/migrations/20261005_guardar_eventos_circuitos_portadas.sql). Si la base todavía no
+     tiene esa migración, se guarda como antes: la lista entera. */
+  const listSaveError = (err) => setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar esto." : "No se pudo guardar. Revisá la conexión y probá de nuevo.");
+  const saveListItem = async (key, item, wholeList) => {
+    try {
+      await supabaseRpc("guardar_en_lista", { p_clave: key, p_item: item }, session?.accessToken);
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await kvSet(key, wholeList, session?.accessToken).catch(() => {});
+      else listSaveError(err);
+    }
+  };
+  const deleteListItem = async (key, id, wholeList) => {
+    try {
+      await supabaseRpc("borrar_de_lista", { p_clave: key, p_id: id }, session?.accessToken);
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await kvSet(key, wholeList, session?.accessToken).catch(() => {});
+      else listSaveError(err);
+    }
+  };
+
+  const saveEvent = (ev) => {
+    const item = { ...ev, organizerId: ev.organizerId || session?.id };
+    const next = upsertById(events, item);
+    setEvents(next);
+    saveListItem(STORAGE_KEY_EVENTS, item, next);
+  };
   // Al borrar un evento, sus torneos vuelven a mostrarse sueltos
   const deleteEvent = (id) => {
-    persistEvents(events.filter((e) => e.id !== id));
+    const next = events.filter((e) => e.id !== id);
+    setEvents(next);
+    deleteListItem(STORAGE_KEY_EVENTS, id, next);
     tournaments.filter((t) => t.eventId === id).forEach((t) => saver.save({ ...t, eventId: null }));
   };
 
@@ -8309,9 +8337,15 @@ function SmashPointAppInner() {
     const { coverUrl, ...profilePatch } = patch;
     if (Object.keys(profilePatch).length > 0) await updateOrganizerProfileRemote(id, session.accessToken, profilePatch);
     if (coverUrl !== undefined) {
-      // Se relee antes de guardar para no pisar la portada que otro organizador haya cambiado
-      const covers = { ...((await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {}), [id]: coverUrl };
-      await kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session.accessToken);
+      // Solo la portada de este organizador (la base controla que sea suya o del creador)
+      try {
+        await supabaseRpc("guardar_portada", { p_organizador: id, p_url: coverUrl }, session.accessToken);
+      } catch (err) {
+        if (err.pgCode !== "PGRST202") throw err;
+        // Base sin la migración: como antes, se relee para no pisar la portada de otro organizador
+        const covers = { ...((await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {}), [id]: coverUrl };
+        await kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session.accessToken);
+      }
     }
     setOrganizers((orgs) => orgs.map((o) => (o.id === id ? { ...o, ...patch } : o)));
     setSession((s) => (s && s.id === id ? { ...s, ...patch } : s));
@@ -8341,15 +8375,22 @@ function SmashPointAppInner() {
   };
 
   const addCircuit = (circuit) => {
-    persistCircuits([...circuits, { id: uid(), organizerId: session.id, ...circuit }]);
+    const item = { id: uid(), organizerId: session.id, ...circuit };
+    const next = [...circuits, item];
+    setCircuits(next);
+    saveListItem(STORAGE_KEY_CIRCUITS, item, next);
   };
 
   const updateCircuit = (updated) => {
-    persistCircuits(circuits.map((c) => (c.id === updated.id ? updated : c)));
+    const next = circuits.map((c) => (c.id === updated.id ? updated : c));
+    setCircuits(next);
+    saveListItem(STORAGE_KEY_CIRCUITS, updated, next);
   };
 
   const deleteCircuit = (id) => {
-    persistCircuits(circuits.filter((c) => c.id !== id));
+    const next = circuits.filter((c) => c.id !== id);
+    setCircuits(next);
+    deleteListItem(STORAGE_KEY_CIRCUITS, id, next);
     tournaments.filter((t) => t.circuitId === id).forEach((t) => saver.save({ ...t, circuitId: null }));
   };
 
