@@ -39,6 +39,39 @@ async function supabaseSignIn(email, password) {
   return data; // { access_token, user: { id, email, ... }, ... }
 }
 
+/* Renueva la sesión con el refresh token (el access token de Supabase vence a la hora) */
+async function supabaseRefresh(refreshToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error_description || data.msg || "La sesión venció.");
+    err.expired = res.status === 400 || res.status === 401; // token inválido o revocado (no es falta de conexión)
+    throw err;
+  }
+  return data; // { access_token, refresh_token, expires_in, user }
+}
+
+/* Lo que queda guardado en este navegador para no perder la sesión al recargar: el refresh token y
+   la pantalla del panel en la que estaba. Cerrar sesión lo borra. */
+const AUTH_STORAGE_KEY = "sp:auth";
+function readStoredAuth() {
+  try { return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null"); } catch { return null; }
+}
+function writeStoredAuth(value) {
+  try {
+    if (value) localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
+    else localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {}
+}
+/* Datos de sesión que salen de una respuesta de Supabase (login o renovación) */
+function authFields(auth) {
+  return { accessToken: auth.access_token, refreshToken: auth.refresh_token, expiresAt: Date.now() + (auth.expires_in || 3600) * 1000 };
+}
+
 async function supabaseRequestPasswordReset(email) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
     method: "POST",
@@ -5166,7 +5199,7 @@ function Login({ onLogin, onBack }) {
       const orgs = await fetchOrganizers();
       const profile = orgs.find((o) => o.id === auth.user.id);
       if (!profile) { setError("Tu cuenta no tiene un perfil de organizador asociado."); setLoading(false); return; }
-      onLogin({ ...profile, accessToken: auth.access_token });
+      onLogin({ ...profile, ...authFields(auth) });
     } catch (e) {
       setError(e.message || "Usuario o contraseña incorrectos.");
     }
@@ -8081,6 +8114,28 @@ function SmashPointAppInner() {
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
 
+        // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
+        const stored = readStoredAuth();
+        if (stored?.refreshToken) {
+          try {
+            const auth = await supabaseRefresh(stored.refreshToken);
+            const profile = orgs.find((o) => o.id === auth.user?.id);
+            if (profile) {
+              const restored = { ...profile, ...authFields(auth) };
+              writeStoredAuth({ ...stored, refreshToken: restored.refreshToken });
+              setSession(restored);
+              const home = profile.role === "creador" ? "creator-home" : "admin-home";
+              const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
+              setRoute(canResume ? "admin-tournament" : home);
+              if (canResume) setSelectedId(stored.selectedId);
+            } else {
+              writeStoredAuth(null);
+            }
+          } catch (err) {
+            if (err.expired) writeStoredAuth(null); // sin conexión se conserva, para reintentar la próxima vez
+          }
+        }
+
         setOrganizers(orgs);
         saver.remember(tours);
         setTournaments(tours);
@@ -8091,6 +8146,64 @@ function SmashPointAppInner() {
       }
     })();
   }, []);
+
+  /* Renueva la sesión unos minutos antes de que venza (vence a la hora), y también al volver a la
+     pestaña si mientras tanto quedó por vencer (en el celular los temporizadores se frenan). Sin
+     conexión se reintenta al minuto; si la sesión ya no sirve, se cierra. */
+  const refreshingRef = useRef(false);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const renewSession = useCallback(async () => {
+    // Si el navegador no deja guardar (modo incógnito), se usa el refresh token de la memoria
+    const current = readStoredAuth() || (sessionRef.current?.refreshToken ? { refreshToken: sessionRef.current.refreshToken } : null);
+    if (!current?.refreshToken || refreshingRef.current) return;
+    refreshingRef.current = true;
+    try {
+      const auth = await supabaseRefresh(current.refreshToken);
+      const fields = authFields(auth);
+      writeStoredAuth({ ...current, refreshToken: fields.refreshToken });
+      setSession((s) => (s ? { ...s, ...fields } : s));
+    } catch (err) {
+      if (err.expired) {
+        writeStoredAuth(null);
+        setSession(null);
+        setRoute("login");
+        setSaveNotice("Tu sesión venció. Volvé a entrar para seguir cargando.");
+      } else {
+        setSession((s) => (s ? { ...s, expiresAt: Date.now() + 6 * 60 * 1000 } : s)); // reintenta en 1 minuto
+      }
+    } finally {
+      refreshingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session?.expiresAt) return;
+    const wait = Math.max(5000, session.expiresAt - Date.now() - 5 * 60 * 1000);
+    const timer = setTimeout(renewSession, wait);
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && session.expiresAt - Date.now() < 5 * 60 * 1000) renewSession();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session?.expiresAt, renewSession]);
+
+  // Recuerda en qué pantalla del panel estaba, para volver ahí al recargar
+  useEffect(() => {
+    const current = readStoredAuth();
+    if (session && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
+  }, [session, route, selectedId]);
+
+  const startSession = (org) => {
+    writeStoredAuth({ refreshToken: org.refreshToken, route: null, selectedId: null });
+    setSession(org);
+    setRoute(org.role === "creador" ? "creator-home" : "admin-home");
+  };
+  const endSession = () => {
+    writeStoredAuth(null);
+    setSession(null);
+    setRoute("public-home");
+  };
 
   const persistAds = useCallback(async (next) => {
     setAds(next);
@@ -8276,7 +8389,7 @@ function SmashPointAppInner() {
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
       : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
-    content = <Login onBack={() => setRoute("public-home")} onLogin={(org) => { setSession(org); setRoute(org.role === "creador" ? "creator-home" : "admin-home"); }} />;
+    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
@@ -8302,7 +8415,7 @@ function SmashPointAppInner() {
         onUpdateAd={updateAd}
         onDeleteAd={deleteAd}
         onRestoreBackup={restoreBackup}
-        onLogout={() => { setSession(null); setRoute("public-home"); }}
+        onLogout={endSession}
       />
     );
   } else if (route === "admin-home" && session) {
@@ -8313,7 +8426,7 @@ function SmashPointAppInner() {
         circuits={myCircuits}
         onCreate={createTournament}
         onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
-        onLogout={() => { setSession(null); setRoute("public-home"); }}
+        onLogout={endSession}
         onUpdate={updateTournament}
         onDelete={deleteTournament}
         onAddCircuit={addCircuit}
