@@ -3921,7 +3921,7 @@ function ChevronCircle({ color }) {
   );
 }
 
-const PUBLIC_TABS = [["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"]];
+const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
 /* Contacto al pie de las pantallas públicas */
@@ -3939,8 +3939,8 @@ function ContactFooter() {
   );
 }
 
-/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Canchas · Profes junto al
-   acceso de organizadores (en el celular, solo el ícono, para que entre todo en una fila) */
+/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Complejos · Entrenamientos
+   junto al acceso de organizadores (solo el ícono, para que entre todo en una fila) */
 function SiteHeader({ tab, onTab, onGoLogin }) {
   return (
     <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
@@ -3952,14 +3952,15 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
         </div>
       </div>
       <nav className="mt-4 flex items-center gap-2 max-w-xl mx-auto" aria-label="Secciones">
-        <div className="flex-1 grid grid-cols-3 gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        {/* La tercera pestaña es más ancha: "ENTRENAMIENTOS" tiene que entrar entero en el celular */}
+        <div className="flex-1 min-w-0 grid grid-cols-[0.85fr_1fr_1.4fr] gap-0.5 sm:gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
           {PUBLIC_TABS.map(([key, label]) => (
             <button
               key={key}
               type="button"
               onClick={() => onTab(key)}
               aria-current={tab === key ? "page" : undefined}
-              className="py-2 rounded-full text-sm font-semibold transition"
+              className="py-2 px-1 rounded-full text-[10px] sm:text-sm font-semibold sm:tracking-wide transition truncate"
               style={tab === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f", boxShadow: `0 0 12px ${BRAND.lime}66` } : { ...F.body, color: "#cbd5e1" }}
             >
               {label}
@@ -3971,10 +3972,10 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
           onClick={onGoLogin}
           aria-label="Organizadores"
           title="Acceso de organizadores"
-          className="flex items-center justify-center gap-2 w-11 h-11 sm:w-auto sm:h-auto sm:px-4 sm:py-2.5 rounded-full text-sm font-semibold shrink-0 transition hover:brightness-125"
+          className="flex items-center justify-center w-11 h-11 rounded-full shrink-0 transition hover:brightness-125"
           style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
         >
-          <PeopleIcon /> <span className="hidden sm:inline">Organizadores</span>
+          <PeopleIcon />
         </button>
       </nav>
     </header>
@@ -4039,29 +4040,30 @@ function OrganizerCard({ organizer, count, color, onSelect }) {
     <button
       type="button"
       onClick={onSelect}
-      className="relative text-left rounded-2xl overflow-hidden min-h-[15rem] sm:min-h-[17rem] flex flex-col justify-end transition hover:brightness-110"
+      // Altura fija: todas iguales aunque el nombre o el logo ocupen distinto
+      className="relative text-left rounded-xl overflow-hidden h-44 sm:h-52 flex flex-col transition hover:brightness-110"
       style={neonStyle(color)}
     >
       {organizer.coverUrl
         ? <img src={organizer.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
         : <div className="absolute inset-0" style={{ background: COURT_FALLBACK_BACKGROUND }} />}
       <div className="absolute inset-0" style={{ background: "linear-gradient(0deg, rgba(8,18,24,0.95) 0%, rgba(8,18,24,0.55) 45%, rgba(8,18,24,0.2) 100%)" }} />
-      <div className="relative flex justify-center pt-5">
+      <div className="relative flex justify-center pt-3 sm:pt-4 shrink-0">
         {organizer.logoUrl ? (
-          <img src={organizer.logoUrl} alt="" className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover" style={{ ...neonStyle(color, true), backgroundColor: "#081218" }} />
+          <img src={organizer.logoUrl} alt="" className="w-14 h-14 sm:w-20 sm:h-20 rounded-full object-cover" style={{ ...neonStyle(color, true), backgroundColor: "#081218" }} />
         ) : (
-          <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center text-4xl" style={{ ...neonStyle(color, true), ...F.display, backgroundColor: "#081218", color }}>
+          <div className="w-14 h-14 sm:w-20 sm:h-20 rounded-full flex items-center justify-center text-2xl sm:text-3xl" style={{ ...neonStyle(color, true), ...F.display, backgroundColor: "#081218", color }}>
             {organizer.name.trim().charAt(0).toUpperCase()}
           </div>
         )}
       </div>
-      <div className="relative p-3 sm:p-4 mt-auto">
-        <p className="text-base sm:text-xl leading-tight uppercase mb-2 break-words" style={{ ...F.display, color: BRAND.ink }}>{organizer.name}</p>
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-sm whitespace-nowrap min-w-0" style={{ ...F.body, border: `1px solid ${color}66`, backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}>
-            <TrophyIcon size={14} color={color} /> {count} torneo{count !== 1 ? "s" : ""}
+      <div className="relative px-2 pb-2 sm:px-3 sm:pb-3 mt-auto">
+        <p className="text-[11px] sm:text-sm leading-tight uppercase mb-1.5 line-clamp-2 break-words" style={{ ...F.display, color: BRAND.ink }}>{organizer.name}</p>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex items-center gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-xs whitespace-nowrap min-w-0" style={{ ...F.body, border: `1px solid ${color}66`, backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}>
+            <TrophyIcon size={11} color={color} /> {count}
           </span>
-          <ChevronCircle color={color} />
+          <span className="hidden sm:inline-flex"><ChevronCircle color={color} /></span>
         </div>
       </div>
     </button>
@@ -4416,7 +4418,7 @@ function CoachesPublicView({ coaches }) {
   const sorted = [...coaches].sort((a, b) => a.name.localeCompare(b.name, "es"));
   return (
     <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Profesores</h1>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Entrenamientos</h1>
       <p className="text-sm text-teal-300 mb-5" style={F.body}>Clases de pádel: días, horarios y contacto.</p>
       {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá a los profes de la ciudad.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -4555,7 +4557,7 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
   );
 }
 
-/* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Canchas · Profes.
+/* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
 function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin }) {
@@ -4666,7 +4668,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
           {visible.length === 0 ? (
             <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
           ) : (
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
+            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-3">
               {visible.map((o, i) => (
                 <OrganizerCard
                   key={o.id}
@@ -6626,7 +6628,8 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
 
-  const [justAccepted, setJustAccepted] = useState([]); // aceptadas recién, para ofrecer el aviso por WhatsApp
+  // Aceptadas o rechazadas recién ({ ...inscripcion, estado }), para ofrecer el aviso por WhatsApp
+  const [justResolved, setJustResolved] = useState([]);
 
   const resolve = async (i, accept) => {
     setBusyId(i.id);
@@ -6634,7 +6637,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
     try {
       await onResolve(i, accept);
       setConfirmRejectId(null);
-      if (accept) setJustAccepted((list) => [i, ...list]);
+      setJustResolved((list) => [{ ...i, estado: accept ? "aceptada" : "rechazada" }, ...list]);
     } catch (err) {
       setErrors((e) => ({ ...e, [i.id]: inscripcionErrorText(err) }));
     } finally {
@@ -6643,10 +6646,13 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   };
 
   /* Aviso opcional al jugador: abre el WhatsApp del organizador con el número y el mensaje ya
-     escritos; él decide si lo envía. Nunca frena la aprobación. */
+     escritos; él decide si lo envía. Nunca frena la aprobación ni el rechazo. */
   const whatsappLink = (i) => {
     const category = categoriesById[i.categoria_id]?.name;
-    const text = `¡Hola! Te confirmamos la inscripción de ${names(i)}${category ? ` en ${category}` : ""} para el torneo "${tournament.name}" (${formatDateShort(tournament.date)}). ¡Nos vemos en la cancha!`;
+    const what = `la inscripción de ${names(i)}${category ? ` en ${category}` : ""} para el torneo "${tournament.name}" (${tournamentWhenLabel(tournament)})`;
+    const text = i.estado === "rechazada"
+      ? `¡Hola! Te escribimos por ${what}. Lamentablemente no la pudimos confirmar. Cualquier consulta, escribinos por acá.`
+      : `¡Hola! Te confirmamos ${what}. ¡Nos vemos en la cancha!`;
     return `https://wa.me/${i.telefono}?text=${encodeURIComponent(text)}`;
   };
   const whatsappButton = (i, label = "Avisar por WhatsApp") => (
@@ -6657,14 +6663,18 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
 
   return (
     <div style={F.body}>
-      {justAccepted.length > 0 && (
+      {justResolved.length > 0 && (
         <div className="mb-5 space-y-2">
-          {justAccepted.map((i) => (
-            <div key={i.id} className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap" style={{ ...neonStyle(BRAND.lime), backgroundColor: "rgba(8,18,24,0.6)" }}>
-              <span className="text-sm"><span className="text-lime-400 font-semibold">✓ Aceptada:</span> {names(i)}</span>
+          {justResolved.map((i) => (
+            <div key={i.id} className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap" style={{ ...neonStyle(i.estado === "rechazada" ? "#f87171" : BRAND.lime), backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <span className="text-sm">
+                {i.estado === "rechazada"
+                  ? <span className="text-red-400 font-semibold">✕ Rechazada:</span>
+                  : <span className="text-lime-400 font-semibold">✓ Aceptada:</span>} {names(i)}
+              </span>
               <span className="flex items-center gap-2">
                 {whatsappButton(i)}
-                <button type="button" onClick={() => setJustAccepted((list) => list.filter((x) => x.id !== i.id))} className="text-xs text-teal-400" aria-label="Cerrar aviso">✕</button>
+                <button type="button" onClick={() => setJustResolved((list) => list.filter((x) => x.id !== i.id))} className="text-xs text-teal-400" aria-label="Cerrar aviso">✕</button>
               </span>
             </div>
           ))}
@@ -6745,7 +6755,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
                 <li key={i.id} className="flex justify-between items-center gap-2 border-b border-teal-900 py-1.5">
                   <span className="min-w-0 truncate">{names(i)} <span className="text-teal-500">· {categoriesById[i.categoria_id]?.name || "—"}</span></span>
                   <span className="shrink-0 flex items-center gap-2">
-                    {i.estado === "aceptada" && whatsappButton(i, "WhatsApp")}
+                    {whatsappButton(i, "WhatsApp")}
                     <span className={`text-xs font-semibold ${i.estado === "aceptada" ? "text-lime-400" : "text-red-400"}`}>{i.estado === "aceptada" ? "Aceptada" : "Rechazada"}</span>
                   </span>
                 </li>
