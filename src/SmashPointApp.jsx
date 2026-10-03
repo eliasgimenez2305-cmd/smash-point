@@ -748,8 +748,9 @@ function seedKnockoutRound1(entries, compareSamePlace) {
 function buildKnockoutSeeding(groups, pairsById, format) {
   const entries = groups.flatMap((g, gi) => {
     const table = computeStandings(g, pairsById, format);
-    // La pareja que dio W.O. queda eliminada: no clasifica aunque el grupo pase a 3 de 4
-    return table.filter((row) => !row.wo).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
+    // La pareja eliminada por el organizador no clasifica aunque el grupo pase a 3 de 4 (un W.O.
+    // solo pierde ese partido: si le dan los números, clasifica)
+    return table.filter((row) => !row.eliminated).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
   });
   const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC];
   const compareMerit = (a, b) => {
@@ -2031,14 +2032,14 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
   return (
     <div className="rounded-lg border overflow-hidden" style={{ borderColor: accentColor + "40" }}>
       {table.map((row, i) => {
-        // La pareja que dio W.O. queda eliminada: nunca se marca como clasificada
-        const qualifies = i < highlightCount && !row.wo;
+        // La pareja eliminada por el organizador nunca se marca como clasificada
+        const qualifies = i < highlightCount && !row.eliminated;
         const ds = row.setsF - row.setsC;
         const dg = row.gamesF - row.gamesC;
         return (
           <div
             key={row.pairId}
-            className={`px-3 py-2 ${row.wo ? "opacity-60" : ""}`}
+            className={`px-3 py-2 ${row.eliminated ? "opacity-60" : ""}`}
             style={{
               backgroundColor: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.03)",
               borderLeft: qualifies ? `3px solid ${accentColor}` : "3px solid transparent",
@@ -2053,11 +2054,11 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
                 >
                   {i + 1}
                 </span>
-                <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.wo ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
+                <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.eliminated ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
                   <PairName id={row.pairId} pairsById={pairsById} />
                 </span>
-                {row.wo && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>W.O. · ELIMINADA</span>}
-                {row.byDraw && !row.wo && <span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
+                {row.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>ELIMINADA</span>}
+                {row.byDraw && !row.eliminated &&<span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
               </div>
               <span className="text-sm font-semibold shrink-0" style={{ color: accentColor }}>{row.pts} pts</span>
             </div>
@@ -6278,6 +6279,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
   const [editingPairId, setEditingPairId] = useState(null);
+  const [confirmEliminateId, setConfirmEliminateId] = useState(null);
   const [editPairName, setEditPairName] = useState("");
   const [groupName, setGroupName] = useState("");
   const [groupSelection, setGroupSelection] = useState([]);
@@ -6311,6 +6313,14 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       pairs: category.pairs.filter((p) => p.id !== id),
       groups: category.groups.map((g) => ({ ...g, pairIds: g.pairIds.filter((pid) => pid !== id) })),
     });
+  };
+
+  /* Eliminar del torneo a una pareja que abandona (distinto del W.O., que solo pierde ese partido):
+     queda al fondo de su grupo y no clasifica, pero sus partidos jugados siguen valiendo. Se puede
+     deshacer con "Reincorporar". */
+  const setPairEliminated = (id, eliminated) => {
+    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, eliminated } : p)) });
+    setConfirmEliminateId(null);
   };
 
   // La edición de nombre/jugadores de una pareja solo se permite mientras no haya jugado su primer partido
@@ -6490,9 +6500,26 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
                       />
                     ) : (
-                      <span style={F.body}>{p.name}</span>
+                      <span className="flex items-center gap-2 min-w-0" style={F.body}>
+                        <span className={p.eliminated ? "line-through decoration-red-400/60 opacity-60" : ""}>{p.name}</span>
+                        {p.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171" }}>ELIMINADA</span>}
+                      </span>
                     )}
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                      {/* Eliminar del torneo: solo con la pareja ya en un grupo (antes alcanza con "Quitar") */}
+                      {!super8 && !isEditing && assignedPairIds.has(p.id) && (
+                        p.eliminated ? (
+                          <button type="button" onClick={() => setPairEliminated(p.id, false)} className="text-sm text-lime-400">Reincorporar</button>
+                        ) : confirmEliminateId === p.id ? (
+                          <span className="flex items-center gap-2 text-sm" style={F.body}>
+                            <span className="text-teal-300">¿Eliminar del torneo?</span>
+                            <button type="button" onClick={() => setPairEliminated(p.id, true)} className="text-red-400 font-semibold">Sí, eliminar</button>
+                            <button type="button" onClick={() => setConfirmEliminateId(null)} className="text-teal-400">Cancelar</button>
+                          </span>
+                        ) : (
+                          <button type="button" onClick={() => setConfirmEliminateId(p.id)} className="text-sm text-red-400" title="La pareja abandona: queda al fondo de su grupo y no clasifica">Eliminar del torneo</button>
+                        )
+                      )}
                       {isEditing ? (
                         <>
                           <button type="button" onClick={() => saveEditPair(p.id)} className="text-sm text-lime-400">Guardar</button>

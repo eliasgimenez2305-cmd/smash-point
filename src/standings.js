@@ -86,7 +86,7 @@ function tallySetsAndGames(match, rowA, rowB, format) {
   });
 }
 
-const emptyRow = (pairId) => ({ pairId, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0, wo: false, byDraw: false });
+const emptyRow = (pairId) => ({ pairId, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0, wo: 0, eliminated: false, byDraw: false });
 
 /* Ordena un grupo de parejas empatadas en puntos según el reglamento de la FIP:
    - Dos empatadas: manda el enfrentamiento directo.
@@ -138,13 +138,15 @@ function sortByDiffThenDraw(rows, statsOf, draw) {
    - Grupo de 4 con sorteo y cruces (format "bracket4"): lo definen los cruces de ganadores y de
      perdedores; mientras no se jueguen, orden provisorio por puntos, sets y games.
    - El resto: puntos y, entre empatadas, el desempate de la FIP (ver orderTied).
-   - W.O.: el partido cuenta como ganado sin jugar por la pareja que se presentó (ver
-     walkoverSets). La que dio W.O. queda eliminada (wo: true) y va siempre al fondo, sea cual sea
-     su puntaje; si hay más de una, entre ellas se ordenan por sets y después por games. Sus
-     partidos anteriores siguen valiendo para sus rivales. */
+   - W.O.: afecta solo ese partido. Cuenta como ganado sin jugar por la pareja que se presentó
+     (ver walkoverSets) y 0 puntos para la que no vino, que sigue en el torneo y puede clasificar
+     si le dan los números. wo cuenta cuántos W.O. dio (solo informativo).
+   - Pareja eliminada (pairsById[id].eliminated: la sacó el organizador porque abandonó): va
+     siempre al fondo, sea cual sea su puntaje; si hay más de una, entre ellas se ordenan por sets
+     y después por games. Sus partidos jugados siguen valiendo para sus rivales. */
 export function computeStandings(group, pairsById, format) {
   const f = format || DEFAULT_MATCH_FORMAT;
-  const table = Object.fromEntries(group.pairIds.map((pid) => [pid, emptyRow(pid)]));
+  const table = Object.fromEntries(group.pairIds.map((pid) => [pid, { ...emptyRow(pid), eliminated: !!pairsById?.[pid]?.eliminated }]));
   const counted = group.matches.filter((m) => matchIsPlayed(m) && table[m.pairA] && table[m.pairB]);
 
   counted.forEach((m) => {
@@ -156,12 +158,12 @@ export function computeStandings(group, pairsById, format) {
       const [winner, loser] = w === m.pairA ? [a, b] : [b, a];
       winner.pg++; winner.pts += 2; loser.pp++;
     }
-    if (m.walkover && table[m.walkover]) table[m.walkover].wo = true;
+    if (m.walkover && table[m.walkover]) table[m.walkover].wo++;
   });
 
   const rows = Object.values(table);
-  const present = rows.filter((r) => !r.wo);
-  const gaveWalkover = sortByDiffThenDraw(rows.filter((r) => r.wo), (r) => r, (r) => drawNumber(group.id, r.pairId));
+  const present = rows.filter((r) => !r.eliminated);
+  const eliminated = sortByDiffThenDraw(rows.filter((r) => r.eliminated), (r) => r, (r) => drawNumber(group.id, r.pairId));
 
   let ordered;
   if (group.format === "bracket4" && group.matches.length === 4) {
@@ -182,5 +184,5 @@ export function computeStandings(group, pairsById, format) {
     present.forEach((r) => byPoints.set(r.pts, [...(byPoints.get(r.pts) || []), r]));
     ordered = [...byPoints.keys()].sort((a, b) => b - a).flatMap((pts) => orderTied(byPoints.get(pts), counted, group.id, f));
   }
-  return [...ordered, ...gaveWalkover];
+  return [...ordered, ...eliminated];
 }
