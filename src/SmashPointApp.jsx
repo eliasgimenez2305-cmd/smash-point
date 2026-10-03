@@ -5698,7 +5698,7 @@ function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
   );
 }
 
-/* Pestaña "Canchas" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
+/* Pestaña "Complejos" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
 function VenueManager({ venues, onSave, onDelete, accessToken }) {
   const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
   const [form, setForm] = useState(empty);
@@ -5753,7 +5753,7 @@ function VenueManager({ venues, onSave, onDelete, accessToken }) {
   );
 }
 
-/* Pestaña "Profes" del creador: mismo patrón que Canchas, con horario semanal */
+/* Pestaña "Entrenamientos" del creador (profes): mismo patrón que Complejos, con horario semanal */
 function CoachManager({ coaches, onSave, onDelete, accessToken }) {
   const empty = { name: "", brandName: "", photoUrl: "", instagram: "", whatsapp: "", availability: [] };
   const [form, setForm] = useState(empty);
@@ -6018,7 +6018,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
       </div>
 
       <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
+        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
