@@ -404,6 +404,50 @@ function formatDateShort(dateStr) {
   return `${WEEKDAY_LABEL[d.getDay()]} ${d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`;
 }
 
+const WEEKDAY_LONG = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+/* "Viernes 30/10", para los títulos de cada día en la página de un evento */
+function formatDateLong(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return `${WEEKDAY_LONG[d.getDay()]} ${d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`;
+}
+
+/* "14:00" -> "14 hs", "17:30" -> "17:30 hs" (como en los flyers) */
+function formatHour(time) {
+  if (!time) return "";
+  return `${time.endsWith(":00") ? String(Number(time.slice(0, 2))) : time} hs`;
+}
+
+/* Hora de inicio de un torneo: la que cargó el organizador (torneos de un evento) o, en un
+   Americano, la de arranque de su único día. null si no tiene. */
+function tournamentStartTime(t) {
+  if (t.startTime) return t.startTime;
+  if (tournamentType(t) === "americano") return t.playDates?.[0]?.from || null;
+  return null;
+}
+
+/* "Vie 30/10 · 14 hs" (o solo la fecha si no tiene hora) */
+function tournamentWhenLabel(t) {
+  const time = tournamentStartTime(t);
+  return `${formatDateShort(t.date)}${time ? ` · ${formatHour(time)}` : ""}`;
+}
+
+/* Orden de los torneos de un evento: por día y después por hora de inicio */
+function compareByStart(a, b) {
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  return (tournamentStartTime(a) || "") < (tournamentStartTime(b) || "") ? -1 : (tournamentStartTime(a) || "") > (tournamentStartTime(b) || "") ? 1 : 0;
+}
+
+/* Cambia día, hora de inicio y canchas de un torneo. En el Americano y el Clásico, el día y la
+   hora son también los de la grilla de horarios (su primer día de juego). */
+function withTournamentStart(t, { date, startTime, courtsCount }) {
+  const next = { ...t, date, startTime: startTime || null, courtsCount };
+  if (tournamentType(t) !== "super8" && startTime) {
+    const [first, ...rest] = t.playDates || [];
+    next.playDates = [{ date, from: startTime, to: first?.to || "23:59" }, ...rest.filter((d) => d.date !== date)];
+  }
+  return next;
+}
+
 function seedTournaments(organizerId) {
   const playDates = [
     { date: "2026-10-01", from: "18:00", to: "23:00" },
@@ -1792,7 +1836,8 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
         <h2 className="text-xl mb-1" style={F.display}>{tournament.name.toUpperCase()}</h2>
         <div className="flex items-center gap-2 flex-wrap mb-5">
           <TournamentTypeTag tournament={tournament} />
-          <span className="text-xs text-teal-300">{new Date(tournament.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long" })}</span>
+          {/* Día y hora en que se juega, para que el jugador sepa cuándo le toca antes de anotarse */}
+          <span className="text-sm font-semibold text-lime-400">{formatDateLong(tournament.date)}{tournamentStartTime(tournament) ? ` · ${formatHour(tournamentStartTime(tournament))}` : ""}</span>
         </div>
 
         {done ? (
@@ -4319,6 +4364,115 @@ function CoachesPublicView({ coaches }) {
   );
 }
 
+/* Lugares libres de un torneo sumando sus categorías: null = sin límite */
+function tournamentSpotsLeft(t) {
+  const lefts = (t.categories || []).filter(categoryAcceptsRegistrations).map(categorySpotsLeft);
+  if (lefts.length === 0) return 0;
+  return lefts.some((l) => l == null) ? null : lefts.reduce((a, b) => a + b, 0);
+}
+
+/* "quedan 3", "completo" o nada (sin cupo), para mostrar al lado de cada torneo de un evento */
+function spotsLabel(t) {
+  if (registrationStatus(t) !== "abierto" && registrationStatus(t) !== "completo") return null;
+  const left = tournamentSpotsLeft(t);
+  return left == null ? null : left === 0 ? "completo" : `quedan ${left}`;
+}
+
+/* Los torneos de un evento agrupados por día, como en el flyer:
+   VIERNES 30/10 → 14 hs · 7MA DAMAS · quedan 3. Tocar un renglón abre el torneo. */
+function EventDaysList({ tournaments, onOpen, onRegister }) {
+  const days = [...new Set(tournaments.map((t) => t.date))];
+  return (
+    <div className="space-y-6">
+      {days.map((day, di) => {
+        const color = di % 2 === 0 ? BRAND.lime : BRAND.cyan;
+        return (
+          <section key={day}>
+            <h2 className="text-base sm:text-lg uppercase mb-2 flex items-center gap-3" style={{ ...F.display, color }}>
+              {formatDateLong(day)}
+              <span className="flex-1 h-px" style={{ backgroundColor: color + "55" }} />
+            </h2>
+            <div className="space-y-2">
+              {tournaments.filter((t) => t.date === day).map((t) => {
+                const time = tournamentStartTime(t);
+                const spots = spotsLabel(t);
+                const status = tournamentStatusOf(t);
+                return (
+                  <div
+                    key={t.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onOpen(t.id)}
+                    onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(t.id); } }}
+                    className="rounded-xl px-3 sm:px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer transition hover:brightness-125"
+                    style={{ border: `1px solid ${color}40`, backgroundColor: "rgba(8,18,24,0.6)", ...F.body }}
+                  >
+                    <span className="text-lg sm:text-xl font-bold w-24 shrink-0 whitespace-nowrap" style={{ color }}>{time ? formatHour(time) : "—"}</span>
+                    <span className="flex-1 min-w-[9rem]">
+                      <span className="block text-base font-semibold uppercase leading-tight" style={{ color: BRAND.ink }}>{t.name}</span>
+                      <span className="flex items-center gap-2 flex-wrap mt-1">
+                        <TournamentTypeTag tournament={t} short />
+                        {status === STATUS.EN_CURSO && <span className="text-[10px] font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+                        {spots && <span className={`text-xs ${spots === "completo" ? "text-amber-400" : "text-teal-300"}`}>{spots}</span>}
+                      </span>
+                    </span>
+                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <RegisterButton tournament={t} onRegister={onRegister} className="!px-3 !py-1.5 text-xs" />
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+/* "Inscribirme" de un evento: primero el día, después el horario y la categoría; al elegir se abre
+   el formulario de inscripción de ese torneo */
+function EventRegistrationPicker({ tournaments, onPick, onClose }) {
+  const open = tournaments.filter((t) => registrationStatus(t) === "abierto");
+  const days = [...new Set(open.map((t) => t.date))];
+  const [day, setDay] = useState(days.length === 1 ? days[0] : null);
+  return (
+    <Modal title="Inscribirme" onClose={onClose}>
+      <div style={F.body}>
+        <p className="text-xs text-teal-400 mb-2">1. ¿Qué día querés jugar?</p>
+        <div className="flex flex-wrap gap-2 mb-5">
+          {days.map((d) => (
+            <button key={d} type="button" onClick={() => setDay(d)} className="px-4 py-2 rounded-full text-sm font-semibold border" style={day === d ? { backgroundColor: BRAND.lime, color: "#14181f", borderColor: BRAND.lime } : { borderColor: "#1e3a45", color: "#cbd5e1" }}>
+              {formatDateLong(d)}
+            </button>
+          ))}
+        </div>
+        {day && (
+          <>
+            <p className="text-xs text-teal-400 mb-2">2. Elegí horario y categoría</p>
+            <div className="space-y-2">
+              {open.filter((t) => t.date === day).map((t) => {
+                const time = tournamentStartTime(t);
+                const spots = spotsLabel(t);
+                return (
+                  <button key={t.id} type="button" onClick={() => onPick(t)} className="w-full text-left rounded-lg px-3 py-2.5 flex items-center gap-3 border border-teal-800 hover:border-lime-400">
+                    <span className="font-bold w-20 shrink-0 whitespace-nowrap text-lime-400">{time ? formatHour(time) : "—"}</span>
+                    <span className="flex-1 min-w-0">
+                      <span className="block font-semibold uppercase truncate">{t.name}</span>
+                      <span className="block text-[11px] text-teal-400">{tournamentTypeName(t)}{spots ? ` · ${spots}` : ""}</span>
+                    </span>
+                    <span className="text-teal-400">›</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Canchas · Profes.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
@@ -4337,7 +4491,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const goTab = (key) => { setTab(key); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
   const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
   const selectedEvent = events.find((e) => e.id === selectedEventId);
-  const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
+  const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
+  const [pickingEventRegistration, setPickingEventRegistration] = useState(false);
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
   const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
@@ -4362,10 +4517,18 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
           <p className="text-[10px] font-bold mt-4" style={{ ...F.body, color: BRAND.cyan }}>EVENTO · {eventTournaments.length} TORNEOS</p>
           <h1 className="text-xl mt-1" style={F.display}>{selectedEvent.name.toUpperCase()}</h1>
           {organizer && <p className="text-sm text-teal-300 mt-1" style={F.body}>Organiza: {organizer.name}</p>}
+          {eventTournaments.some((t) => registrationStatus(t) === "abierto") && (
+            <button type="button" onClick={() => setPickingEventRegistration(true)} className="mt-4 w-full sm:w-auto px-6 py-3 rounded-full font-semibold" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+              Inscribirme
+            </button>
+          )}
         </header>
-        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8 grid gap-5 grid-cols-2 lg:grid-cols-3">
-          {eventTournaments.map((t) => <PublicTournamentCard key={t.id} t={t} big onOpen={onOpen} onRegister={onRegister} />)}
+        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+          <EventDaysList tournaments={eventTournaments} onOpen={onOpen} onRegister={onRegister} />
         </main>
+        {pickingEventRegistration && (
+          <EventRegistrationPicker tournaments={eventTournaments} onPick={(t) => { setPickingEventRegistration(false); onRegister(t); }} onClose={() => setPickingEventRegistration(false)} />
+        )}
       </>
     );
   } else if (showAll) {
@@ -4438,7 +4601,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     );
   }
 
-  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId;
+  // En la página de un evento la publicidad va entre la lista de torneos y el contacto
+  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
       <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
@@ -6016,74 +6180,241 @@ function CircuitManager({ circuits, tournaments, onAdd, onUpdate, onDelete }) {
 /* Pestaña "Eventos" del organizador: un evento agrupa varios torneos (por ejemplo, cuatro Súper 8
    seguidos de distintas categorías) para mostrarlos juntos en la parte pública. Es solo un
    contenedor: no sabe nada del formato de cada torneo y no suma puntos entre ellos. */
-function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournament, accessToken }) {
+/* Formulario para agregar un torneo (una categoría con su día y hora) adentro de un evento. El
+   formato viene del evento, pero se puede cambiar para este torneo. */
+function EventTournamentForm({ event, onCreate, onCancel }) {
+  const defaults = event.config || { type: null, super8Mode: null, games: null };
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+  const [category, setCategory] = useState("");
+  const [courtsText, setCourtsText] = useState("1");
+  const [cupoText, setCupoText] = useState("");
+  const [registrationOpen, setRegistrationOpen] = useState(true);
+  const [config, setConfig] = useState(defaults);
+  const [changingFormat, setChangingFormat] = useState(!tournamentConfigIsComplete(defaults));
+  const courts = Number(courtsText);
+  const super8 = config.type === "super8";
+  const ready = date && time && category.trim() && Number.isInteger(courts) && courts >= 1 && tournamentConfigIsComplete(config);
+
+  const create = () => {
+    if (!ready) return;
+    // Americano y Clásico: el día y la hora de inicio arman la grilla de horarios
+    const schedule = super8
+      ? { courtsCount: courts }
+      : { courtsCount: courts, matchDurationMinutes: config.type === "americano" ? 40 : 90, playDates: [{ date, from: time, to: "23:59" }] };
+    onCreate({
+      name: category.trim(), date, circuitId: null, config, schedule,
+      categories: [{ name: category.trim(), cupo: super8 ? null : parseCupo(cupoText) }],
+      inscripcionesAbiertas: registrationOpen,
+      extra: { eventId: event.id, startTime: time },
+    });
+  };
+
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const field = "px-3 py-2 rounded border outline-none focus:border-lime-400 text-sm";
+  const label = "block text-[11px] text-teal-400 mb-1";
+  return (
+    <div className="rounded-lg p-3 mt-3 space-y-3" style={{ border: `1px dashed ${BRAND.lime}66`, backgroundColor: "rgba(159,224,34,0.04)" }}>
+      <p className="text-sm font-semibold text-lime-400">Nuevo torneo del evento</p>
+      <div className="flex flex-wrap gap-3">
+        <div><label className={label}>Día</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={field} style={input} /></div>
+        <div><label className={label}>Hora de inicio</label><input type="time" lang="es-AR" value={time} onChange={(e) => setTime(e.target.value)} className={field} style={input} /></div>
+        <div className="flex-1 min-w-[10rem]"><label className={label}>Categoría</label><input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Ej: 7ma Damas" className={`w-full ${field}`} style={input} /></div>
+        <div><label className={label}>Canchas</label><input type="number" min="1" inputMode="numeric" value={courtsText} onChange={(e) => setCourtsText(e.target.value)} className={`w-20 ${field}`} style={input} /></div>
+        {!super8 && (
+          <div><label className={label}>Cupo (vacío = sin límite)</label><input type="number" min="1" inputMode="numeric" value={cupoText} onChange={(e) => setCupoText(e.target.value)} className={`w-24 ${field}`} style={input} /></div>
+        )}
+      </div>
+      {changingFormat ? (
+        <div className="space-y-3">
+          <TournamentTypeChoice config={config} onChange={setConfig} />
+          <TournamentTypeOptions config={config} onChange={setConfig} />
+        </div>
+      ) : (
+        <p className="text-xs text-teal-300 flex items-center gap-2 flex-wrap">
+          Formato: <span className="font-semibold text-teal-100">{configLabel(config)}</span>
+          <button type="button" onClick={() => setChangingFormat(true)} className="text-teal-400 underline">Cambiar para este torneo</button>
+        </p>
+      )}
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={registrationOpen} onChange={(e) => setRegistrationOpen(e.target.checked)} /> Inscripciones abiertas</label>
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={!ready} onClick={create} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar torneo</button>
+        <button type="button" onClick={onCancel} className="text-sm text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* "Súper 8 Individual · 4 games", "Americano · A7", "Clásico" para una configuración elegida */
+function configLabel(config) {
+  if (!config?.type) return "sin elegir";
+  if (config.type === "super8") return `${TOURNAMENT_TYPE_LABEL.super8}${config.super8Mode ? ` ${SUPER8_MODE_LABEL[config.super8Mode]}` : ""}${config.games ? ` · ${config.games} games` : ""}`;
+  if (config.type === "americano") return `${TOURNAMENT_TYPE_LABEL.americano}${config.games ? ` · A${config.games}` : ""}`;
+  return TOURNAMENT_TYPE_LABEL[config.type];
+}
+
+/* Un torneo dentro de la tarjeta de su evento: día, hora, categoría, formato y canchas, con
+   edición rápida de día, hora y canchas */
+function EventTournamentRow({ t, onOpen, onUpdate, onRemove }) {
+  const [editing, setEditing] = useState(false);
+  const [date, setDate] = useState(t.date);
+  const [time, setTime] = useState(tournamentStartTime(t) || "");
+  const [courtsText, setCourtsText] = useState(String(t.courtsCount || 1));
+  const inscriptos = t.categories.reduce((s, c) => s + c.pairs.length, 0);
+  const cupo = t.categories.reduce((s, c) => s + (categoryCupo(c) || 0), 0);
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const save = () => {
+    const courts = Number(courtsText);
+    if (!date || !Number.isInteger(courts) || courts < 1) return;
+    onUpdate(withTournamentStart(t, { date, startTime: time, courtsCount: courts }));
+    setEditing(false);
+  };
+  return (
+    <div className="rounded border border-teal-900 px-3 py-2">
+      {editing ? (
+        <div className="flex flex-wrap gap-2 items-end text-sm">
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-2 py-1 rounded border" style={input} />
+          <input type="time" lang="es-AR" value={time} onChange={(e) => setTime(e.target.value)} className="px-2 py-1 rounded border" style={input} />
+          <label className="text-xs text-teal-400 flex items-center gap-1">Canchas <input type="number" min="1" value={courtsText} onChange={(e) => setCourtsText(e.target.value)} className="w-16 px-2 py-1 rounded border" style={input} /></label>
+          <button type="button" onClick={save} className="text-lime-400 font-semibold">Guardar</button>
+          <button type="button" onClick={() => setEditing(false)} className="text-teal-400">Cancelar</button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button type="button" onClick={() => onOpen(t.id)} className="text-left min-w-0">
+            <span className="text-sm"><span className="text-teal-300">{tournamentWhenLabel(t)}</span> · <span className="font-semibold">{t.name}</span></span>
+            <span className="flex items-center gap-2 flex-wrap mt-0.5">
+              <TournamentTypeTag tournament={t} short />
+              <span className="text-[11px] text-teal-500">{t.courtsCount || 1} cancha{(t.courtsCount || 1) !== 1 ? "s" : ""} · {inscriptos}{cupo ? `/${cupo}` : ""} inscriptos</span>
+            </span>
+          </button>
+          <span className="flex items-center gap-3 text-xs shrink-0">
+            <button type="button" onClick={() => setEditing(true)} className="text-teal-300">Día y hora</button>
+            <button type="button" onClick={() => onOpen(t.id)} className="text-lime-400">Abrir</button>
+            <button type="button" onClick={() => onRemove(t)} className="text-red-400" title="Lo saca del evento (el torneo no se borra)">Sacar</button>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Pestaña "Eventos" del organizador. El evento es el punto de partida: se crea con su nombre,
+   portada y formato por defecto, y adentro se agregan sus torneos (cada uno con su categoría, día,
+   hora de inicio y canchas). Los torneos ya creados se pueden sumar a un evento. */
+function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournament, onCreateTournament, onOpenTournament, accessToken }) {
+  const emptyConfig = { type: null, super8Mode: null, games: null };
+  const [formOpen, setFormOpen] = useState(false);
   const [name, setName] = useState("");
   const [coverImageUrl, setCoverImageUrl] = useState("");
+  const [config, setConfig] = useState(emptyConfig);
   const [editingId, setEditingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [addingToId, setAddingToId] = useState(null);
+  const [linkingId, setLinkingId] = useState(null);
 
+  const resetForm = () => { setName(""); setCoverImageUrl(""); setConfig(emptyConfig); setEditingId(null); setFormOpen(false); };
   const submit = () => {
     if (!name.trim()) return;
     const prev = events.find((e) => e.id === editingId);
-    onSave({ ...(prev || {}), id: editingId || uid(), name: name.trim(), coverImageUrl: coverImageUrl.trim() });
-    setName(""); setCoverImageUrl(""); setEditingId(null);
+    const id = editingId || uid();
+    onSave({ ...(prev || {}), id, name: name.trim(), coverImageUrl: coverImageUrl.trim(), config: config.type ? config : null });
+    if (!editingId) setAddingToId(id); // recién creado: se abre directo el formulario de su primer torneo
+    resetForm();
   };
-  const edit = (ev) => { setName(ev.name); setCoverImageUrl(ev.coverImageUrl || ""); setEditingId(ev.id); window.scrollTo(0, 0); };
-  const toggle = (t, ev, checked) => onUpdateTournament({ ...t, eventId: checked ? ev.id : null });
+  const edit = (ev) => {
+    setName(ev.name); setCoverImageUrl(ev.coverImageUrl || ""); setConfig(ev.config || emptyConfig);
+    setEditingId(ev.id); setFormOpen(true); window.scrollTo(0, 0);
+  };
 
   return (
     <div style={F.body}>
-      <div className="border border-teal-800 rounded-lg p-4 mb-6 space-y-3">
-        <h2 className="text-sm uppercase tracking-wide text-teal-400">{editingId ? "Editar evento" : "Nuevo evento"}</h2>
-        <p className="text-xs text-teal-500">Agrupá varios torneos (Americanos, Súper 8 o Clásicos, mezclados si hace falta) para que en la página pública aparezcan juntos en una sola tarjeta. No suman puntos entre sí.</p>
-        <div>
-          <label className="block text-xs text-teal-400 mb-1">Nombre del evento</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Semana de Súper 8" />
+      {formOpen ? (
+        <div className="border border-teal-800 rounded-lg p-4 mb-6 space-y-3">
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">{editingId ? "Editar evento" : "Nuevo evento"}</h2>
+          <p className="text-xs text-teal-500">Un evento junta varios torneos (por ejemplo, un fin de semana con un Súper 8 por categoría). Primero lo creás y después le agregás cada torneo con su día, hora y categoría.</p>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre del evento</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Súper 8 Drop Padel" />
+          </div>
+          <ImageUploadField label="Portada (opcional)" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="events" />
+          <div>
+            <p className="text-xs text-teal-400 mb-2">Formato por defecto de sus torneos (cada torneo lo puede cambiar)</p>
+            <TournamentTypeChoice config={config} onChange={setConfig} />
+            <div className="mt-3"><TournamentTypeOptions config={config} onChange={setConfig} /></div>
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" onClick={submit} disabled={!name.trim()} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Crear evento"}</button>
+            <button type="button" onClick={resetForm} className="text-sm text-teal-400">Cancelar</button>
+          </div>
         </div>
-        <ImageUploadField label="Portada (opcional)" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="events" />
-        <div className="flex gap-3 items-center">
-          <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Crear evento"}</button>
-          {editingId && <button type="button" onClick={() => { setName(""); setCoverImageUrl(""); setEditingId(null); }} className="text-sm text-teal-400">Cancelar</button>}
-        </div>
-      </div>
+      ) : (
+        <button type="button" onClick={() => setFormOpen(true)} className="px-4 py-2 rounded font-semibold mb-6" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>+ Crear evento</button>
+      )}
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Mis eventos</h2>
       {events.length === 0 && <p className="opacity-60 text-sm">Todavía no creaste eventos.</p>}
       <div className="space-y-4">
-        {events.map((ev) => (
-          <div key={ev.id} className="border border-teal-800 rounded-lg p-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
-              <p className="font-semibold">{ev.name}</p>
-              <div className="flex items-center gap-3 text-sm">
-                <button type="button" onClick={() => edit(ev)} className="text-teal-300">Editar</button>
-                {confirmDeleteId === ev.id ? (
-                  <span className="whitespace-nowrap">
-                    <button type="button" onClick={() => { onDelete(ev.id); setConfirmDeleteId(null); }} className="text-red-400 font-semibold mr-2">Confirmar</button>
-                    <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-teal-400">Cancelar</button>
-                  </span>
-                ) : (
-                  <button type="button" onClick={() => setConfirmDeleteId(ev.id)} className="text-red-400">Eliminar</button>
-                )}
+        {events.map((ev) => {
+          const own = tournaments.filter((t) => t.eventId === ev.id).sort(compareByStart);
+          const others = tournaments.filter((t) => t.eventId !== ev.id);
+          return (
+            <div key={ev.id} className="border border-teal-800 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                <p className="font-semibold">{ev.name}</p>
+                <div className="flex items-center gap-3 text-sm">
+                  <button type="button" onClick={() => edit(ev)} className="text-teal-300">Editar</button>
+                  {confirmDeleteId === ev.id ? (
+                    <span className="whitespace-nowrap">
+                      <button type="button" onClick={() => { onDelete(ev.id); setConfirmDeleteId(null); }} className="text-red-400 font-semibold mr-2">Confirmar</button>
+                      <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-teal-400">Cancelar</button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => setConfirmDeleteId(ev.id)} className="text-red-400" title="Borra el evento; sus torneos quedan sueltos">Eliminar</button>
+                  )}
+                </div>
               </div>
+              <p className="text-[11px] text-teal-500 mb-3">Formato por defecto: {configLabel(ev.config)}</p>
+
+              <div className="space-y-2">
+                {own.map((t) => (
+                  <EventTournamentRow key={t.id} t={t} onOpen={onOpenTournament} onUpdate={onUpdateTournament} onRemove={(x) => onUpdateTournament({ ...x, eventId: null })} />
+                ))}
+                {own.length === 0 && <p className="text-xs opacity-60">Todavía no tiene torneos.</p>}
+              </div>
+
+              {addingToId === ev.id ? (
+                <EventTournamentForm event={ev} onCreate={(data) => { onCreateTournament(data); setAddingToId(null); }} onCancel={() => setAddingToId(null)} />
+              ) : (
+                <button type="button" onClick={() => setAddingToId(ev.id)} className="mt-3 px-3 py-1.5 rounded text-sm font-semibold border border-lime-400 text-lime-400">+ Agregar torneo</button>
+              )}
+
+              {others.length > 0 && (
+                <div className="mt-3">
+                  <button type="button" onClick={() => setLinkingId(linkingId === ev.id ? null : ev.id)} className="text-xs text-teal-400 underline">
+                    {linkingId === ev.id ? "Ocultar" : "Sumar torneos ya creados"}
+                  </button>
+                  {linkingId === ev.id && (
+                    <div className="space-y-1 mt-2">
+                      {others.map((t) => {
+                        const inOther = t.eventId && events.some((e) => e.id === t.eventId);
+                        return (
+                          <label key={t.id} className={`flex items-center gap-2 text-sm ${inOther ? "opacity-50" : ""}`}>
+                            <input type="checkbox" checked={false} disabled={inOther} onChange={() => onUpdateTournament({ ...t, eventId: ev.id })} />
+                            <span>{t.name}</span>
+                            <span className="text-xs text-teal-600">· {formatDateShort(t.date)}</span>
+                            <TournamentTypeTag tournament={t} short />
+                            {inOther && <span className="text-[10px] text-teal-600">(en otro evento)</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <p className="text-xs text-teal-500 mb-1">Torneos del evento (tildá los que van juntos):</p>
-            <div className="space-y-1">
-              {tournaments.map((t) => {
-                const inOther = t.eventId && t.eventId !== ev.id && events.some((e) => e.id === t.eventId);
-                return (
-                  <label key={t.id} className={`flex items-center gap-2 text-sm ${inOther ? "opacity-50" : ""}`}>
-                    <input type="checkbox" checked={t.eventId === ev.id} disabled={inOther} onChange={(e) => toggle(t, ev, e.target.checked)} />
-                    <span>{t.name}</span>
-                    <span className="text-xs text-teal-600">· {formatDateShort(t.date)}</span>
-                    <TournamentTypeTag tournament={t} short />
-                    {inOther && <span className="text-[10px] text-teal-600">(en otro evento)</span>}
-                  </label>
-                );
-              })}
-              {tournaments.length === 0 && <p className="text-xs opacity-60">Todavía no tenés torneos.</p>}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -6148,7 +6479,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       </div>
 
       {tab === "eventos" ? (
-        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} accessToken={organizer.accessToken} />
+        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
       ) : tab === "circuitos" ? (
         <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
       ) : (
@@ -7478,8 +7809,9 @@ function SmashPointAppInner() {
     persistTournaments(tournaments.filter((t) => t.id !== id));
   };
 
-  const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas }) => {
-    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}) };
+  // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
+  const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
