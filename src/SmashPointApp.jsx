@@ -633,6 +633,7 @@ function super8IndividualStandingsGroup(category, group) {
       pairA: tA.playerIds[i],
       pairB: tB.playerIds[i],
       walkover: m.walkover ? (m.walkover === m.pairA ? tA.playerIds[i] : tB.playerIds[i]) : null,
+      retired: m.retired ? (m.retired === m.pairA ? tA.playerIds[i] : tB.playerIds[i]) : null,
     }));
   });
   return { ...group, matches };
@@ -903,7 +904,7 @@ function collectScheduleableMatches(tournament) {
             key: `${c.id}:g:${g.id}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "group", groupId: g.id }, matchId: m.id, label: m.round ? `${g.name} · Ronda ${m.round}` : g.name,
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
-            walkover: m.walkover || null, liveStatus: m.liveStatus || null,
+            walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null,
             stage: m.stage || null, groupFormat: g.format || "roundrobin",
             placeholder: isPending4 ? (m.stage === "ganadores" ? "Ganador Partido 1 vs Ganador Partido 2" : "Perdedor Partido 1 vs Perdedor Partido 2") : null,
           });
@@ -931,7 +932,7 @@ function collectScheduleableMatches(tournament) {
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri),
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
-            walkover: m.walkover || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
+            walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
             placeholder: placeholderText,
           });
         }
@@ -1997,6 +1998,10 @@ function MatchResultLabel({ match, winnerIsA, format }) {
   if (match && match.walkover) {
     return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.walkover === match.pairA ? false : true} /> · <span className="text-amber-400 font-semibold">WO</span></span>;
   }
+  // Retiro: el marcador completado a favor del rival, con la marca RET ("6-3 · 6-1 · RET")
+  if (match && match.retired) {
+    return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.retired === match.pairA ? false : true} /> · <span className="text-red-400 font-semibold">RET</span></span>;
+  }
   return <SetsSummary sets={match.sets} winnerIsA={winnerIsA} />;
 }
 
@@ -2057,7 +2062,7 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
                 <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.eliminated ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
                   <PairName id={row.pairId} pairsById={pairsById} />
                 </span>
-                {row.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>ELIMINADA</span>}
+                {row.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>{row.ret ? "RET · ELIMINADA" : "ELIMINADA"}</span>}
                 {row.byDraw && !row.eliminated &&<span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
               </div>
               <span className="text-sm font-semibold shrink-0" style={{ color: accentColor }}>{row.pts} pts</span>
@@ -2116,7 +2121,7 @@ function groupMatchStageLabel(group, match) {
 }
 
 /* Editor de resultado set por set para un partido, según el formato configurado del torneo */
-function MatchSetsEditor({ sets, format, onSetScore }) {
+function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
   const total = format?.setsToPlay ?? DEFAULT_MATCH_FORMAT.setsToPlay;
   const rows = Array.from({ length: total }, (_, i) => (sets && sets[i]) || { a: null, b: null });
   // En los formatos de set único (Americano, Súper 8) se avisa si el set cargado no puede ser un
@@ -2124,9 +2129,10 @@ function MatchSetsEditor({ sets, format, onSetScore }) {
   const singleSet = isSingleSetFormat(format);
   const { a: setA, b: setB } = rows[0];
   const singleSetLoaded = singleSet && setA != null && setB != null;
-  const singleSetInvalid = singleSetLoaded && !singleSetIsValid(setA, setB, format.gamesPerSet);
+  // Con retiro (partial) el set puede haber quedado cortado: no se avisa como resultado inválido
+  const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet);
   const tieAt = format?.gamesPerSet - 1;
-  const singleSetNote = !singleSetLoaded ? null
+  const singleSetNote = !singleSetLoaded || partial ? null
     : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}).`
     : Math.min(setA, setB) === tieAt ? "Definido en tie break" : null;
   return (
@@ -3021,8 +3027,30 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
   );
 }
 
+/* Botones de W.O. y retiro (RET) de un partido, con su "Deshacer". El RET se carga después del
+   marcador hasta donde se jugó: el resto se completa solo a favor del rival y la pareja que se
+   retira queda eliminada. */
+function MatchOutcomeButtons({ m, nameA, nameB, onWalkover, onRetired, className = "" }) {
+  return (
+    <div className={`flex gap-x-3 gap-y-1 flex-wrap ${className}`} style={F.body}>
+      {m.walkover ? (
+        <button type="button" onClick={() => onWalkover(null)} className="text-teal-400 underline">Deshacer WO</button>
+      ) : m.retired ? (
+        <button type="button" onClick={() => onRetired(null)} className="text-teal-400 underline">Deshacer RET</button>
+      ) : (
+        <>
+          <button type="button" onClick={() => onWalkover(m.pairA)} className="text-amber-400 underline">WO {nameA}</button>
+          <button type="button" onClick={() => onWalkover(m.pairB)} className="text-amber-400 underline">WO {nameB}</button>
+          <button type="button" onClick={() => onRetired(m.pairA)} className="text-red-400 underline" title="Retiro por lesión: cargá primero el marcador hasta donde se jugó">RET {nameA}</button>
+          <button type="button" onClick={() => onRetired(m.pairB)} className="text-red-400 underline" title="Retiro por lesión: cargá primero el marcador hasta donde se jugó">RET {nameB}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* Ventanita para cargar el resultado de un partido desde la grilla de horarios */
-function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onClose }) {
+function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onRetired, onClose }) {
   const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
   return (
     <Modal title="Resultado" onClose={onClose}>
@@ -3031,18 +3059,12 @@ function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onClos
       {m.walkover ? (
         <p className="text-sm text-amber-400 mb-3" style={F.body}>WO: no se presentó {m.walkover === m.pairA ? nameA : nameB}.</p>
       ) : (
-        <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} /></div>
+        <>
+          {m.retired && <p className="text-sm text-red-400 mb-2" style={F.body}>RET: se retiró {m.retired === m.pairA ? nameA : nameB}. El resto del partido se completa a favor del rival.</p>}
+          <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} partial={!!m.retired} /></div>
+        </>
       )}
-      <div className="flex gap-3 flex-wrap text-xs mb-5" style={F.body}>
-        {m.walkover ? (
-          <button type="button" onClick={() => onWalkover(null)} className="text-teal-400 underline">Deshacer WO</button>
-        ) : (
-          <>
-            <button type="button" onClick={() => onWalkover(m.pairA)} className="text-amber-400 underline">WO {nameA}</button>
-            <button type="button" onClick={() => onWalkover(m.pairB)} className="text-amber-400 underline">WO {nameB}</button>
-          </>
-        )}
-      </div>
+      <MatchOutcomeButtons m={m} nameA={nameA} nameB={nameB} onWalkover={onWalkover} onRetired={onRetired} className="text-xs mb-5" />
       <button type="button" onClick={onClose} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>Listo</button>
     </Modal>
   );
@@ -3073,7 +3095,8 @@ function useMatchActions(tournament, update) {
           pairsById={pairsById}
           format={tournament.matchFormat}
           onSetScore={(setIndex, side, value) => change(resultMatch, (x) => ({ ...x, sets: withSetScore(x.sets, setIndex, side, value) }))}
-          onWalkover={(pairId) => change(resultMatch, (x) => ({ ...x, walkover: pairId, sets: pairId ? [] : x.sets, liveStatus: null }))}
+          onWalkover={(pairId) => change(resultMatch, (x) => ({ ...x, walkover: pairId, retired: null, sets: pairId ? [] : x.sets, liveStatus: null }))}
+          onRetired={(pairId) => change(resultMatch, (x) => ({ ...x, retired: pairId, walkover: null, liveStatus: null }))}
           onClose={() => setResultKey(null)}
         />
       )}
@@ -3451,6 +3474,7 @@ function Scoreboard({ match, pairsById, format }) {
         <span className={`flex-1 min-w-0 truncate ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
           {pairsById[id]?.name || "—"}
           {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
+          {match.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
         </span>
         <span className="flex gap-1 shrink-0 font-mono">
           {sets.map((s, i) => (
@@ -4457,7 +4481,7 @@ function CategoryBracketPublicView({ category, format }) {
                 </span>
                 {round.map((m) => {
                   const w = winnerOf(m);
-                  const { a: setsA, b: setsB } = setsWon(m);
+                  const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
@@ -6370,7 +6394,20 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       ...category,
       groups: category.groups.map((g) => {
         if (g.id !== groupId) return g;
-        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        return { ...g, matches };
+      }),
+    });
+  };
+
+  // Retiro (RET): conserva el marcador cargado; el resto se completa a favor del rival
+  const setGroupRetired = (groupId, matchId, retiredPairId) => {
+    onUpdateCategory({
+      ...category,
+      groups: category.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
         if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
         return { ...g, matches };
       }),
@@ -6444,7 +6481,12 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   const setBracketWalkover = (matchId, walkoverPairId) => {
-    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+  };
+
+  const setBracketRetired = (matchId, retiredPairId) => {
+    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
   };
 
@@ -6665,18 +6707,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             <MatchSetsEditor
                               sets={m.sets}
                               format={format}
+                              partial={!!m.retired}
                               onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
                             />
-                            <div className="flex gap-2 flex-wrap justify-end text-[10px]">
-                              {m.walkover ? (
-                                <button type="button" onClick={() => setGroupWalkover(g.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                              ) : (
-                                <>
-                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
-                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
-                                </>
-                              )}
-                            </div>
+                            <MatchOutcomeButtons
+                              m={m}
+                              nameA={pairsById[m.pairA]?.name || "pareja 1"}
+                              nameB={pairsById[m.pairB]?.name || "pareja 2"}
+                              onWalkover={(pairId) => setGroupWalkover(g.id, m.id, pairId)}
+                              onRetired={(pairId) => setGroupRetired(g.id, m.id, pairId)}
+                              className="justify-end text-[10px]"
+                            />
                           </div>
                         )}
                       </div>
@@ -6844,7 +6885,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                           {m.walkover ? (
                             <p className="text-amber-400 font-semibold text-xs">WO</p>
                           ) : (() => {
-                            const { a: setsA, b: setsB } = setsWon(m);
+                            const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
@@ -6855,6 +6896,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                                   <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsB : ""}</span>}
                                 </div>
+                                {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                               </>
                             );
                           })()}
@@ -6863,18 +6905,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                               <MatchSetsEditor
                                 sets={m.sets}
                                 format={format}
+                                partial={!!m.retired}
                                 onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
                               />
-                              <div className="flex gap-2 flex-wrap text-[10px]">
-                                {m.walkover ? (
-                                  <button type="button" onClick={() => setBracketWalkover(m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                                ) : (
-                                  <>
-                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
-                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
-                                  </>
-                                )}
-                              </div>
+                              <MatchOutcomeButtons
+                                m={m}
+                                nameA={pairsById[m.pairA]?.name || "pareja 1"}
+                                nameB={pairsById[m.pairB]?.name || "pareja 2"}
+                                onWalkover={(pairId) => setBracketWalkover(m.id, pairId)}
+                                onRetired={(pairId) => setBracketRetired(m.id, pairId)}
+                                className="text-[10px]"
+                              />
                             </>
                           )}
                         </div>

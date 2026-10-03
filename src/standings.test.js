@@ -231,3 +231,38 @@ test("empate de a dos sin enfrentamiento jugado todavía: diferencia general de 
   ]), {}, CLASICO);
   assert.deepEqual(order(rows), ["A", "B", "C"]);
 });
+
+/* RET: ret("A", "B", "B", [6, 3], [2, 1]) → B se retiró con 6-3 2-1 */
+const ret = (pairA, pairB, retired, ...sets) => ({ ...m(pairA, pairB, ...sets), retired });
+
+test("RET: respeta lo jugado y completa el resto a favor del rival", () => {
+  // B ganó el primer set 3-6 y se retiró 1-2 abajo en el segundo: queda 3-6 6-1 10-0 para A
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "B", [3, 6], [2, 1])]), {}, CLASICO);
+  const a = row(rows, "A"), b = row(rows, "B");
+  assert.equal(a.pts, 2); assert.equal(b.pts, 0);
+  assert.deepEqual([a.setsF, a.setsC], [2, 1]);
+  assert.deepEqual([a.gamesF, a.gamesC], [3 + 6 + 1, 6 + 1], "el super tie-break vale un game");
+});
+
+test("RET: el set cortado lo gana el rival 7-5 si el que se retira tenía 5", () => {
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "A", [5, 4])]), {}, CLASICO);
+  const b = row(rows, "B");
+  assert.deepEqual([b.setsF, b.setsC, b.gamesF, b.gamesC], [2, 0, 7 + 6, 5]);
+});
+
+test("RET en set único: el rival llega a los games del set", () => {
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "B", [2, 3])]), {}, AMERICANO_7);
+  const a = row(rows, "A");
+  assert.deepEqual([a.setsF, a.setsC, a.gamesF, a.gamesC], [1, 0, 7, 3]);
+});
+
+test("RET: la pareja que se retira queda eliminada y va al fondo", () => {
+  const rows = computeStandings(group(["M", "X", "Y"], [
+    m("M", "X", [6, 0], [6, 0]),
+    m("M", "Y", [6, 0], [6, 0]),
+    ret("X", "Y", "X", [6, 2], [1, 1]),
+  ]), {}, CLASICO);
+  const x = row(rows, "X");
+  assert.equal(x.ret, true); assert.equal(x.eliminated, true);
+  assert.deepEqual(order(rows), ["M", "Y", "X"]);
+});

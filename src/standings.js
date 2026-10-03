@@ -15,13 +15,14 @@ export function setsWon(match) {
 }
 
 export function matchIsPlayed(match) {
-  if (match && match.walkover) return true;
+  if (match && (match.walkover || match.retired)) return true;
   const { a, b } = setsWon(match);
   return a + b > 0;
 }
 
 export function matchWinnerId(match) {
   if (match && match.walkover) return match.walkover === match.pairA ? match.pairB : match.pairA;
+  if (match && match.retired) return match.retired === match.pairA ? match.pairB : match.pairA;
   const { a, b } = setsWon(match);
   if (a === b) return null;
   return a > b ? match.pairA : match.pairB;
@@ -51,9 +52,56 @@ export function walkoverSets(match, format) {
   return Array.from({ length: count }, () => (presentIsA ? { a: games, b: 0 } : { a: 0, b: games }));
 }
 
-/* Los sets con que cuenta un partido: los cargados, o los del W.O. si no se jugó */
+/* Retiro por lesión (RET): se respeta el marcador hasta donde se jugó y se completa el resto a
+   favor del rival. El set cortado lo termina ganando el rival (con 5 o 6 games del que se retira
+   queda 7-5 o 7-6; en set único, el rival llega a los games del set; en el super tie-break, a 10
+   o a dos puntos de diferencia) y los sets que faltan se cuentan enteros para el rival (6-0, o
+   10-0 el super tie-break). Los sets quedan del lado de cada pareja (a = pairA). */
+export function retiredSets(match, format) {
+  const f = format || DEFAULT_MATCH_FORMAT;
+  const games = f.gamesPerSet || 6;
+  const total = f.setsToPlay || 3;
+  const single = total === 1;
+  const need = Math.floor(total / 2) + 1;
+  const stbIndex = f.finalSuperTiebreak && total > 1 ? total - 1 : -1;
+  const rivalIsA = match.retired === match.pairB;
+  const side = (rival, retired) => (rivalIsA ? { a: rival, b: retired } : { a: retired, b: rival });
+
+  const out = [];
+  let rivalSets = 0, retiredWon = 0;
+  for (let i = 0; i < total && rivalSets < need && retiredWon < need; i++) {
+    const s = (match.sets || [])[i];
+    const isStb = i === stbIndex;
+    const started = s && (s.a != null || s.b != null);
+    if (!started) {
+      out.push(side(isStb ? 10 : games, 0));
+      rivalSets++;
+      continue;
+    }
+    const r = (rivalIsA ? s.a : s.b) || 0;
+    const q = (rivalIsA ? s.b : s.a) || 0;
+    const hi = Math.max(r, q), lo = Math.min(r, q);
+    const complete = isStb ? hi >= 10 && hi - lo >= 2
+      : single ? hi === games && lo < games
+      : (hi >= games && hi - lo >= 2) || (hi === games + 1 && lo === games);
+    if (complete) {
+      out.push(side(r, q));
+      if (r > q) rivalSets++; else retiredWon++;
+    } else {
+      const rivalFinal = isStb ? Math.max(10, q + 2) : single ? games : q >= games - 1 ? games + 1 : games;
+      out.push(side(rivalFinal, q));
+      rivalSets++;
+    }
+  }
+  return out;
+}
+
+/* Los sets con que cuenta un partido: los cargados, los del W.O. si no se jugó, o los cargados
+   completados a favor del rival si hubo retiro (RET) */
 export function effectiveSets(match, format) {
-  return match.walkover ? walkoverSets(match, format) : match.sets || [];
+  if (match.walkover) return walkoverSets(match, format);
+  if (match.retired) return retiredSets(match, format);
+  return match.sets || [];
 }
 
 /* Número pseudoaleatorio fijo para cada pareja del grupo: es el "sorteo" del último desempate.
@@ -86,7 +134,7 @@ function tallySetsAndGames(match, rowA, rowB, format) {
   });
 }
 
-const emptyRow = (pairId) => ({ pairId, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0, wo: 0, eliminated: false, byDraw: false });
+const emptyRow = (pairId) => ({ pairId, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0, wo: 0, ret: false, eliminated: false, byDraw: false });
 
 /* Ordena un grupo de parejas empatadas en puntos según el reglamento de la FIP:
    - Dos empatadas: manda el enfrentamiento directo.
@@ -143,7 +191,9 @@ function sortByDiffThenDraw(rows, statsOf, draw) {
      si le dan los números. wo cuenta cuántos W.O. dio (solo informativo).
    - Pareja eliminada (pairsById[id].eliminated: la sacó el organizador porque abandonó): va
      siempre al fondo, sea cual sea su puntaje; si hay más de una, entre ellas se ordenan por sets
-     y después por games. Sus partidos jugados siguen valiendo para sus rivales. */
+     y después por games. Sus partidos jugados siguen valiendo para sus rivales.
+   - Retiro por lesión (RET): el partido cuenta con el marcador completado a favor del rival (ver
+     retiredSets) y la pareja que se retiró queda eliminada (ret: true y eliminated: true). */
 export function computeStandings(group, pairsById, format) {
   const f = format || DEFAULT_MATCH_FORMAT;
   const table = Object.fromEntries(group.pairIds.map((pid) => [pid, { ...emptyRow(pid), eliminated: !!pairsById?.[pid]?.eliminated }]));
@@ -159,6 +209,7 @@ export function computeStandings(group, pairsById, format) {
       winner.pg++; winner.pts += 2; loser.pp++;
     }
     if (m.walkover && table[m.walkover]) table[m.walkover].wo++;
+    if (m.retired && table[m.retired]) { table[m.retired].ret = true; table[m.retired].eliminated = true; }
   });
 
   const rows = Object.values(table);
