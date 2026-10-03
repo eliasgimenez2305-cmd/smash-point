@@ -950,6 +950,47 @@ function propagateBracket(rounds) {
   return next;
 }
 
+/* Parejas fuera del torneo en una categoría: las que eliminó el organizador y las que se
+   retiraron (RET) en algún partido */
+function categoryOutPairIds(category) {
+  const out = new Set((category.pairs || []).filter((p) => p.eliminated).map((p) => p.id));
+  [...(category.groups || []).flatMap((g) => g.matches), ...(category.bracket || []).flat()].forEach((m) => {
+    if (m.retired) out.add(m.retired);
+  });
+  return out;
+}
+
+/* Los partidos pendientes de una pareja que quedó fuera pasan solos a W.O. a favor del rival
+   (marcados con autoWalkover). Si se la reincorpora o se deshace el RET, esos W.O. automáticos se
+   sacan. Se repite hasta que no cambie nada, porque un W.O. puede completar un cruce de un grupo
+   de 4 o una ronda de la llave donde esa pareja vuelve a aparecer. En el Súper 8 no se aplica. */
+function withForfeits(category) {
+  if (isSuper8(category)) return category;
+  const out = categoryOutPairIds(category);
+  const fix = (m) => {
+    if (m.autoWalkover && !out.has(m.walkover)) return { ...m, walkover: null, autoWalkover: false };
+    if (m.pairA && m.pairB && !matchIsPlayed(m)) {
+      const gone = out.has(m.pairA) ? m.pairA : out.has(m.pairB) ? m.pairB : null;
+      if (gone) return { ...m, walkover: gone, autoWalkover: true, sets: [], liveStatus: null };
+    }
+    return m;
+  };
+  let current = category;
+  for (let pass = 0; pass < 6; pass++) {
+    const next = {
+      ...current,
+      groups: (current.groups || []).map((g) => {
+        const matches = g.matches.map(fix);
+        return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches) : matches };
+      }),
+      bracket: current.bracket ? propagateBracket(current.bracket.map((round) => round.map(fix))) : current.bracket,
+    };
+    if (JSON.stringify(next) === JSON.stringify(current)) return current;
+    current = next;
+  }
+  return current;
+}
+
 function formatSummary(format) {
   const f = format || DEFAULT_MATCH_FORMAT;
   if (isSingleSetFormat(f)) {
@@ -6994,8 +7035,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   /* Eliminar del torneo a una pareja que abandona (distinto del W.O., que solo pierde ese partido):
-     queda al fondo de su grupo y no clasifica, pero sus partidos jugados siguen valiendo. Se puede
-     deshacer con "Reincorporar". */
+     queda al fondo de su grupo y no clasifica, pero sus partidos jugados siguen valiendo, y los
+     pendientes pasan solos a W.O. a favor del rival (ver withForfeits). Se puede deshacer con
+     "Reincorporar", que también saca esos W.O. automáticos. */
   const setPairEliminated = (id, eliminated) => {
     onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, eliminated } : p)) });
     setConfirmEliminateId(null);
@@ -7208,12 +7250,12 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                           <button type="button" onClick={() => setPairEliminated(p.id, false)} className="text-sm text-lime-400">Reincorporar</button>
                         ) : confirmEliminateId === p.id ? (
                           <span className="flex items-center gap-2 text-sm" style={F.body}>
-                            <span className="text-teal-300">¿Eliminar del torneo?</span>
+                            <span className="text-teal-300">¿Eliminar del torneo? Sus partidos pendientes pasan a W.O.</span>
                             <button type="button" onClick={() => setPairEliminated(p.id, true)} className="text-red-400 font-semibold">Sí, eliminar</button>
                             <button type="button" onClick={() => setConfirmEliminateId(null)} className="text-teal-400">Cancelar</button>
                           </span>
                         ) : (
-                          <button type="button" onClick={() => setConfirmEliminateId(p.id)} className="text-sm text-red-400" title="La pareja abandona: queda al fondo de su grupo y no clasifica">Eliminar del torneo</button>
+                          <button type="button" onClick={() => setConfirmEliminateId(p.id)} className="text-sm text-red-400" title="La pareja abandona: queda al fondo de su grupo, no clasifica y sus partidos pendientes pasan a W.O.">Eliminar del torneo</button>
                         )
                       )}
                       {isEditing ? (
@@ -8024,8 +8066,10 @@ function SmashPointAppInner() {
     await Promise.all([accept ? reloadTournaments() : null, reloadInscripciones()]);
   };
 
+  // Cada vez que se guarda un torneo, los pendientes de las parejas que quedaron fuera pasan a W.O.
   const updateTournament = (updated) => {
-    persistTournaments(tournaments.map((t) => (t.id === updated.id ? updated : t)));
+    const withForfeitsApplied = { ...updated, categories: (updated.categories || []).map(withForfeits) };
+    persistTournaments(tournaments.map((t) => (t.id === updated.id ? withForfeitsApplied : t)));
   };
 
   const deleteTournament = (id) => {
