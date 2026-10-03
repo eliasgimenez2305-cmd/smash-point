@@ -266,3 +266,15 @@ test("RET: la pareja que se retira queda eliminada y va al fondo", () => {
   assert.equal(x.ret, true); assert.equal(x.eliminated, true);
   assert.deepEqual(order(rows), ["M", "Y", "X"]);
 });
+
+test("grupo de 4 con cruces: si se juega antes el de perdedores, las del de ganadores siguen arriba", () => {
+  const g = group(["A", "B", "C", "D"], [
+    { ...m("A", "B", [6, 1], [6, 1]), stage: "r1" },
+    { ...m("C", "D", [6, 2], [6, 2]), stage: "r1" },
+    { ...m("A", "C"), stage: "ganadores" },                  // todavía sin jugar
+    { ...m("B", "D", [6, 4], [6, 4]), stage: "perdedores" },  // B gana el de perdedores
+  ], { format: "bracket4" });
+  const o = order(computeStandings(g, {}, CLASICO));
+  assert.deepEqual(o.slice(2), ["B", "D"], "3° y 4° ya definidos");
+  assert.deepEqual([...o.slice(0, 2)].sort(), ["A", "C"], "A y C juegan por el 1° y el 2°");
+});

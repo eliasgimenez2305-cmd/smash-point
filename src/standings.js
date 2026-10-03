@@ -218,12 +218,20 @@ export function computeStandings(group, pairsById, format) {
 
   let ordered;
   if (group.format === "bracket4" && group.matches.length === 4) {
-    // 1° = ganó el cruce de ganadores, 2° = lo perdió, 3° = ganó el de perdedores, 4° = lo perdió
+    // 1° = ganó el cruce de ganadores, 2° = lo perdió, 3° = ganó el de perdedores, 4° = lo perdió.
+    // Las dos del cruce de ganadores van siempre arriba de las del de perdedores, aunque su cruce
+    // todavía no se haya jugado (entre ellas, orden provisorio por la tabla).
     const [, , mw, ml] = group.matches;
-    const order = [winnerOf(mw), loserOf(mw), winnerOf(ml), loserOf(ml)];
+    const place = (id) => {
+      for (const [m, base] of [[mw, 0], [ml, 2]]) {
+        if (!m || (m.pairA !== id && m.pairB !== id)) continue;
+        const w = matchIsPlayed(m) ? matchWinnerId(m) : null;
+        return w == null ? base + 0.5 : w === id ? base : base + 1;
+      }
+      return 99;
+    };
     ordered = [...present].sort((x, y) => {
-      const rx = order.indexOf(x.pairId), ry = order.indexOf(y.pairId);
-      const px = rx === -1 ? 99 : rx, py = ry === -1 ? 99 : ry;
+      const px = place(x.pairId), py = place(y.pairId);
       if (px !== py) return px - py;
       // Todavía sin definir (partidos no jugados): la tabla de puntos como orden provisorio
       if (y.pts !== x.pts) return y.pts - x.pts;

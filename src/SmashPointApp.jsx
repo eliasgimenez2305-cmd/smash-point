@@ -440,13 +440,14 @@ function compareByStart(a, b) {
 /* Nombre de una cancha para mostrar. Un Clásico con varias sedes (t.venues: [{ id, name, courts }])
    numera sus canchas de corrido (sede 1: canchas 1 a 3, sede 2: 4 y 5...) para armar los horarios,
    y acá se traduce: la 4 es "Club Norte · Cancha 1". Sin sedes: "Cancha 4". */
-function courtName(t, court) {
+function courtName(t, court, short = false) {
+  const label = short ? "C" : "Cancha ";
   let offset = 0;
   for (const v of t?.venues || []) {
-    if (court <= offset + v.courts) return `${v.name} · Cancha ${court - offset}`;
+    if (court <= offset + v.courts) return `${v.name} · ${label}${court - offset}`;
     offset += v.courts;
   }
-  return `Cancha ${court}`;
+  return `${label}${court}`;
 }
 
 /* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
@@ -3902,12 +3903,12 @@ function SchedulePublicView({ tournament }) {
                         <div key={m.key} className="text-sm min-w-0" style={F.body}>
                           {hasResult ? (
                             <div className="flex items-start gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
                               <div className="flex-1 min-w-0"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div>
                             </div>
                           ) : (
                             <div className="flex items-baseline gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
                               {m.placeholder
                                 ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
                                 : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
@@ -4612,7 +4613,7 @@ function EventDaysList({ tournaments, onOpen, onRegister }) {
                     <span className="flex-1 min-w-[9rem]">
                       <span className="block text-base font-semibold uppercase leading-tight" style={{ color: BRAND.ink }}>{t.name}</span>
                       <span className="flex items-center gap-2 flex-wrap mt-1">
-                        <TournamentTypeTag tournament={t} short />
+                        <TournamentTypeTag tournament={t} />
                         {status === STATUS.EN_CURSO && <span className="text-[10px] font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
                         {spots && <span className={`text-xs ${spots === "completo" ? "text-amber-400" : "text-teal-300"}`}>{spots}</span>}
                       </span>
@@ -6515,7 +6516,7 @@ function EventTournamentRow({ t, onOpen, onUpdate, onRemove }) {
           <button type="button" onClick={() => onOpen(t.id)} className="text-left min-w-0">
             <span className="text-sm"><span className="text-teal-300">{tournamentWhenLabel(t)}</span> · <span className="font-semibold">{t.name}</span></span>
             <span className="flex items-center gap-2 flex-wrap mt-0.5">
-              <TournamentTypeTag tournament={t} short />
+              <TournamentTypeTag tournament={t} />
               <span className="text-[11px] text-teal-500">{t.courtsCount || 1} cancha{(t.courtsCount || 1) !== 1 ? "s" : ""} · {inscriptos}{cupo ? `/${cupo}` : ""} inscriptos</span>
             </span>
           </button>
@@ -6768,7 +6769,9 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
      escritos; él decide si lo envía. Nunca frena la aprobación ni el rechazo. */
   const whatsappLink = (i) => {
     const category = categoriesById[i.categoria_id]?.name;
-    const what = `la inscripción de ${names(i)}${category ? ` en ${category}` : ""} para el torneo "${tournament.name}" (${tournamentWhenLabel(tournament)})`;
+    // En los torneos de un evento la categoría y el torneo se llaman igual: se nombra una sola vez
+    const inCategory = category && category !== tournament.name ? ` en ${category}` : "";
+    const what = `la inscripción de ${names(i)}${inCategory} para el torneo "${tournament.name}" (${tournamentWhenLabel(tournament)})`;
     const text = i.estado === "rechazada"
       ? `¡Hola! Te escribimos por ${what}. Lamentablemente no la pudimos confirmar. Cualquier consulta, escribinos por acá.`
       : `¡Hola! Te confirmamos ${what}. ¡Nos vemos en la cancha!`;
@@ -7789,7 +7792,7 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
         <p className="text-sm text-teal-400 mb-4" style={F.body}>
           {usesSchedule
             ? "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual."
-            : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan uno atrás del otro en la cancha disponible."}
+            : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan por turnos en las canchas del torneo (se eligen en \"Partidos y posiciones\")."}
         </p>
 
         {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
