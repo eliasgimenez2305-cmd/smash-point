@@ -55,6 +55,28 @@ async function supabaseRefresh(refreshToken) {
   return data; // { access_token, refresh_token, expires_in, user }
 }
 
+/* Cada refresh token sirve una sola vez (Supabase lo cambia por uno nuevo). Para no gastarlo dos
+   veces, los pedidos simultáneos con el mismo token comparten la respuesta (pasa en desarrollo, donde
+   React arranca la app dos veces). Si falla porque ya se usó, se prueba con el último guardado en el
+   navegador (otra pestaña puede haberlo renovado). */
+const refreshInFlight = new Map();
+function supabaseRefreshOnce(refreshToken) {
+  if (!refreshInFlight.has(refreshToken)) {
+    refreshInFlight.set(refreshToken, supabaseRefresh(refreshToken));
+    setTimeout(() => refreshInFlight.delete(refreshToken), 30000);
+  }
+  return refreshInFlight.get(refreshToken);
+}
+async function renewWithLatestToken(refreshToken) {
+  try {
+    return await supabaseRefreshOnce(refreshToken);
+  } catch (err) {
+    const latest = readStoredAuth()?.refreshToken;
+    if (err.expired && latest && latest !== refreshToken) return supabaseRefreshOnce(latest);
+    throw err;
+  }
+}
+
 /* Lo que queda guardado en este navegador para no perder la sesión al recargar: el refresh token y
    la pantalla del panel en la que estaba. Cerrar sesión lo borra. */
 const AUTH_STORAGE_KEY = "sp:auth";
@@ -8118,7 +8140,7 @@ function SmashPointAppInner() {
         const stored = readStoredAuth();
         if (stored?.refreshToken) {
           try {
-            const auth = await supabaseRefresh(stored.refreshToken);
+            const auth = await renewWithLatestToken(stored.refreshToken);
             const profile = orgs.find((o) => o.id === auth.user?.id);
             if (profile) {
               const restored = { ...profile, ...authFields(auth) };
@@ -8159,7 +8181,7 @@ function SmashPointAppInner() {
     if (!current?.refreshToken || refreshingRef.current) return;
     refreshingRef.current = true;
     try {
-      const auth = await supabaseRefresh(current.refreshToken);
+      const auth = await renewWithLatestToken(current.refreshToken);
       const fields = authFields(auth);
       writeStoredAuth({ ...current, refreshToken: fields.refreshToken });
       setSession((s) => (s ? { ...s, ...fields } : s));
