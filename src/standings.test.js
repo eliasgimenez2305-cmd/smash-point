@@ -9,7 +9,7 @@ const AMERICANO_7 = { type: "americano", setsToPlay: 1, gamesPerSet: 7, setTiebr
 
 /* Partido con resultado: m("A", "B", [6, 3], [6, 4]) → A ganó 6-3 6-4 */
 const m = (pairA, pairB, ...sets) => ({ pairA, pairB, sets: sets.map(([a, b]) => ({ a, b })) });
-/* W.O.: wo("A", "B", "B") → B no se presentó */
+/* W.O.: wo("A", "B", "B") → B no se presentó (pierde ese partido y sigue en el torneo) */
 const wo = (pairA, pairB, gaveWalkover) => ({ pairA, pairB, sets: [], walkover: gaveWalkover });
 const group = (pairIds, matches, extra = {}) => ({ id: "g1", name: "Grupo A", pairIds, format: "roundrobin", matches, ...extra });
 const order = (rows) => rows.map((r) => r.pairId);
@@ -92,10 +92,11 @@ test("super tie-break: cuenta como un set y como un game para el que lo gana", (
 test("W.O.: cuenta 6-0 6-0 en sets y games para el que se presentó", () => {
   const rows = computeStandings(group(["A", "B"], [wo("A", "B", "B")]), {}, CLASICO);
   const a = row(rows, "A"), b = row(rows, "B");
-  assert.equal(a.pts, 2); assert.equal(a.pg, 1); assert.equal(b.pp, 1);
+  assert.equal(a.pts, 2); assert.equal(a.pg, 1); assert.equal(b.pp, 1); assert.equal(b.pts, 0);
   assert.deepEqual([a.setsF, a.setsC, a.gamesF, a.gamesC], [2, 0, 12, 0]);
   assert.deepEqual([b.setsF, b.setsC, b.gamesF, b.gamesC], [0, 2, 0, 12]);
-  assert.equal(b.wo, true); assert.equal(a.wo, false);
+  assert.equal(b.wo, 1); assert.equal(a.wo, 0);
+  assert.equal(b.eliminated, false, "el W.O. no elimina");
 });
 
 test("W.O. en Americano a 7: un set 7-0", () => {
@@ -104,15 +105,26 @@ test("W.O. en Americano a 7: un set 7-0", () => {
   assert.deepEqual([b.setsF, b.setsC, b.gamesF, b.gamesC], [1, 0, 7, 0]);
 });
 
-test("W.O.: el que no se presentó va al fondo aunque haya ganado su partido anterior 6-0 6-0", () => {
-  // Caso del Grupo D: M ganó 6-0 6-0 y después dio W.O.
+test("W.O. afecta solo ese partido: la pareja sigue y puede clasificar", () => {
+  // M ganó 6-0 6-0, después dio W.O. (llegó tarde) y X le ganó a Y. Los tres con 2 puntos:
+  // games entre ellas: Y +8, M 0, X -8. M queda segunda, como cualquier otra pareja.
   const rows = computeStandings(group(["M", "X", "Y"], [
     m("M", "X", [6, 0], [6, 0]),
     wo("M", "Y", "M"),
     m("X", "Y", [6, 4], [6, 4]),
   ]), {}, CLASICO);
-  assert.equal(order(rows)[2], "M", "M va último");
-  assert.equal(row(rows, "M").wo, true);
+  assert.deepEqual(order(rows), ["Y", "M", "X"]);
+  assert.equal(row(rows, "M").eliminated, false);
+});
+
+test("W.O.: si tiene más puntos que el resto, queda primero", () => {
+  const rows = computeStandings(group(["M", "X", "Y", "Z"], [
+    m("M", "X", [6, 0], [6, 0]),
+    m("M", "Y", [6, 0], [6, 0]),
+    wo("M", "Z", "M"),
+  ]), {}, CLASICO);
+  assert.equal(row(rows, "M").pts, 4);
+  assert.equal(order(rows)[0], "M");
 });
 
 test("W.O.: los partidos que jugó antes siguen valiendo para sus rivales", () => {
@@ -125,26 +137,46 @@ test("W.O.: los partidos que jugó antes siguen valiendo para sus rivales", () =
   assert.equal(m_.pj, 2, "M conserva todos sus resultados en la tabla");
 });
 
-test("W.O.: nunca queda primero aunque tenga más puntos que el resto", () => {
+test("dos W.O. de la misma pareja: se hunde sola al fondo, sin regla especial", () => {
+  const rows = computeStandings(group(["P", "A", "B"], [
+    wo("P", "A", "P"),
+    wo("P", "B", "P"),
+    m("A", "B", [6, 3], [6, 3]),
+  ]), {}, CLASICO);
+  const p = row(rows, "P");
+  assert.equal(order(rows)[2], "P");
+  assert.equal(p.wo, 2); assert.equal(p.eliminated, false);
+  assert.equal(p.gamesF - p.gamesC, -24);
+});
+
+test("pareja eliminada por el organizador: va al fondo aunque tenga más puntos", () => {
   const rows = computeStandings(group(["M", "X", "Y", "Z"], [
     m("M", "X", [6, 0], [6, 0]),
     m("M", "Y", [6, 0], [6, 0]),
-    wo("M", "Z", "M"),
-  ]), {}, CLASICO);
+    m("Z", "X", [6, 4], [6, 4]),
+  ]), { M: { eliminated: true } }, CLASICO);
   assert.equal(row(rows, "M").pts, 4);
+  assert.equal(row(rows, "M").eliminated, true);
   assert.equal(order(rows)[3], "M");
 });
 
-test("dos W.O. en el mismo grupo: las dos al fondo, ordenadas entre ellas por sets y games", () => {
+test("pareja eliminada: sus partidos jugados siguen valiendo para sus rivales", () => {
+  const rows = computeStandings(group(["M", "X", "Y"], [
+    m("X", "M", [6, 2], [6, 2]),
+  ]), { M: { eliminated: true } }, CLASICO);
+  const x = row(rows, "X");
+  assert.equal(x.pts, 2); assert.equal(x.gamesF, 12);
+  assert.equal(row(rows, "M").pj, 1);
+});
+
+test("dos eliminadas en el mismo grupo: las dos al fondo, ordenadas entre ellas por sets y games", () => {
   const rows = computeStandings(group(["A", "B", "P", "Q"], [
-    m("P", "A", [6, 1], [6, 1]), // P gana antes de dar W.O.
-    m("Q", "A", [1, 6], [1, 6]), // Q pierde antes de dar W.O.
-    wo("P", "B", "P"),
-    wo("Q", "B", "Q"),
+    m("P", "A", [6, 1], [6, 1]), // P gana antes de abandonar
+    m("Q", "A", [1, 6], [1, 6]), // Q pierde antes de abandonar
     m("A", "B", [6, 3], [6, 3]),
-  ]), {}, CLASICO);
+  ]), { P: { eliminated: true }, Q: { eliminated: true } }, CLASICO);
   const o = order(rows);
-  assert.deepEqual(o.slice(2), ["P", "Q"], "P (sets 2-2) va arriba de Q (sets 0-4)");
+  assert.deepEqual(o.slice(2), ["P", "Q"], "P (sets 2-0) va arriba de Q (sets 0-2)");
   assert.ok(o.slice(0, 2).includes("A") && o.slice(0, 2).includes("B"));
 });
 
@@ -158,15 +190,24 @@ test("grupo de 4 con cruces: manda el cruce de ganadores y perdedores", () => {
   assert.deepEqual(order(computeStandings(g, {}, CLASICO)), ["C", "A", "B", "D"]);
 });
 
-test("grupo de 4 con cruces y W.O.: el que da W.O. va al fondo aunque haya ganado un cruce", () => {
+test("grupo de 4 con cruces y W.O.: el que dio W.O. en el sorteo sigue y puede salir tercero", () => {
   const g = group(["A", "B", "C", "D"], [
     { ...m("A", "B", [6, 1], [6, 1]), stage: "r1" },
-    { ...wo("C", "D", "C"), stage: "r1" },                    // C no se presentó
+    { ...wo("C", "D", "C"), stage: "r1" },                    // C llegó tarde: W.O.
     { ...m("A", "D", [6, 2], [6, 2]), stage: "ganadores" },
-    { ...m("B", "C", [6, 0], [6, 0]), stage: "perdedores" },
+    { ...m("B", "C", [0, 6], [0, 6]), stage: "perdedores" },  // C gana el cruce de perdedores
   ], { format: "bracket4" });
-  const o = order(computeStandings(g, {}, CLASICO));
-  assert.deepEqual(o, ["A", "D", "B", "C"]);
+  assert.deepEqual(order(computeStandings(g, {}, CLASICO)), ["A", "D", "C", "B"]);
+});
+
+test("grupo de 4 con cruces y pareja eliminada: va al fondo aunque haya ganado el cruce", () => {
+  const g = group(["A", "B", "C", "D"], [
+    { ...m("A", "B", [6, 1], [6, 1]), stage: "r1" },
+    { ...m("C", "D", [6, 2], [6, 2]), stage: "r1" },
+    { ...m("A", "C", [2, 6], [2, 6]), stage: "ganadores" },   // C gana el cruce de ganadores
+    { ...m("B", "D", [6, 4], [6, 4]), stage: "perdedores" },
+  ], { format: "bracket4" });
+  assert.deepEqual(order(computeStandings(g, { C: { eliminated: true } }, CLASICO)), ["A", "B", "D", "C"]);
 });
 
 test("grupo de 4 todos contra todos: triple empate definido por games entre las empatadas", () => {
@@ -189,4 +230,51 @@ test("empate de a dos sin enfrentamiento jugado todavía: diferencia general de 
     m("B", "C", [6, 4], [4, 6], [10, 8]),
   ]), {}, CLASICO);
   assert.deepEqual(order(rows), ["A", "B", "C"]);
+});
+
+/* RET: ret("A", "B", "B", [6, 3], [2, 1]) → B se retiró con 6-3 2-1 */
+const ret = (pairA, pairB, retired, ...sets) => ({ ...m(pairA, pairB, ...sets), retired });
+
+test("RET: respeta lo jugado y completa el resto a favor del rival", () => {
+  // B ganó el primer set 3-6 y se retiró 1-2 abajo en el segundo: queda 3-6 6-1 10-0 para A
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "B", [3, 6], [2, 1])]), {}, CLASICO);
+  const a = row(rows, "A"), b = row(rows, "B");
+  assert.equal(a.pts, 2); assert.equal(b.pts, 0);
+  assert.deepEqual([a.setsF, a.setsC], [2, 1]);
+  assert.deepEqual([a.gamesF, a.gamesC], [3 + 6 + 1, 6 + 1], "el super tie-break vale un game");
+});
+
+test("RET: el set cortado lo gana el rival 7-5 si el que se retira tenía 5", () => {
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "A", [5, 4])]), {}, CLASICO);
+  const b = row(rows, "B");
+  assert.deepEqual([b.setsF, b.setsC, b.gamesF, b.gamesC], [2, 0, 7 + 6, 5]);
+});
+
+test("RET en set único: el rival llega a los games del set", () => {
+  const rows = computeStandings(group(["A", "B"], [ret("A", "B", "B", [2, 3])]), {}, AMERICANO_7);
+  const a = row(rows, "A");
+  assert.deepEqual([a.setsF, a.setsC, a.gamesF, a.gamesC], [1, 0, 7, 3]);
+});
+
+test("RET: la pareja que se retira queda eliminada y va al fondo", () => {
+  const rows = computeStandings(group(["M", "X", "Y"], [
+    m("M", "X", [6, 0], [6, 0]),
+    m("M", "Y", [6, 0], [6, 0]),
+    ret("X", "Y", "X", [6, 2], [1, 1]),
+  ]), {}, CLASICO);
+  const x = row(rows, "X");
+  assert.equal(x.ret, true); assert.equal(x.eliminated, true);
+  assert.deepEqual(order(rows), ["M", "Y", "X"]);
+});
+
+test("grupo de 4 con cruces: si se juega antes el de perdedores, las del de ganadores siguen arriba", () => {
+  const g = group(["A", "B", "C", "D"], [
+    { ...m("A", "B", [6, 1], [6, 1]), stage: "r1" },
+    { ...m("C", "D", [6, 2], [6, 2]), stage: "r1" },
+    { ...m("A", "C"), stage: "ganadores" },                  // todavía sin jugar
+    { ...m("B", "D", [6, 4], [6, 4]), stage: "perdedores" },  // B gana el de perdedores
+  ], { format: "bracket4" });
+  const o = order(computeStandings(g, {}, CLASICO));
+  assert.deepEqual(o.slice(2), ["B", "D"], "3° y 4° ya definidos");
+  assert.deepEqual([...o.slice(0, 2)].sort(), ["A", "C"], "A y C juegan por el 1° y el 2°");
 });

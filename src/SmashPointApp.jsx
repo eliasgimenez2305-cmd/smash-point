@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
+import { findNameDuplicates, splitPair } from "./names.js";
+import { mergeTournament } from "./merge.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -35,6 +37,61 @@ async function supabaseSignIn(email, password) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error_description || data.msg || "Usuario o contraseña incorrectos.");
   return data; // { access_token, user: { id, email, ... }, ... }
+}
+
+/* Renueva la sesión con el refresh token (el access token de Supabase vence a la hora) */
+async function supabaseRefresh(refreshToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error_description || data.msg || "La sesión venció.");
+    err.expired = res.status === 400 || res.status === 401; // token inválido o revocado (no es falta de conexión)
+    throw err;
+  }
+  return data; // { access_token, refresh_token, expires_in, user }
+}
+
+/* Cada refresh token sirve una sola vez (Supabase lo cambia por uno nuevo). Para no gastarlo dos
+   veces, los pedidos simultáneos con el mismo token comparten la respuesta (pasa en desarrollo, donde
+   React arranca la app dos veces). Si falla porque ya se usó, se prueba con el último guardado en el
+   navegador (otra pestaña puede haberlo renovado). */
+const refreshInFlight = new Map();
+function supabaseRefreshOnce(refreshToken) {
+  if (!refreshInFlight.has(refreshToken)) {
+    refreshInFlight.set(refreshToken, supabaseRefresh(refreshToken));
+    setTimeout(() => refreshInFlight.delete(refreshToken), 30000);
+  }
+  return refreshInFlight.get(refreshToken);
+}
+async function renewWithLatestToken(refreshToken) {
+  try {
+    return await supabaseRefreshOnce(refreshToken);
+  } catch (err) {
+    const latest = readStoredAuth()?.refreshToken;
+    if (err.expired && latest && latest !== refreshToken) return supabaseRefreshOnce(latest);
+    throw err;
+  }
+}
+
+/* Lo que queda guardado en este navegador para no perder la sesión al recargar: el refresh token y
+   la pantalla del panel en la que estaba. Cerrar sesión lo borra. */
+const AUTH_STORAGE_KEY = "sp:auth";
+function readStoredAuth() {
+  try { return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null"); } catch { return null; }
+}
+function writeStoredAuth(value) {
+  try {
+    if (value) localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
+    else localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {}
+}
+/* Datos de sesión que salen de una respuesta de Supabase (login o renovación) */
+function authFields(auth) {
+  return { accessToken: auth.access_token, refreshToken: auth.refresh_token, expiresAt: Date.now() + (auth.expires_in || 3600) * 1000 };
 }
 
 async function supabaseRequestPasswordReset(email) {
@@ -404,6 +461,71 @@ function formatDateShort(dateStr) {
   return `${WEEKDAY_LABEL[d.getDay()]} ${d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`;
 }
 
+const WEEKDAY_LONG = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+/* "Viernes 30/10", para los títulos de cada día en la página de un evento */
+function formatDateLong(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return `${WEEKDAY_LONG[d.getDay()]} ${d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`;
+}
+
+/* "14:00" -> "14 hs", "17:30" -> "17:30 hs" (como en los flyers) */
+function formatHour(time) {
+  if (!time) return "";
+  return `${time.endsWith(":00") ? String(Number(time.slice(0, 2))) : time} hs`;
+}
+
+/* Hora de inicio de un torneo: la que cargó el organizador (torneos de un evento) o, en un
+   Americano, la de arranque de su único día. null si no tiene. */
+function tournamentStartTime(t) {
+  if (t.startTime) return t.startTime;
+  if (tournamentType(t) === "americano") return t.playDates?.[0]?.from || null;
+  return null;
+}
+
+/* "Vie 30/10 · 14 hs" (o solo la fecha si no tiene hora) */
+function tournamentWhenLabel(t) {
+  const time = tournamentStartTime(t);
+  return `${formatDateShort(t.date)}${time ? ` · ${formatHour(time)}` : ""}`;
+}
+
+/* Orden de los torneos de un evento: por día y después por hora de inicio */
+function compareByStart(a, b) {
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  return (tournamentStartTime(a) || "") < (tournamentStartTime(b) || "") ? -1 : (tournamentStartTime(a) || "") > (tournamentStartTime(b) || "") ? 1 : 0;
+}
+
+/* Nombre de una cancha para mostrar. Un Clásico con varias sedes (t.venues: [{ id, name, courts }])
+   numera sus canchas de corrido (sede 1: canchas 1 a 3, sede 2: 4 y 5...) para armar los horarios,
+   y acá se traduce: la 4 es "Club Norte · Cancha 1". Sin sedes: "Cancha 4". */
+function courtName(t, court, short = false) {
+  const label = short ? "C" : "Cancha ";
+  let offset = 0;
+  for (const v of t?.venues || []) {
+    if (court <= offset + v.courts) return `${v.name} · ${label}${court - offset}`;
+    offset += v.courts;
+  }
+  return `${label}${court}`;
+}
+
+/* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
+   cancha) puedan nombrar las canchas con su sede sin recibir el torneo entero */
+const CourtNamesContext = React.createContext(null);
+function useCourtName() {
+  const t = React.useContext(CourtNamesContext);
+  return (court) => courtName(t, court);
+}
+
+/* Cambia día, hora de inicio y canchas de un torneo. En el Americano y el Clásico, el día y la
+   hora son también los de la grilla de horarios (su primer día de juego). */
+function withTournamentStart(t, { date, startTime, courtsCount }) {
+  const next = { ...t, date, startTime: startTime || null, courtsCount };
+  if (tournamentType(t) !== "super8" && startTime) {
+    const [first, ...rest] = t.playDates || [];
+    next.playDates = [{ date, from: startTime, to: first?.to || "23:59" }, ...rest.filter((d) => d.date !== date)];
+  }
+  return next;
+}
+
 function seedTournaments(organizerId) {
   const playDates = [
     { date: "2026-10-01", from: "18:00", to: "23:00" },
@@ -506,6 +628,29 @@ const SUPER8_SIZE = 8;
 
 function isSuper8(category) {
   return category?.format === "super8_individual" || category?.format === "super8_parejas";
+}
+
+/* Turnos de juego de un Súper 8 con varias canchas: los partidos de una misma ronda pueden ir a
+   la vez (nadie juega dos partidos en la misma ronda), así que cada ronda se reparte en turnos de
+   a tantos partidos como canchas haya. En el Individual entran hasta 2 a la vez (8 jugadores = 2
+   partidos por ronda) y por Parejas hasta 4. Con 1 cancha queda un partido por turno, uno atrás
+   del otro. Devuelve [{ round, matches: [{ m, court }] }]. */
+function super8Turns(matches, courtsCount) {
+  const rounds = [];
+  matches.forEach((m, i) => {
+    const r = m.round || i + 1;
+    let round = rounds.find((x) => x.round === r);
+    if (!round) { round = { round: r, matches: [] }; rounds.push(round); }
+    round.matches.push(m);
+  });
+  const turns = [];
+  rounds.forEach(({ round, matches: list }) => {
+    const perTurn = Math.max(1, Math.min(courtsCount || 1, list.length));
+    for (let i = 0; i < list.length; i += perTurn) {
+      turns.push({ round, matches: list.slice(i, i + perTurn).map((m, j) => ({ m, court: j + 1 })) });
+    }
+  });
+  return turns;
 }
 
 /* Round robin por el método del círculo: el primero queda fijo y el resto rota un lugar por ronda.
@@ -633,6 +778,7 @@ function super8IndividualStandingsGroup(category, group) {
       pairA: tA.playerIds[i],
       pairB: tB.playerIds[i],
       walkover: m.walkover ? (m.walkover === m.pairA ? tA.playerIds[i] : tB.playerIds[i]) : null,
+      retired: m.retired ? (m.retired === m.pairA ? tA.playerIds[i] : tB.playerIds[i]) : null,
     }));
   });
   return { ...group, matches };
@@ -748,8 +894,9 @@ function seedKnockoutRound1(entries, compareSamePlace) {
 function buildKnockoutSeeding(groups, pairsById, format) {
   const entries = groups.flatMap((g, gi) => {
     const table = computeStandings(g, pairsById, format);
-    // La pareja que dio W.O. queda eliminada: no clasifica aunque el grupo pase a 3 de 4
-    return table.filter((row) => !row.wo).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
+    // La pareja eliminada por el organizador no clasifica aunque el grupo pase a 3 de 4 (un W.O.
+    // solo pierde ese partido: si le dan los números, clasifica)
+    return table.filter((row) => !row.eliminated).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
   });
   const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC];
   const compareMerit = (a, b) => {
@@ -861,6 +1008,47 @@ function propagateBracket(rounds) {
   return next;
 }
 
+/* Parejas fuera del torneo en una categoría: las que eliminó el organizador y las que se
+   retiraron (RET) en algún partido */
+function categoryOutPairIds(category) {
+  const out = new Set((category.pairs || []).filter((p) => p.eliminated).map((p) => p.id));
+  [...(category.groups || []).flatMap((g) => g.matches), ...(category.bracket || []).flat()].forEach((m) => {
+    if (m.retired) out.add(m.retired);
+  });
+  return out;
+}
+
+/* Los partidos pendientes de una pareja que quedó fuera pasan solos a W.O. a favor del rival
+   (marcados con autoWalkover). Si se la reincorpora o se deshace el RET, esos W.O. automáticos se
+   sacan. Se repite hasta que no cambie nada, porque un W.O. puede completar un cruce de un grupo
+   de 4 o una ronda de la llave donde esa pareja vuelve a aparecer. En el Súper 8 no se aplica. */
+function withForfeits(category) {
+  if (isSuper8(category)) return category;
+  const out = categoryOutPairIds(category);
+  const fix = (m) => {
+    if (m.autoWalkover && !out.has(m.walkover)) return { ...m, walkover: null, autoWalkover: false };
+    if (m.pairA && m.pairB && !matchIsPlayed(m)) {
+      const gone = out.has(m.pairA) ? m.pairA : out.has(m.pairB) ? m.pairB : null;
+      if (gone) return { ...m, walkover: gone, autoWalkover: true, sets: [], liveStatus: null };
+    }
+    return m;
+  };
+  let current = category;
+  for (let pass = 0; pass < 6; pass++) {
+    const next = {
+      ...current,
+      groups: (current.groups || []).map((g) => {
+        const matches = g.matches.map(fix);
+        return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches) : matches };
+      }),
+      bracket: current.bracket ? propagateBracket(current.bracket.map((round) => round.map(fix))) : current.bracket,
+    };
+    if (JSON.stringify(next) === JSON.stringify(current)) return current;
+    current = next;
+  }
+  return current;
+}
+
 function formatSummary(format) {
   const f = format || DEFAULT_MATCH_FORMAT;
   if (isSingleSetFormat(f)) {
@@ -902,7 +1090,7 @@ function collectScheduleableMatches(tournament) {
             key: `${c.id}:g:${g.id}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "group", groupId: g.id }, matchId: m.id, label: m.round ? `${g.name} · Ronda ${m.round}` : g.name,
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
-            walkover: m.walkover || null, liveStatus: m.liveStatus || null,
+            walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null,
             stage: m.stage || null, groupFormat: g.format || "roundrobin",
             placeholder: isPending4 ? (m.stage === "ganadores" ? "Ganador Partido 1 vs Ganador Partido 2" : "Perdedor Partido 1 vs Perdedor Partido 2") : null,
           });
@@ -930,7 +1118,7 @@ function collectScheduleableMatches(tournament) {
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri),
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
-            walkover: m.walkover || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
+            walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
             placeholder: placeholderText,
           });
         }
@@ -1066,6 +1254,21 @@ function collectBracketScheduleTiers(tournament) {
 
 function scheduleEndPoint(schedule, duration) {
   return { date: schedule.date, minutes: timeToMinutes(schedule.time) + duration };
+}
+
+/* Día y hora de inicio propios de una categoría (torneo Clásico): { date, time } guardado en
+   category.start. Como "piso" para armar horarios: { date, minutes }, o null si no tiene. */
+function categoryStartPoint(category) {
+  const s = category?.start;
+  if (!s?.date) return null;
+  return { date: s.date, minutes: s.time ? timeToMinutes(s.time) : 0 };
+}
+
+/* "Sáb 24/10 · 15 hs" de una categoría con inicio propio, o null */
+function categoryStartLabel(category) {
+  const s = category?.start;
+  if (!s?.date) return null;
+  return `${formatDateShort(s.date)}${s.time ? ` · ${formatHour(s.time)}` : ""}`;
 }
 
 function laterPoint(a, b) {
@@ -1373,24 +1576,20 @@ function autoFormGroups(pairs, playDates) {
   });
   return { groups: formed, warnings };
 }
-/* Separa los nombres de jugadores de una pareja: "Gómez / Ibáñez" -> ["gómez", "ibáñez"] */
-function splitPlayers(pairName) {
-  return pairName.split("/").map((s) => s.trim().toLowerCase()).filter(Boolean);
+/* Parejas ya anotadas en el torneo (todas sus categorías), para el aviso de nombres repetidos */
+function tournamentPairEntries(tournament) {
+  return (tournament.categories || []).flatMap((c) => c.pairs.map((p) => ({ name: p.name, where: c.name, kind: "anotada" })));
 }
 
-/* Busca si algún jugador de esta pareja ya está anotado en otra categoría del mismo torneo.
-   Devuelve el nombre de esa categoría, o null si no hay conflicto. */
-function findPlayerCategoryConflict(pairName, tournament, currentCategoryId) {
-  const players = splitPlayers(pairName);
-  if (players.length === 0) return null;
-  for (const c of tournament.categories) {
-    if (c.id === currentCategoryId) continue;
-    for (const p of c.pairs) {
-      const otherPlayers = splitPlayers(p.name);
-      if (players.some((pl) => otherPlayers.includes(pl))) return c.name;
-    }
-  }
-  return null;
+/* Texto del aviso de nombres repetidos (ver findNameDuplicates). Muestra hasta 3. */
+function duplicateNamesText(found) {
+  if (found.length === 0) return null;
+  const lines = found.slice(0, 3).map((f) => {
+    const pending = f.kind === "pendiente";
+    if (f.match === "igual") return pending ? `"${f.player}" tiene otra inscripción pendiente en ${f.where}` : `"${f.player}" ya está anotado en ${f.where}`;
+    return `"${f.player}" se parece a "${f.other}" (${pending ? "inscripción pendiente" : "anotado"} en ${f.where})`;
+  });
+  return `Ojo, puede estar repetido: ${lines.join(" · ")}${found.length > 3 ? ` y ${found.length - 3} más` : ""}.`;
 }
 
 /* ---------- Circuitos anuales (torneos "fecha" que suman puntos individuales) ---------- */
@@ -1514,7 +1713,8 @@ function autoSchedule(tournament) {
   // para esa fase. Los partidos de la llave final los agenda siempre el organizador a mano.
   toSchedule.forEach((m) => {
     const groupKey = `${m.categoryId}:${m.location.groupId}`;
-    let floor = null;
+    // Ninguna categoría juega antes de su día y hora de inicio (si el organizador cargó uno)
+    let floor = categoryStartPoint(categoriesById[m.categoryId]);
     if (m.groupFormat === "bracket4" && m.stage !== "r1") {
       (groupR1Schedules[groupKey] || []).forEach((s) => { floor = laterPoint(floor, scheduleEndPoint(s, duration)); });
     }
@@ -1719,7 +1919,11 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
   const availabilityOk = !askAvailability || (chosenDays.length > 0 && chosenDays.every((d) => d.from && d.to && d.from < d.to) && sameDayBracket !== null);
 
   const category = categories.find((c) => c.id === categoryId);
-  const individual = category?.format === "super8_individual";
+  // Con varias categorías arranca sin ninguna elegida: el formato sale de las categorías del torneo
+  // (en un Súper 8 Individual son todas individuales), así no pide dos jugadores mientras tanto
+  const individual = category
+    ? category.format === "super8_individual"
+    : categories.length > 0 && categories.every((c) => c.format === "super8_individual");
   const full = category ? categorySpotsLeft(category) === 0 : false;
   const normalizedPhone = normalizeArPhone(phone);
   const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
@@ -1786,7 +1990,8 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
         <h2 className="text-xl mb-1" style={F.display}>{tournament.name.toUpperCase()}</h2>
         <div className="flex items-center gap-2 flex-wrap mb-5">
           <TournamentTypeTag tournament={tournament} />
-          <span className="text-xs text-teal-300">{new Date(tournament.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "long" })}</span>
+          {/* Día y hora en que se juega, para que el jugador sepa cuándo le toca antes de anotarse */}
+          <span className="text-sm font-semibold text-lime-400">{formatDateLong(tournament.date)}{tournamentStartTime(tournament) ? ` · ${formatHour(tournamentStartTime(tournament))}` : ""}</span>
         </div>
 
         {done ? (
@@ -1803,11 +2008,14 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
                 <label className={label} htmlFor="insc-cat">Categoría</label>
                 <select id="insc-cat" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={input} style={inputStyle} required>
                   <option value="">Elegí la categoría…</option>
-                  {categories.map((c) => <option key={c.id} value={c.id} disabled={categorySpotsLeft(c) === 0}>{c.name}{spotsText(c)}</option>)}
+                  {categories.map((c) => <option key={c.id} value={c.id} disabled={categorySpotsLeft(c) === 0}>{c.name}{categoryStartLabel(c) ? ` · ${categoryStartLabel(c)}` : ""}{spotsText(c)}</option>)}
                 </select>
               </div>
             ) : category && (
               <p className="text-sm">Categoría: <span className="font-semibold text-lime-400">{category.name}</span><span className="text-teal-400">{spotsText(category)}</span></p>
+            )}
+            {categoryStartLabel(category) && (
+              <p className="text-sm -mt-2">Empieza: <span className="font-semibold text-lime-400">{categoryStartLabel(category)}</span></p>
             )}
 
             <div>
@@ -1992,6 +2200,10 @@ function MatchResultLabel({ match, winnerIsA, format }) {
   if (match && match.walkover) {
     return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.walkover === match.pairA ? false : true} /> · <span className="text-amber-400 font-semibold">WO</span></span>;
   }
+  // Retiro: el marcador completado a favor del rival, con la marca RET ("6-3 · 6-1 · RET")
+  if (match && match.retired) {
+    return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.retired === match.pairA ? false : true} /> · <span className="text-red-400 font-semibold">RET</span></span>;
+  }
   return <SetsSummary sets={match.sets} winnerIsA={winnerIsA} />;
 }
 
@@ -2027,14 +2239,14 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
   return (
     <div className="rounded-lg border overflow-hidden" style={{ borderColor: accentColor + "40" }}>
       {table.map((row, i) => {
-        // La pareja que dio W.O. queda eliminada: nunca se marca como clasificada
-        const qualifies = i < highlightCount && !row.wo;
+        // La pareja eliminada por el organizador nunca se marca como clasificada
+        const qualifies = i < highlightCount && !row.eliminated;
         const ds = row.setsF - row.setsC;
         const dg = row.gamesF - row.gamesC;
         return (
           <div
             key={row.pairId}
-            className={`px-3 py-2 ${row.wo ? "opacity-60" : ""}`}
+            className={`px-3 py-2 ${row.eliminated ? "opacity-60" : ""}`}
             style={{
               backgroundColor: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.03)",
               borderLeft: qualifies ? `3px solid ${accentColor}` : "3px solid transparent",
@@ -2049,11 +2261,11 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
                 >
                   {i + 1}
                 </span>
-                <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.wo ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
+                <span className={`text-sm ${qualifies ? "font-semibold" : ""} ${row.eliminated ? "line-through decoration-red-400/60" : ""}`} style={qualifies ? { color: accentColor } : undefined}>
                   <PairName id={row.pairId} pairsById={pairsById} />
                 </span>
-                {row.wo && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>W.O. · ELIMINADA</span>}
-                {row.byDraw && !row.wo && <span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
+                {row.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>{row.ret ? "RET · ELIMINADA" : "ELIMINADA"}</span>}
+                {row.byDraw && !row.eliminated &&<span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
               </div>
               <span className="text-sm font-semibold shrink-0" style={{ color: accentColor }}>{row.pts} pts</span>
             </div>
@@ -2091,10 +2303,11 @@ function StandingsLegend() {
 
 /* Muestra día, hora y cancha de un partido si ya tiene horario asignado */
 function ScheduleLabel({ schedule }) {
+  const courtLabel = useCourtName();
   if (!schedule) return null;
   return (
     <span className="text-[11px] text-teal-500 whitespace-nowrap" style={F.body}>
-      {formatDateShort(schedule.date)} · {schedule.time}hs · Cancha {schedule.court}
+      {formatDateShort(schedule.date)} · {schedule.time}hs · {courtLabel(schedule.court)}
     </span>
   );
 }
@@ -2111,7 +2324,7 @@ function groupMatchStageLabel(group, match) {
 }
 
 /* Editor de resultado set por set para un partido, según el formato configurado del torneo */
-function MatchSetsEditor({ sets, format, onSetScore }) {
+function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
   const total = format?.setsToPlay ?? DEFAULT_MATCH_FORMAT.setsToPlay;
   const rows = Array.from({ length: total }, (_, i) => (sets && sets[i]) || { a: null, b: null });
   // En los formatos de set único (Americano, Súper 8) se avisa si el set cargado no puede ser un
@@ -2119,9 +2332,10 @@ function MatchSetsEditor({ sets, format, onSetScore }) {
   const singleSet = isSingleSetFormat(format);
   const { a: setA, b: setB } = rows[0];
   const singleSetLoaded = singleSet && setA != null && setB != null;
-  const singleSetInvalid = singleSetLoaded && !singleSetIsValid(setA, setB, format.gamesPerSet);
+  // Con retiro (partial) el set puede haber quedado cortado: no se avisa como resultado inválido
+  const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet);
   const tieAt = format?.gamesPerSet - 1;
-  const singleSetNote = !singleSetLoaded ? null
+  const singleSetNote = !singleSetLoaded || partial ? null
     : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}).`
     : Math.min(setA, setB) === tieAt ? "Definido en tie break" : null;
   return (
@@ -2532,7 +2746,9 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
   const finalNames = pending && !categoryNames.some((c) => c.toLowerCase() === pending.toLowerCase()) ? [...categoryNames, pending] : categoryNames;
   const create = () => {
     if (!step2Ready || finalNames.length === 0) return;
-    const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] } : null;
+    // Súper 8: arranca con una cancha (un partido atrás del otro); se cambia después en sus partidos
+    const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] }
+      : super8 ? { courtsCount: 1 } : null;
     onCreate({
       name: name.trim(), date, circuitId: config.type === "clasico" ? circuitId || null : null, config, schedule,
       categories: finalNames.map((n) => ({ name: n, cupo: super8 ? null : parseCupo(cupos[n] ?? "") })),
@@ -2662,9 +2878,13 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
   const [newFrom, setNewFrom] = useState("09:00");
   const [newTo, setNewTo] = useState("22:00");
   const [courtsText, setCourtsText] = useState(String(tournament.courtsCount ?? 4));
+  // Las sedes también cambian la cantidad de canchas: el campo sigue al valor guardado
+  useEffect(() => { setCourtsText(String(tournament.courtsCount ?? 4)); }, [tournament.courtsCount]);
   const [durationText, setDurationText] = useState(String(tournament.matchDurationMinutes ?? 90));
   const dates = tournament.playDates || [];
   const singleDay = tournamentType(tournament) === "americano"; // el Americano se juega en un solo día
+  const classic = tournamentType(tournament) === "clasico";
+  const venues = tournament.venues || [];
 
   const addDate = () => {
     if (!newDate || dates.some((d) => d.date === newDate)) return;
@@ -2681,22 +2901,29 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
     <div className="border border-teal-800 rounded-lg p-4 mb-6">
       <p className="text-sm font-semibold mb-3" style={F.body}>{singleDay ? "Canchas y horario del día" : "Canchas y fechas del torneo"}</p>
       <div className="flex flex-wrap gap-4 items-end mb-4">
-        <div>
-          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cantidad de canchas</label>
-          <input
-            type="number" min="1" inputMode="numeric"
-            value={courtsText}
-            onChange={(e) => setCourtsText(e.target.value)}
-            onBlur={() => {
-              const n = Number(courtsText);
-              const valid = courtsText.trim() !== "" && n >= 1;
-              const final = valid ? n : (tournament.courtsCount ?? 4);
-              setCourtsText(String(final));
-              if (final !== tournament.courtsCount) onChange({ ...tournament, courtsCount: final });
-            }}
-            className="w-20 px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-          />
-        </div>
+        {venues.length > 0 ? (
+          <div>
+            <p className="block text-xs text-teal-400 mb-1" style={F.body}>Cantidad de canchas</p>
+            <p className="px-3 py-2 text-sm font-semibold" style={F.body}>{tournament.courtsCount} <span className="text-xs text-teal-500 font-normal">(suma de las sedes)</span></p>
+          </div>
+        ) : (
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cantidad de canchas</label>
+            <input
+              type="number" min="1" inputMode="numeric"
+              value={courtsText}
+              onChange={(e) => setCourtsText(e.target.value)}
+              onBlur={() => {
+                const n = Number(courtsText);
+                const valid = courtsText.trim() !== "" && n >= 1;
+                const final = valid ? n : (tournament.courtsCount ?? 4);
+                setCourtsText(String(final));
+                if (final !== tournament.courtsCount) onChange({ ...tournament, courtsCount: final });
+              }}
+              className="w-20 px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+            />
+          </div>
+        )}
         <div>
           <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Tiempo entre partidos (min)" : "Duración de partido (min)"}</label>
           <input
@@ -2714,6 +2941,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
           />
         </div>
       </div>
+      {classic && <VenuesField tournament={tournament} onChange={onChange} />}
       <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Día y horario en que se juega" : "Fechas y horario en que se juega cada una"}</label>
       <div className="space-y-2 mb-4">
         {dates.map((d) => (
@@ -2755,6 +2983,86 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
           Agregar fecha
         </button>
       </div>}
+      {tournamentType(tournament) === "clasico" && dates.length > 0 && tournament.categories.length > 0 && (
+        <CategoryStartsEditor tournament={tournament} onChange={onChange} />
+      )}
+    </div>
+  );
+}
+
+/* Clásico: varias sedes, cada una con sus canchas. La cantidad de canchas del torneo pasa a ser la
+   suma, numeradas de corrido para armar los horarios, y en pantalla se muestran con su sede (ver
+   courtName). Sin sedes, el torneo usa solo "Cantidad de canchas", como siempre. */
+function VenuesField({ tournament, onChange }) {
+  const venues = tournament.venues || [];
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const save = (next) => {
+    const clean = next.map((v) => ({ ...v, courts: Math.max(1, Number(v.courts) || 1) }));
+    onChange({ ...tournament, venues: clean.length > 0 ? clean : null, courtsCount: clean.length > 0 ? clean.reduce((s, v) => s + v.courts, 0) : tournament.courtsCount });
+  };
+  const update = (id, patch) => save(venues.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+  const start = () => save([{ id: uid(), name: "Sede 1", courts: tournament.courtsCount || 1 }, { id: uid(), name: "Sede 2", courts: 2 }]);
+  const scheduled = (tournament.categories || []).some((c) => (c.groups || []).some((g) => g.matches.some((m) => m.schedule)) || (c.bracket || []).some((r) => r.some((m) => m.schedule)));
+
+  if (venues.length === 0) {
+    return (
+      <button type="button" onClick={start} className="text-xs text-teal-400 underline mb-4" style={F.body}>
+        ¿Se juega en más de una sede? Cargar sedes
+      </button>
+    );
+  }
+  return (
+    <div className="mb-4">
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Sedes y sus canchas</label>
+      <div className="space-y-2">
+        {venues.map((v) => (
+          <div key={v.id} className="flex items-center gap-2 flex-wrap text-sm" style={F.body}>
+            <input value={v.name} onChange={(e) => update(v.id, { name: e.target.value })} placeholder="Nombre de la sede" className="flex-1 min-w-[9rem] px-2 py-1.5 rounded border text-sm" style={input} />
+            <label className="text-xs text-teal-400 flex items-center gap-1">
+              Canchas
+              <input type="number" min="1" inputMode="numeric" value={v.courts} onChange={(e) => update(v.id, { courts: e.target.value })} className="w-16 px-2 py-1.5 rounded border text-sm" style={input} />
+            </label>
+            <button type="button" onClick={() => save(venues.filter((x) => x.id !== v.id))} className="text-red-400 text-xs">Quitar ✕</button>
+          </div>
+        ))}
+      </div>
+      <button type="button" onClick={() => save([...venues, { id: uid(), name: `Sede ${venues.length + 1}`, courts: 1 }])} className="mt-2 text-xs font-semibold text-lime-400">+ Agregar sede</button>
+      {scheduled && <p className="text-[11px] text-amber-400 mt-1" style={F.body}>Si cambiás sedes o canchas con horarios ya armados, tocá "Rearmar horarios" para reubicar los partidos.</p>}
+    </div>
+  );
+}
+
+/* Clásico: día y hora de inicio de cada categoría. Se ven en la inscripción y en la página del
+   torneo, y "Generar horarios" no le asigna partidos a una categoría antes de ese momento. */
+function CategoryStartsEditor({ tournament, onChange }) {
+  const dates = tournament.playDates || [];
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const setStart = (categoryId, patch) => {
+    onChange({
+      ...tournament,
+      categories: tournament.categories.map((c) => {
+        if (c.id !== categoryId) return c;
+        const start = { ...(c.start || {}), ...patch };
+        return { ...c, start: start.date ? start : null };
+      }),
+    });
+  };
+  return (
+    <div className="border-t border-teal-800 pt-3 mt-4">
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría (opcional)</label>
+      <p className="text-[11px] text-teal-600 mb-2" style={F.body}>Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.</p>
+      <div className="space-y-2">
+        {tournament.categories.map((c) => (
+          <div key={c.id} className="flex items-center gap-2 flex-wrap text-sm" style={F.body}>
+            <span className="flex-1 min-w-[7rem] text-teal-200">{c.name}</span>
+            <select value={c.start?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm" style={input}>
+              <option value="">Sin día fijo</option>
+              {dates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+            </select>
+            <input type="time" lang="es-AR" value={c.start?.time || ""} disabled={!c.start?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2820,6 +3128,7 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
    a una celda libre de la planilla. */
 function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive, draggable, onDragStart }) {
   const s = m.schedule;
+  const courtLabel = useCourtName();
   const hasResult = matchIsPlayed(m);
   const w = hasResult ? matchWinnerId(m) : null;
   const winnerIsA = w == null ? null : w === m.pairA;
@@ -2882,7 +3191,7 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
               onChange={(e) => onEdit({ ...s, court: Number(e.target.value) })}
               className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
             >
-              {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => <option key={c} value={c}>Cancha {c}</option>)}
+              {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => <option key={c} value={c}>{courtLabel(c)}</option>)}
             </select>
             <button type="button" onClick={onClear} className="text-xs text-red-400">Quitar</button>
           </>
@@ -2993,13 +3302,13 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
             <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cancha</label>
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
               {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => (
-                <ChoiceCard key={c} compact selected={court === c} onClick={() => setCourt(c)} title={`Cancha ${c}`} description={occupantAt(c) ? "Ocupada" : "Libre"} />
+                <ChoiceCard key={c} compact selected={court === c} onClick={() => setCourt(c)} title={courtName(tournament, c)} description={occupantAt(c) ? "Ocupada" : "Libre"} />
               ))}
             </div>
           </div>
           {occupant && !same && (
             <p className="text-xs text-amber-400" style={F.body}>
-              Ahí está {describe(occupant)}: {m.schedule ? `se intercambian de lugar (ese pasa a las ${m.schedule.time}hs, Cancha ${m.schedule.court}).` : "queda sin horario."}
+              Ahí está {describe(occupant)}: {m.schedule ? `se intercambian de lugar (ese pasa a las ${m.schedule.time}hs, ${courtName(tournament, m.schedule.court)}).` : "queda sin horario."}
             </p>
           )}
           <div className="flex gap-2 flex-wrap pt-1">
@@ -3016,8 +3325,30 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
   );
 }
 
+/* Botones de W.O. y retiro (RET) de un partido, con su "Deshacer". El RET se carga después del
+   marcador hasta donde se jugó: el resto se completa solo a favor del rival y la pareja que se
+   retira queda eliminada. */
+function MatchOutcomeButtons({ m, nameA, nameB, onWalkover, onRetired, className = "" }) {
+  return (
+    <div className={`flex gap-x-3 gap-y-1 flex-wrap ${className}`} style={F.body}>
+      {m.walkover ? (
+        <button type="button" onClick={() => onWalkover(null)} className="text-teal-400 underline">Deshacer WO</button>
+      ) : m.retired ? (
+        <button type="button" onClick={() => onRetired(null)} className="text-teal-400 underline">Deshacer RET</button>
+      ) : (
+        <>
+          <button type="button" onClick={() => onWalkover(m.pairA)} className="text-amber-400 underline">WO {nameA}</button>
+          <button type="button" onClick={() => onWalkover(m.pairB)} className="text-amber-400 underline">WO {nameB}</button>
+          <button type="button" onClick={() => onRetired(m.pairA)} className="text-red-400 underline" title="Retiro por lesión: cargá primero el marcador hasta donde se jugó">RET {nameA}</button>
+          <button type="button" onClick={() => onRetired(m.pairB)} className="text-red-400 underline" title="Retiro por lesión: cargá primero el marcador hasta donde se jugó">RET {nameB}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* Ventanita para cargar el resultado de un partido desde la grilla de horarios */
-function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onClose }) {
+function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onRetired, onClose }) {
   const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
   return (
     <Modal title="Resultado" onClose={onClose}>
@@ -3026,18 +3357,12 @@ function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onClos
       {m.walkover ? (
         <p className="text-sm text-amber-400 mb-3" style={F.body}>WO: no se presentó {m.walkover === m.pairA ? nameA : nameB}.</p>
       ) : (
-        <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} /></div>
+        <>
+          {m.retired && <p className="text-sm text-red-400 mb-2" style={F.body}>RET: se retiró {m.retired === m.pairA ? nameA : nameB}. El resto del partido se completa a favor del rival.</p>}
+          <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} partial={!!m.retired} /></div>
+        </>
       )}
-      <div className="flex gap-3 flex-wrap text-xs mb-5" style={F.body}>
-        {m.walkover ? (
-          <button type="button" onClick={() => onWalkover(null)} className="text-teal-400 underline">Deshacer WO</button>
-        ) : (
-          <>
-            <button type="button" onClick={() => onWalkover(m.pairA)} className="text-amber-400 underline">WO {nameA}</button>
-            <button type="button" onClick={() => onWalkover(m.pairB)} className="text-amber-400 underline">WO {nameB}</button>
-          </>
-        )}
-      </div>
+      <MatchOutcomeButtons m={m} nameA={nameA} nameB={nameB} onWalkover={onWalkover} onRetired={onRetired} className="text-xs mb-5" />
       <button type="button" onClick={onClose} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>Listo</button>
     </Modal>
   );
@@ -3068,7 +3393,8 @@ function useMatchActions(tournament, update) {
           pairsById={pairsById}
           format={tournament.matchFormat}
           onSetScore={(setIndex, side, value) => change(resultMatch, (x) => ({ ...x, sets: withSetScore(x.sets, setIndex, side, value) }))}
-          onWalkover={(pairId) => change(resultMatch, (x) => ({ ...x, walkover: pairId, sets: pairId ? [] : x.sets, liveStatus: null }))}
+          onWalkover={(pairId) => change(resultMatch, (x) => ({ ...x, walkover: pairId, retired: null, sets: pairId ? [] : x.sets, liveStatus: null }))}
+          onRetired={(pairId) => change(resultMatch, (x) => ({ ...x, retired: pairId, walkover: null, liveStatus: null }))}
           onClose={() => setResultKey(null)}
         />
       )}
@@ -3104,7 +3430,7 @@ function OnCourtView({ tournament, update }) {
       <div key={m.key} className="rounded-xl p-3" style={{ backgroundColor: accent + "0f", border: `1px solid ${accent}40`, borderLeft: `4px solid ${accent}`, ...F.body }}>
         <div className="flex items-center gap-2 text-xs mb-1 flex-wrap">
           {m.schedule
-            ? <span className="font-bold" style={{ color: accent }}>{m.schedule.time}hs · Cancha {m.schedule.court}</span>
+            ? <span className="font-bold" style={{ color: accent }}>{m.schedule.time}hs · {courtName(tournament, m.schedule.court)}</span>
             : <span className="font-bold text-amber-400">Sin horario</span>}
           <span className="text-teal-500 truncate">{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
           {m.schedule && (tournament.playDates || []).length > 1 && <span className="text-teal-600">{formatDateShort(m.schedule.date)}</span>}
@@ -3176,8 +3502,104 @@ function OnCourtView({ tournament, update }) {
 /* Grilla completa de horarios (admin): planilla tipo canchas x horarios con arrastrar y soltar.
    Reemplaza la vieja lista: bloquea/reubica automáticamente los choques de cancha y marca visualmente
    los partidos finalizados, ya que no queda un orden lineal como en una lista. */
+/* Grilla completa en una ventana emergente ("Abrir grilla"): todos los días, con las canchas en
+   columnas y las horas en filas, para ver todo de un vistazo. Solo lectura: tocar un partido abre
+   la ventanita de resultado. Pensada para 4 o 5 canchas; con más, se desliza de costado con la
+   columna de horas fija. */
+function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const duration = tournament.matchDurationMinutes || 90;
+  const courts = Array.from({ length: tournament.courtsCount || 4 }, (_, i) => i + 1);
+  const scheduled = matches.filter((m) => m.schedule);
+  const categoryColor = Object.fromEntries(tournament.categories.map((c, i) => [c.id, GROUP_COLORS[i % GROUP_COLORS.length]]));
+  const shortName = (id) => pairsById[id]?.name || "A definir";
+
+  const cell = (m) => {
+    const status = matchDisplayStatus(m);
+    const color = status === "finalizado" ? "#9fe022" : status === "en_curso" ? "#fb923c" : categoryColor[m.categoryId];
+    const w = matchIsPlayed(m) ? matchWinnerId(m) : null;
+    return (
+      <button
+        key={m.key}
+        type="button"
+        onClick={() => !m.placeholder && onOpenResult(m)}
+        className="w-full text-left rounded px-1.5 py-1 text-[10px] leading-tight"
+        style={{ border: `1.5px ${m.draft ? "dashed" : "solid"} ${color}`, backgroundColor: color + "1a", ...F.body }}
+      >
+        <span className="block font-bold truncate" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName} · {m.label}</span>
+        {m.placeholder && !(m.pairA && m.pairB) ? (
+          <span className="block italic text-teal-400">{m.placeholder}</span>
+        ) : (
+          <>
+            <span className={`block truncate ${w === m.pairA ? "text-lime-400 font-semibold" : "text-slate-200"}`}>{shortName(m.pairA)}</span>
+            <span className={`block truncate ${w === m.pairB ? "text-lime-400 font-semibold" : "text-slate-200"}`}>{shortName(m.pairB)}</span>
+          </>
+        )}
+        {matchIsPlayed(m) && <span className="block font-mono text-teal-300 truncate"><MatchResultLabel match={m} format={tournament.matchFormat} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+        {status === "en_curso" && <span className="block font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+      </button>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: "#0b1c24", color: "#e2e8f0" }} role="dialog" aria-modal="true" aria-label="Grilla de horarios">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-teal-900">
+        <h2 className="text-base sm:text-lg" style={F.display}>GRILLA · {tournament.name.toUpperCase()}</h2>
+        <button type="button" onClick={onClose} className="text-teal-400 hover:text-lime-400 text-xl leading-none p-1" aria-label="Cerrar">✕</button>
+      </div>
+      <div className="flex-1 overflow-auto p-3 sm:p-4">
+        {(tournament.playDates || []).length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay fechas cargadas.</p>}
+        {(tournament.playDates || []).map((dateInfo, di) => {
+          const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
+          const times = dayTimeSlots(dateInfo, duration);
+          // Partidos de ese día con un horario que no cae en la grilla (cambió el arranque o la duración)
+          const extraTimes = [...new Set(scheduled.filter((m) => m.schedule.date === dateInfo.date && !times.includes(m.schedule.time)).map((m) => m.schedule.time))];
+          const allTimes = [...times, ...extraTimes].sort();
+          return (
+            <section key={dateInfo.date} className="mb-6">
+              <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(dateInfo.date)}</SkewPill></div>
+              <div className="overflow-x-auto rounded-lg border" style={{ borderColor: dateColor + "33" }}>
+                <table className="border-collapse w-full" style={{ minWidth: 56 + courts.length * 140 }}>
+                  <thead>
+                    <tr>
+                      <th className="sticky left-0 z-10 text-left text-[11px] text-teal-500 px-2 py-1.5 w-14" style={{ ...F.body, backgroundColor: "#0b1c24" }}>Hora</th>
+                      {courts.map((court) => (
+                        <th key={court} className="text-center text-[11px] font-extrabold uppercase tracking-wide px-1 py-1.5" style={{ ...F.body, color: dateColor }}>{courtName(tournament, court)}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allTimes.map((time) => (
+                      <tr key={time} style={{ borderTop: `1px solid ${dateColor}22` }}>
+                        <td className="sticky left-0 z-10 text-[11px] text-teal-400 align-top px-2 py-1.5 whitespace-nowrap font-semibold" style={{ ...F.body, backgroundColor: "#0b1c24" }}>{time}</td>
+                        {courts.map((court) => {
+                          const here = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
+                          return (
+                            <td key={court} className="align-top p-1" style={{ width: 140, borderLeft: `1px solid ${dateColor}14`, ...(here.length > 1 ? { backgroundColor: "#f8717122" } : {}) }}>
+                              <div className="space-y-1">{here.map(cell)}</div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ScheduleAdminView({ tournament, update }) {
   const [notice, setNotice] = useState(null);
+  const [gridOpen, setGridOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
   const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
@@ -3218,9 +3640,9 @@ function ScheduleAdminView({ tournament, update }) {
       const free = findNextFreeSlotOnCourt(scheduled, dateInfo, court, nextTime, duration, key);
       if (free) {
         editSchedule(m, free);
-        setNotice(`Ese horario ya estaba ocupado en Cancha ${court}. Ubiqué el partido en ${formatDateShort(free.date)} · ${free.time}hs · Cancha ${free.court}.`);
+        setNotice(`Ese horario ya estaba ocupado en ${courtName(tournament, court)}. Ubiqué el partido en ${formatDateShort(free.date)} · ${free.time}hs · ${courtName(tournament, free.court)}.`);
       } else {
-        setNotice(`Cancha ${court} ya está ocupada a esa hora y no quedan horarios libres en esa cancha para ese día. No se movió el partido.`);
+        setNotice(`${courtName(tournament, court)} ya está ocupada a esa hora y no quedan horarios libres en esa cancha para ese día. No se movió el partido.`);
       }
     } else {
       editSchedule(m, { date: dateInfo.date, time, court });
@@ -3237,7 +3659,15 @@ function ScheduleAdminView({ tournament, update }) {
 
   return (
     <div>
+      {gridOpen && <ScheduleGridOverlay tournament={tournament} matches={matches} pairsById={pairsById} onOpenResult={openResult} onClose={() => setGridOpen(false)} />}
       {modals}
+      {matches.length > 0 && (
+        <div className="flex justify-end mb-4">
+          <button type="button" onClick={() => setGridOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.cyan), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
+            ▦ Abrir grilla
+          </button>
+        </div>
+      )}
       <CourtsAndDatesEditor tournament={tournament} onChange={update} />
 
       {matches.length === 0 ? (
@@ -3328,7 +3758,7 @@ function ScheduleAdminView({ tournament, update }) {
                           <th className="text-left text-[11px] text-teal-500 pb-1 pr-2 w-16" style={F.body}>Hora</th>
                           {courts.map((court) => (
                             <th key={court} className="text-center text-[11px] font-extrabold uppercase tracking-wide px-1 pb-1" style={{ ...F.body, color: dateColor }}>
-                              Cancha {court}
+                              {courtName(tournament, court)}
                             </th>
                           ))}
                         </tr>
@@ -3377,7 +3807,7 @@ function ScheduleAdminView({ tournament, update }) {
                       const courtMatches = scheduled.filter((m) => m.schedule.date === dateInfo.date && m.schedule.court === court).sort(compareBySchedule);
                       return (
                         <div key={court} className="rounded-xl border p-3" style={{ borderColor: dateColor + "40" }}>
-                          <p className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ ...F.body, color: dateColor }}>Cancha {court}</p>
+                          <p className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ ...F.body, color: dateColor }}>{courtName(tournament, court)}</p>
                           {courtMatches.length === 0 && <p className="text-xs opacity-60 mb-2" style={F.body}>Sin partidos.</p>}
                           {courtMatches.map((m) => (
                             <div key={m.key} className="flex gap-2 items-start">
@@ -3394,7 +3824,7 @@ function ScheduleAdminView({ tournament, update }) {
                                 const m = unscheduled.find((u) => u.key === e.target.value);
                                 const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null);
                                 if (free) editSchedule(m, free);
-                                else if (m) setNotice(`Cancha ${court} no tiene horarios libres ese día.`);
+                                else if (m) setNotice(`${courtName(tournament, court)} no tiene horarios libres ese día.`);
                               }}
                               className="w-full mt-1 text-sm px-2 py-2 rounded border border-dashed"
                               style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
@@ -3446,6 +3876,7 @@ function Scoreboard({ match, pairsById, format }) {
         <span className={`flex-1 min-w-0 truncate ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
           {pairsById[id]?.name || "—"}
           {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
+          {match.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
         </span>
         <span className="flex gap-1 shrink-0 font-mono">
           {sets.map((s, i) => (
@@ -3525,12 +3956,12 @@ function SchedulePublicView({ tournament }) {
                         <div key={m.key} className="text-sm min-w-0" style={F.body}>
                           {hasResult ? (
                             <div className="flex items-start gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
                               <div className="flex-1 min-w-0"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div>
                             </div>
                           ) : (
                             <div className="flex items-baseline gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>C{m.schedule.court}</span>
+                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
                               {m.placeholder
                                 ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
                                 : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
@@ -3661,7 +4092,7 @@ function ChevronCircle({ color }) {
   );
 }
 
-const PUBLIC_TABS = [["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"]];
+const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
 /* Contacto al pie de las pantallas públicas */
@@ -3679,8 +4110,8 @@ function ContactFooter() {
   );
 }
 
-/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Canchas · Profes junto al
-   acceso de organizadores (en el celular, solo el ícono, para que entre todo en una fila) */
+/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Complejos · Entrenamientos
+   junto al acceso de organizadores (solo el ícono, para que entre todo en una fila) */
 function SiteHeader({ tab, onTab, onGoLogin }) {
   return (
     <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
@@ -3692,14 +4123,15 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
         </div>
       </div>
       <nav className="mt-4 flex items-center gap-2 max-w-xl mx-auto" aria-label="Secciones">
-        <div className="flex-1 grid grid-cols-3 gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        {/* La tercera pestaña es más ancha: "ENTRENAMIENTOS" tiene que entrar entero en el celular */}
+        <div className="flex-1 min-w-0 grid grid-cols-[0.85fr_1fr_1.4fr] gap-0.5 sm:gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
           {PUBLIC_TABS.map(([key, label]) => (
             <button
               key={key}
               type="button"
               onClick={() => onTab(key)}
               aria-current={tab === key ? "page" : undefined}
-              className="py-2 rounded-full text-sm font-semibold transition"
+              className="py-2 px-1 rounded-full text-[10px] sm:text-sm font-semibold sm:tracking-wide transition truncate"
               style={tab === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f", boxShadow: `0 0 12px ${BRAND.lime}66` } : { ...F.body, color: "#cbd5e1" }}
             >
               {label}
@@ -3711,10 +4143,10 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
           onClick={onGoLogin}
           aria-label="Organizadores"
           title="Acceso de organizadores"
-          className="flex items-center justify-center gap-2 w-11 h-11 sm:w-auto sm:h-auto sm:px-4 sm:py-2.5 rounded-full text-sm font-semibold shrink-0 transition hover:brightness-125"
+          className="flex items-center justify-center w-11 h-11 rounded-full shrink-0 transition hover:brightness-125"
           style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
         >
-          <PeopleIcon /> <span className="hidden sm:inline">Organizadores</span>
+          <PeopleIcon />
         </button>
       </nav>
     </header>
@@ -3779,29 +4211,30 @@ function OrganizerCard({ organizer, count, color, onSelect }) {
     <button
       type="button"
       onClick={onSelect}
-      className="relative text-left rounded-2xl overflow-hidden min-h-[15rem] sm:min-h-[17rem] flex flex-col justify-end transition hover:brightness-110"
+      // Altura fija: todas iguales aunque el nombre o el logo ocupen distinto
+      className="relative text-left rounded-xl overflow-hidden h-44 sm:h-52 flex flex-col transition hover:brightness-110"
       style={neonStyle(color)}
     >
       {organizer.coverUrl
         ? <img src={organizer.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
         : <div className="absolute inset-0" style={{ background: COURT_FALLBACK_BACKGROUND }} />}
       <div className="absolute inset-0" style={{ background: "linear-gradient(0deg, rgba(8,18,24,0.95) 0%, rgba(8,18,24,0.55) 45%, rgba(8,18,24,0.2) 100%)" }} />
-      <div className="relative flex justify-center pt-5">
+      <div className="relative flex justify-center pt-3 sm:pt-4 shrink-0">
         {organizer.logoUrl ? (
-          <img src={organizer.logoUrl} alt="" className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover" style={{ ...neonStyle(color, true), backgroundColor: "#081218" }} />
+          <img src={organizer.logoUrl} alt="" className="w-14 h-14 sm:w-20 sm:h-20 rounded-full object-cover" style={{ ...neonStyle(color, true), backgroundColor: "#081218" }} />
         ) : (
-          <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center text-4xl" style={{ ...neonStyle(color, true), ...F.display, backgroundColor: "#081218", color }}>
+          <div className="w-14 h-14 sm:w-20 sm:h-20 rounded-full flex items-center justify-center text-2xl sm:text-3xl" style={{ ...neonStyle(color, true), ...F.display, backgroundColor: "#081218", color }}>
             {organizer.name.trim().charAt(0).toUpperCase()}
           </div>
         )}
       </div>
-      <div className="relative p-3 sm:p-4 mt-auto">
-        <p className="text-base sm:text-xl leading-tight uppercase mb-2 break-words" style={{ ...F.display, color: BRAND.ink }}>{organizer.name}</p>
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-sm whitespace-nowrap min-w-0" style={{ ...F.body, border: `1px solid ${color}66`, backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}>
-            <TrophyIcon size={14} color={color} /> {count} torneo{count !== 1 ? "s" : ""}
+      <div className="relative px-2 pb-2 sm:px-3 sm:pb-3 mt-auto">
+        <p className="text-[11px] sm:text-sm leading-tight uppercase mb-1.5 line-clamp-2 break-words" style={{ ...F.display, color: BRAND.ink }}>{organizer.name}</p>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex items-center gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-xs whitespace-nowrap min-w-0" style={{ ...F.body, border: `1px solid ${color}66`, backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}>
+            <TrophyIcon size={11} color={color} /> {count}
           </span>
-          <ChevronCircle color={color} />
+          <span className="hidden sm:inline-flex"><ChevronCircle color={color} /></span>
         </div>
       </div>
     </button>
@@ -4156,7 +4589,7 @@ function CoachesPublicView({ coaches }) {
   const sorted = [...coaches].sort((a, b) => a.name.localeCompare(b.name, "es"));
   return (
     <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Profesores</h1>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Entrenamientos</h1>
       <p className="text-sm text-teal-300 mb-5" style={F.body}>Clases de pádel: días, horarios y contacto.</p>
       {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá a los profes de la ciudad.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -4186,7 +4619,116 @@ function CoachesPublicView({ coaches }) {
   );
 }
 
-/* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Canchas · Profes.
+/* Lugares libres de un torneo sumando sus categorías: null = sin límite */
+function tournamentSpotsLeft(t) {
+  const lefts = (t.categories || []).filter(categoryAcceptsRegistrations).map(categorySpotsLeft);
+  if (lefts.length === 0) return 0;
+  return lefts.some((l) => l == null) ? null : lefts.reduce((a, b) => a + b, 0);
+}
+
+/* "quedan 3", "completo" o nada (sin cupo), para mostrar al lado de cada torneo de un evento */
+function spotsLabel(t) {
+  if (registrationStatus(t) !== "abierto" && registrationStatus(t) !== "completo") return null;
+  const left = tournamentSpotsLeft(t);
+  return left == null ? null : left === 0 ? "completo" : `quedan ${left}`;
+}
+
+/* Los torneos de un evento agrupados por día, como en el flyer:
+   VIERNES 30/10 → 14 hs · 7MA DAMAS · quedan 3. Tocar un renglón abre el torneo. */
+function EventDaysList({ tournaments, onOpen, onRegister }) {
+  const days = [...new Set(tournaments.map((t) => t.date))];
+  return (
+    <div className="space-y-6">
+      {days.map((day, di) => {
+        const color = di % 2 === 0 ? BRAND.lime : BRAND.cyan;
+        return (
+          <section key={day}>
+            <h2 className="text-base sm:text-lg uppercase mb-2 flex items-center gap-3" style={{ ...F.display, color }}>
+              {formatDateLong(day)}
+              <span className="flex-1 h-px" style={{ backgroundColor: color + "55" }} />
+            </h2>
+            <div className="space-y-2">
+              {tournaments.filter((t) => t.date === day).map((t) => {
+                const time = tournamentStartTime(t);
+                const spots = spotsLabel(t);
+                const status = tournamentStatusOf(t);
+                return (
+                  <div
+                    key={t.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onOpen(t.id)}
+                    onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(t.id); } }}
+                    className="rounded-xl px-3 sm:px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer transition hover:brightness-125"
+                    style={{ border: `1px solid ${color}40`, backgroundColor: "rgba(8,18,24,0.6)", ...F.body }}
+                  >
+                    <span className="text-lg sm:text-xl font-bold w-24 shrink-0 whitespace-nowrap" style={{ color }}>{time ? formatHour(time) : "—"}</span>
+                    <span className="flex-1 min-w-[9rem]">
+                      <span className="block text-base font-semibold uppercase leading-tight" style={{ color: BRAND.ink }}>{t.name}</span>
+                      <span className="flex items-center gap-2 flex-wrap mt-1">
+                        <TournamentTypeTag tournament={t} />
+                        {status === STATUS.EN_CURSO && <span className="text-[10px] font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+                        {spots && <span className={`text-xs ${spots === "completo" ? "text-amber-400" : "text-teal-300"}`}>{spots}</span>}
+                      </span>
+                    </span>
+                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <RegisterButton tournament={t} onRegister={onRegister} className="!px-3 !py-1.5 text-xs" />
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+/* "Inscribirme" de un evento: primero el día, después el horario y la categoría; al elegir se abre
+   el formulario de inscripción de ese torneo */
+function EventRegistrationPicker({ tournaments, onPick, onClose }) {
+  const open = tournaments.filter((t) => registrationStatus(t) === "abierto");
+  const days = [...new Set(open.map((t) => t.date))];
+  const [day, setDay] = useState(days.length === 1 ? days[0] : null);
+  return (
+    <Modal title="Inscribirme" onClose={onClose}>
+      <div style={F.body}>
+        <p className="text-xs text-teal-400 mb-2">1. ¿Qué día querés jugar?</p>
+        <div className="flex flex-wrap gap-2 mb-5">
+          {days.map((d) => (
+            <button key={d} type="button" onClick={() => setDay(d)} className="px-4 py-2 rounded-full text-sm font-semibold border" style={day === d ? { backgroundColor: BRAND.lime, color: "#14181f", borderColor: BRAND.lime } : { borderColor: "#1e3a45", color: "#cbd5e1" }}>
+              {formatDateLong(d)}
+            </button>
+          ))}
+        </div>
+        {day && (
+          <>
+            <p className="text-xs text-teal-400 mb-2">2. Elegí horario y categoría</p>
+            <div className="space-y-2">
+              {open.filter((t) => t.date === day).map((t) => {
+                const time = tournamentStartTime(t);
+                const spots = spotsLabel(t);
+                return (
+                  <button key={t.id} type="button" onClick={() => onPick(t)} className="w-full text-left rounded-lg px-3 py-2.5 flex items-center gap-3 border border-teal-800 hover:border-lime-400">
+                    <span className="font-bold w-20 shrink-0 whitespace-nowrap text-lime-400">{time ? formatHour(time) : "—"}</span>
+                    <span className="flex-1 min-w-0">
+                      <span className="block font-semibold uppercase truncate">{t.name}</span>
+                      <span className="block text-[11px] text-teal-400">{tournamentTypeName(t)}{spots ? ` · ${spots}` : ""}</span>
+                    </span>
+                    <span className="text-teal-400">›</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
 function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin }) {
@@ -4204,7 +4746,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const goTab = (key) => { setTab(key); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
   const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
   const selectedEvent = events.find((e) => e.id === selectedEventId);
-  const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort((a, b) => (a.date < b.date ? -1 : 1)) : [];
+  const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
+  const [pickingEventRegistration, setPickingEventRegistration] = useState(false);
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
   const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
@@ -4229,10 +4772,18 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
           <p className="text-[10px] font-bold mt-4" style={{ ...F.body, color: BRAND.cyan }}>EVENTO · {eventTournaments.length} TORNEOS</p>
           <h1 className="text-xl mt-1" style={F.display}>{selectedEvent.name.toUpperCase()}</h1>
           {organizer && <p className="text-sm text-teal-300 mt-1" style={F.body}>Organiza: {organizer.name}</p>}
+          {eventTournaments.some((t) => registrationStatus(t) === "abierto") && (
+            <button type="button" onClick={() => setPickingEventRegistration(true)} className="mt-4 w-full sm:w-auto px-6 py-3 rounded-full font-semibold" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+              Inscribirme
+            </button>
+          )}
         </header>
-        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8 grid gap-5 grid-cols-2 lg:grid-cols-3">
-          {eventTournaments.map((t) => <PublicTournamentCard key={t.id} t={t} big onOpen={onOpen} onRegister={onRegister} />)}
+        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+          <EventDaysList tournaments={eventTournaments} onOpen={onOpen} onRegister={onRegister} />
         </main>
+        {pickingEventRegistration && (
+          <EventRegistrationPicker tournaments={eventTournaments} onPick={(t) => { setPickingEventRegistration(false); onRegister(t); }} onClose={() => setPickingEventRegistration(false)} />
+        )}
       </>
     );
   } else if (showAll) {
@@ -4288,7 +4839,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
           {visible.length === 0 ? (
             <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
           ) : (
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
+            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-3">
               {visible.map((o, i) => (
                 <OrganizerCard
                   key={o.id}
@@ -4305,7 +4856,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     );
   }
 
-  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId;
+  // En la página de un evento la publicidad va entre la lista de torneos y el contacto
+  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
       <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
@@ -4323,9 +4875,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
 
 /* Súper 8: lista simple de todos los partidos, uno por renglón y en orden de juego
    ("Elías - Martín vs Juan - Negro"), y debajo la tabla de posiciones (se recalcula sola con cada
-   resultado). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
+   resultado). Con más de una cancha, los partidos van agrupados en turnos con su cancha (ver
+   super8Turns). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
    ellos es la vista de solo lectura para el público. */
-function Super8View({ category, format, onSetScore, onWalkover }) {
+function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
   const group = category.groups[0];
   if (!group) return null;
@@ -4333,36 +4886,54 @@ function Super8View({ category, format, onSetScore, onWalkover }) {
   const individual = category.format === "super8_individual";
   const standingsGroup = individual ? super8IndividualStandingsGroup(category, group) : group;
   const nameOf = (id) => pairsById[id]?.name || "—";
+  const turns = super8Turns(group.matches, courts);
+  const simultaneous = turns.some((turn) => turn.matches.length > 1);
+
+  const row = (m, tag) => {
+    const hasResult = matchIsPlayed(m);
+    const w = hasResult ? matchWinnerId(m) : null;
+    const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
+    return (
+      <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
+        <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+          {tag}
+          {side(m.pairA)}
+          <span className="text-xs text-teal-500">vs</span>
+          {side(m.pairB)}
+          {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+        </div>
+        {editable && (
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
+            {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
+            {m.walkover && (
+              <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div>
-      <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
-        {group.matches.map((m, i) => {
-          const hasResult = matchIsPlayed(m);
-          const w = hasResult ? matchWinnerId(m) : null;
-          const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
-          return (
-            <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>
-                {side(m.pairA)}
-                <span className="text-xs text-teal-500">vs</span>
-                {side(m.pairB)}
-                {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+      {simultaneous ? (
+        // Varias canchas: los partidos de cada ronda se juegan a la vez, un turno abajo del otro
+        <div className="space-y-3">
+          {turns.map((turn, ti) => (
+            <div key={ti} className="rounded-xl border border-teal-800 min-w-0">
+              <p className="px-3 pt-2 text-[11px] font-bold uppercase tracking-wide text-teal-400" style={F.body}>Turno {ti + 1} <span className="text-teal-600 font-normal normal-case">· Ronda {turn.round}</span></p>
+              <div className="divide-y divide-teal-900">
+                {turn.matches.map(({ m, court }) => row(m, <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>Cancha {court}</span>))}
               </div>
-              {editable && (
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
-                  {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
-                  {m.walkover && (
-                    <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
-                  )}
-                </div>
-              )}
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
+          {group.matches.map((m, i) => row(m, <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>))}
+        </div>
+      )}
       <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Tabla de posiciones</h3>
       <StandingsTable group={standingsGroup} pairsById={pairsById} format={format} highlightCount={3} />
       <StandingsLegend />
@@ -4452,7 +5023,7 @@ function CategoryBracketPublicView({ category, format }) {
                 </span>
                 {round.map((m) => {
                   const w = winnerOf(m);
-                  const { a: setsA, b: setsB } = setsWon(m);
+                  const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
@@ -4537,89 +5108,100 @@ function PublicTournament({ tournament, organizers, onBack }) {
   const showRegister = registrationStatus(tournament) !== "cerrado";
 
   return (
-    <div className="px-6 py-8 max-w-4xl mx-auto">
-      {/* Inscripción: botón fijo abajo, por encima de la barra del celular (safe area) */}
-      {showRegister && (
-        <div className="fixed inset-x-0 bottom-0 z-40 px-4 pt-3" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)", background: "linear-gradient(0deg, rgba(8,18,24,0.98) 60%, rgba(8,18,24,0))" }}>
-          <div className="max-w-md mx-auto">
-            <RegisterButton tournament={tournament} onRegister={() => setRegistering(true)} full className="py-3.5 text-base" />
+    <CourtNamesContext.Provider value={tournament}>
+      <div className="px-6 py-8 max-w-4xl mx-auto">
+        {/* Inscripción: botón fijo abajo, por encima de la barra del celular (safe area) */}
+        {showRegister && (
+          <div className="fixed inset-x-0 bottom-0 z-40 px-4 pt-3" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)", background: "linear-gradient(0deg, rgba(8,18,24,0.98) 60%, rgba(8,18,24,0))" }}>
+            <div className="max-w-md mx-auto">
+              <RegisterButton tournament={tournament} onRegister={() => setRegistering(true)} full className="py-3.5 text-base" />
+            </div>
           </div>
+        )}
+        {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} />}
+        <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
+        {tournament.coverImageUrl && (
+          <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
+        )}
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
+          <Badge status={tournament.status} />
         </div>
-      )}
-      {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} />}
-      <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
-      {tournament.coverImageUrl && (
-        <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
-      )}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-        <Badge status={tournament.status} />
-      </div>
-      <p className="text-xs text-teal-500 mt-2" style={F.body}>
-        {tournamentTypeSummary(tournament)}
-        {tournament.venue ? ` · Sede: ${tournament.venue}` : ""}
-      </p>
-      {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
+        <p className="text-xs text-teal-500 mt-2" style={F.body}>
+          {tournamentTypeSummary(tournament)}
+          {tournament.venue ? ` · Sede: ${tournament.venue}` : ""}
+        </p>
+        {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
+        <p className="text-sm text-lime-400 font-semibold mt-2" style={F.body}>{tournamentWhenLabel(tournament)}</p>
+        {/* Clásico con inicio propio por categoría: cuándo arranca cada una */}
+        {tournament.categories.some((c) => categoryStartLabel(c)) && (
+          <ul className="mt-1 text-xs text-teal-300 space-y-0.5" style={F.body}>
+            {tournament.categories.filter((c) => categoryStartLabel(c)).map((c) => (
+              <li key={c.id}><span className="font-semibold text-teal-100">{c.name}</span>: empieza {categoryStartLabel(c)}</li>
+            ))}
+          </ul>
+        )}
 
-      <div className="flex gap-2 mt-4 overflow-x-auto">
-        {viewTabs.map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setView(key)}
-            className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+        <div className="flex gap-2 mt-4 overflow-x-auto">
+          {viewTabs.map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+              style={F.body}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
 
-      {view === "horarios" ? (
-        <div className="mt-6"><SchedulePublicView tournament={tournament} /></div>
-      ) : tournament.categories.length === 0 ? (
-        <p className="opacity-60 text-sm mt-8" style={F.body}>Todavía no se cargaron categorías para este torneo.</p>
-      ) : (
-        <>
-          <div className="flex gap-2 mt-6 overflow-x-auto pb-1 sm:flex-wrap">
-            {tournament.categories.map((c, ci) => {
-              const color = GROUP_COLORS[ci % GROUP_COLORS.length];
-              const active = c.id === category?.id;
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => setCategoryId(c.id)}
-                  className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
-                  style={
-                    active
-                      ? { backgroundColor: color, color: "#14181f", borderColor: color }
-                      : { backgroundColor: color + "14", color, borderColor: color + "40" }
-                  }
-                >
-                  {c.name}
-                </button>
-              );
-            })}
-          </div>
-          {category && isSuper8(category) ? (
-            view === "grupos" ? (
-              <section className="mt-6">
-                <p className="text-xs text-teal-500 mb-4" style={F.body}>{CATEGORY_FORMAT_LABEL[category.format]}</p>
-                {category.groups.length > 0
-                  ? <Super8View category={category} format={format} />
-                  : <p className="opacity-60 text-sm" style={F.body}>Todavía no se generaron los partidos.</p>}
-              </section>
+        {view === "horarios" ? (
+          <div className="mt-6"><SchedulePublicView tournament={tournament} /></div>
+        ) : tournament.categories.length === 0 ? (
+          <p className="opacity-60 text-sm mt-8" style={F.body}>Todavía no se cargaron categorías para este torneo.</p>
+        ) : (
+          <>
+            <div className="flex gap-2 mt-6 overflow-x-auto pb-1 sm:flex-wrap">
+              {tournament.categories.map((c, ci) => {
+                const color = GROUP_COLORS[ci % GROUP_COLORS.length];
+                const active = c.id === category?.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setCategoryId(c.id)}
+                    className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
+                    style={
+                      active
+                        ? { backgroundColor: color, color: "#14181f", borderColor: color }
+                        : { backgroundColor: color + "14", color, borderColor: color + "40" }
+                    }
+                  >
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+            {category && isSuper8(category) ? (
+              view === "grupos" ? (
+                <section className="mt-6">
+                  <p className="text-xs text-teal-500 mb-4" style={F.body}>{CATEGORY_FORMAT_LABEL[category.format]}</p>
+                  {category.groups.length > 0
+                    ? <Super8View category={category} format={format} courts={tournament.courtsCount || 1} />
+                    : <p className="opacity-60 text-sm" style={F.body}>Todavía no se generaron los partidos.</p>}
+                </section>
+              ) : (
+                <p className="opacity-60 text-sm mt-6" style={F.body}>Esta categoría se juega en formato {CATEGORY_FORMAT_LABEL[category.format]}: no tiene llave final. Los partidos y la tabla de posiciones están en la pestaña Grupos.</p>
+              )
             ) : (
-              <p className="opacity-60 text-sm mt-6" style={F.body}>Esta categoría se juega en formato {CATEGORY_FORMAT_LABEL[category.format]}: no tiene llave final. Los partidos y la tabla de posiciones están en la pestaña Grupos.</p>
-            )
-          ) : (
-            <>
-              {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
-              {category && view === "llaves" && <CategoryBracketPublicView category={category} format={format} />}
-            </>
-          )}
-        </>
-      )}
-    </div>
+              <>
+                {category && view === "grupos" && <CategoryGroupsPublicView category={category} format={format} />}
+                {category && view === "llaves" && <CategoryBracketPublicView category={category} format={format} />}
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </CourtNamesContext.Provider>
   );
 }
 function Login({ onLogin, onBack }) {
@@ -4639,7 +5221,7 @@ function Login({ onLogin, onBack }) {
       const orgs = await fetchOrganizers();
       const profile = orgs.find((o) => o.id === auth.user.id);
       if (!profile) { setError("Tu cuenta no tiene un perfil de organizador asociado."); setLoading(false); return; }
-      onLogin({ ...profile, accessToken: auth.access_token });
+      onLogin({ ...profile, ...authFields(auth) });
     } catch (e) {
       setError(e.message || "Usuario o contraseña incorrectos.");
     }
@@ -5169,7 +5751,7 @@ function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
   );
 }
 
-/* Pestaña "Canchas" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
+/* Pestaña "Complejos" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
 function VenueManager({ venues, onSave, onDelete, accessToken }) {
   const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
   const [form, setForm] = useState(empty);
@@ -5224,7 +5806,7 @@ function VenueManager({ venues, onSave, onDelete, accessToken }) {
   );
 }
 
-/* Pestaña "Profes" del creador: mismo patrón que Canchas, con horario semanal */
+/* Pestaña "Entrenamientos" del creador (profes): mismo patrón que Complejos, con horario semanal */
 function CoachManager({ coaches, onSave, onDelete, accessToken }) {
   const empty = { name: "", brandName: "", photoUrl: "", instagram: "", whatsapp: "", availability: [] };
   const [form, setForm] = useState(empty);
@@ -5489,7 +6071,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
       </div>
 
       <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Canchas"], ["profes", "Profes"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
+        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -5883,74 +6465,241 @@ function CircuitManager({ circuits, tournaments, onAdd, onUpdate, onDelete }) {
 /* Pestaña "Eventos" del organizador: un evento agrupa varios torneos (por ejemplo, cuatro Súper 8
    seguidos de distintas categorías) para mostrarlos juntos en la parte pública. Es solo un
    contenedor: no sabe nada del formato de cada torneo y no suma puntos entre ellos. */
-function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournament, accessToken }) {
+/* Formulario para agregar un torneo (una categoría con su día y hora) adentro de un evento. El
+   formato viene del evento, pero se puede cambiar para este torneo. */
+function EventTournamentForm({ event, onCreate, onCancel }) {
+  const defaults = event.config || { type: null, super8Mode: null, games: null };
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+  const [category, setCategory] = useState("");
+  const [courtsText, setCourtsText] = useState("1");
+  const [cupoText, setCupoText] = useState("");
+  const [registrationOpen, setRegistrationOpen] = useState(true);
+  const [config, setConfig] = useState(defaults);
+  const [changingFormat, setChangingFormat] = useState(!tournamentConfigIsComplete(defaults));
+  const courts = Number(courtsText);
+  const super8 = config.type === "super8";
+  const ready = date && time && category.trim() && Number.isInteger(courts) && courts >= 1 && tournamentConfigIsComplete(config);
+
+  const create = () => {
+    if (!ready) return;
+    // Americano y Clásico: el día y la hora de inicio arman la grilla de horarios
+    const schedule = super8
+      ? { courtsCount: courts }
+      : { courtsCount: courts, matchDurationMinutes: config.type === "americano" ? 40 : 90, playDates: [{ date, from: time, to: "23:59" }] };
+    onCreate({
+      name: category.trim(), date, circuitId: null, config, schedule,
+      categories: [{ name: category.trim(), cupo: super8 ? null : parseCupo(cupoText) }],
+      inscripcionesAbiertas: registrationOpen,
+      extra: { eventId: event.id, startTime: time },
+    });
+  };
+
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const field = "px-3 py-2 rounded border outline-none focus:border-lime-400 text-sm";
+  const label = "block text-[11px] text-teal-400 mb-1";
+  return (
+    <div className="rounded-lg p-3 mt-3 space-y-3" style={{ border: `1px dashed ${BRAND.lime}66`, backgroundColor: "rgba(159,224,34,0.04)" }}>
+      <p className="text-sm font-semibold text-lime-400">Nuevo torneo del evento</p>
+      <div className="flex flex-wrap gap-3">
+        <div><label className={label}>Día</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={field} style={input} /></div>
+        <div><label className={label}>Hora de inicio</label><input type="time" lang="es-AR" value={time} onChange={(e) => setTime(e.target.value)} className={field} style={input} /></div>
+        <div className="flex-1 min-w-[10rem]"><label className={label}>Categoría</label><input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Ej: 7ma Damas" className={`w-full ${field}`} style={input} /></div>
+        <div><label className={label}>Canchas</label><input type="number" min="1" inputMode="numeric" value={courtsText} onChange={(e) => setCourtsText(e.target.value)} className={`w-20 ${field}`} style={input} /></div>
+        {!super8 && (
+          <div><label className={label}>Cupo (vacío = sin límite)</label><input type="number" min="1" inputMode="numeric" value={cupoText} onChange={(e) => setCupoText(e.target.value)} className={`w-24 ${field}`} style={input} /></div>
+        )}
+      </div>
+      {changingFormat ? (
+        <div className="space-y-3">
+          <TournamentTypeChoice config={config} onChange={setConfig} />
+          <TournamentTypeOptions config={config} onChange={setConfig} />
+        </div>
+      ) : (
+        <p className="text-xs text-teal-300 flex items-center gap-2 flex-wrap">
+          Formato: <span className="font-semibold text-teal-100">{configLabel(config)}</span>
+          <button type="button" onClick={() => setChangingFormat(true)} className="text-teal-400 underline">Cambiar para este torneo</button>
+        </p>
+      )}
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={registrationOpen} onChange={(e) => setRegistrationOpen(e.target.checked)} /> Inscripciones abiertas</label>
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={!ready} onClick={create} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar torneo</button>
+        <button type="button" onClick={onCancel} className="text-sm text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* "Súper 8 Individual · 4 games", "Americano · A7", "Clásico" para una configuración elegida */
+function configLabel(config) {
+  if (!config?.type) return "sin elegir";
+  if (config.type === "super8") return `${TOURNAMENT_TYPE_LABEL.super8}${config.super8Mode ? ` ${SUPER8_MODE_LABEL[config.super8Mode]}` : ""}${config.games ? ` · ${config.games} games` : ""}`;
+  if (config.type === "americano") return `${TOURNAMENT_TYPE_LABEL.americano}${config.games ? ` · A${config.games}` : ""}`;
+  return TOURNAMENT_TYPE_LABEL[config.type];
+}
+
+/* Un torneo dentro de la tarjeta de su evento: día, hora, categoría, formato y canchas, con
+   edición rápida de día, hora y canchas */
+function EventTournamentRow({ t, onOpen, onUpdate, onRemove }) {
+  const [editing, setEditing] = useState(false);
+  const [date, setDate] = useState(t.date);
+  const [time, setTime] = useState(tournamentStartTime(t) || "");
+  const [courtsText, setCourtsText] = useState(String(t.courtsCount || 1));
+  const inscriptos = t.categories.reduce((s, c) => s + c.pairs.length, 0);
+  const cupo = t.categories.reduce((s, c) => s + (categoryCupo(c) || 0), 0);
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const save = () => {
+    const courts = Number(courtsText);
+    if (!date || !Number.isInteger(courts) || courts < 1) return;
+    onUpdate(withTournamentStart(t, { date, startTime: time, courtsCount: courts }));
+    setEditing(false);
+  };
+  return (
+    <div className="rounded border border-teal-900 px-3 py-2">
+      {editing ? (
+        <div className="flex flex-wrap gap-2 items-end text-sm">
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-2 py-1 rounded border" style={input} />
+          <input type="time" lang="es-AR" value={time} onChange={(e) => setTime(e.target.value)} className="px-2 py-1 rounded border" style={input} />
+          <label className="text-xs text-teal-400 flex items-center gap-1">Canchas <input type="number" min="1" value={courtsText} onChange={(e) => setCourtsText(e.target.value)} className="w-16 px-2 py-1 rounded border" style={input} /></label>
+          <button type="button" onClick={save} className="text-lime-400 font-semibold">Guardar</button>
+          <button type="button" onClick={() => setEditing(false)} className="text-teal-400">Cancelar</button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button type="button" onClick={() => onOpen(t.id)} className="text-left min-w-0">
+            <span className="text-sm"><span className="text-teal-300">{tournamentWhenLabel(t)}</span> · <span className="font-semibold">{t.name}</span></span>
+            <span className="flex items-center gap-2 flex-wrap mt-0.5">
+              <TournamentTypeTag tournament={t} />
+              <span className="text-[11px] text-teal-500">{t.courtsCount || 1} cancha{(t.courtsCount || 1) !== 1 ? "s" : ""} · {inscriptos}{cupo ? `/${cupo}` : ""} inscriptos</span>
+            </span>
+          </button>
+          <span className="flex items-center gap-3 text-xs shrink-0">
+            <button type="button" onClick={() => setEditing(true)} className="text-teal-300">Día y hora</button>
+            <button type="button" onClick={() => onOpen(t.id)} className="text-lime-400">Abrir</button>
+            <button type="button" onClick={() => onRemove(t)} className="text-red-400" title="Lo saca del evento (el torneo no se borra)">Sacar</button>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Pestaña "Eventos" del organizador. El evento es el punto de partida: se crea con su nombre,
+   portada y formato por defecto, y adentro se agregan sus torneos (cada uno con su categoría, día,
+   hora de inicio y canchas). Los torneos ya creados se pueden sumar a un evento. */
+function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournament, onCreateTournament, onOpenTournament, accessToken }) {
+  const emptyConfig = { type: null, super8Mode: null, games: null };
+  const [formOpen, setFormOpen] = useState(false);
   const [name, setName] = useState("");
   const [coverImageUrl, setCoverImageUrl] = useState("");
+  const [config, setConfig] = useState(emptyConfig);
   const [editingId, setEditingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [addingToId, setAddingToId] = useState(null);
+  const [linkingId, setLinkingId] = useState(null);
 
+  const resetForm = () => { setName(""); setCoverImageUrl(""); setConfig(emptyConfig); setEditingId(null); setFormOpen(false); };
   const submit = () => {
     if (!name.trim()) return;
     const prev = events.find((e) => e.id === editingId);
-    onSave({ ...(prev || {}), id: editingId || uid(), name: name.trim(), coverImageUrl: coverImageUrl.trim() });
-    setName(""); setCoverImageUrl(""); setEditingId(null);
+    const id = editingId || uid();
+    onSave({ ...(prev || {}), id, name: name.trim(), coverImageUrl: coverImageUrl.trim(), config: config.type ? config : null });
+    if (!editingId) setAddingToId(id); // recién creado: se abre directo el formulario de su primer torneo
+    resetForm();
   };
-  const edit = (ev) => { setName(ev.name); setCoverImageUrl(ev.coverImageUrl || ""); setEditingId(ev.id); window.scrollTo(0, 0); };
-  const toggle = (t, ev, checked) => onUpdateTournament({ ...t, eventId: checked ? ev.id : null });
+  const edit = (ev) => {
+    setName(ev.name); setCoverImageUrl(ev.coverImageUrl || ""); setConfig(ev.config || emptyConfig);
+    setEditingId(ev.id); setFormOpen(true); window.scrollTo(0, 0);
+  };
 
   return (
     <div style={F.body}>
-      <div className="border border-teal-800 rounded-lg p-4 mb-6 space-y-3">
-        <h2 className="text-sm uppercase tracking-wide text-teal-400">{editingId ? "Editar evento" : "Nuevo evento"}</h2>
-        <p className="text-xs text-teal-500">Agrupá varios torneos (Americanos, Súper 8 o Clásicos, mezclados si hace falta) para que en la página pública aparezcan juntos en una sola tarjeta. No suman puntos entre sí.</p>
-        <div>
-          <label className="block text-xs text-teal-400 mb-1">Nombre del evento</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Semana de Súper 8" />
+      {formOpen ? (
+        <div className="border border-teal-800 rounded-lg p-4 mb-6 space-y-3">
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">{editingId ? "Editar evento" : "Nuevo evento"}</h2>
+          <p className="text-xs text-teal-500">Un evento junta varios torneos (por ejemplo, un fin de semana con un Súper 8 por categoría). Primero lo creás y después le agregás cada torneo con su día, hora y categoría.</p>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre del evento</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} placeholder="Ej: Súper 8 Drop Padel" />
+          </div>
+          <ImageUploadField label="Portada (opcional)" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="events" />
+          <div>
+            <p className="text-xs text-teal-400 mb-2">Formato por defecto de sus torneos (cada torneo lo puede cambiar)</p>
+            <TournamentTypeChoice config={config} onChange={setConfig} />
+            <div className="mt-3"><TournamentTypeOptions config={config} onChange={setConfig} /></div>
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" onClick={submit} disabled={!name.trim()} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Crear evento"}</button>
+            <button type="button" onClick={resetForm} className="text-sm text-teal-400">Cancelar</button>
+          </div>
         </div>
-        <ImageUploadField label="Portada (opcional)" value={coverImageUrl} onChange={setCoverImageUrl} accessToken={accessToken} folder="events" />
-        <div className="flex gap-3 items-center">
-          <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Crear evento"}</button>
-          {editingId && <button type="button" onClick={() => { setName(""); setCoverImageUrl(""); setEditingId(null); }} className="text-sm text-teal-400">Cancelar</button>}
-        </div>
-      </div>
+      ) : (
+        <button type="button" onClick={() => setFormOpen(true)} className="px-4 py-2 rounded font-semibold mb-6" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>+ Crear evento</button>
+      )}
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Mis eventos</h2>
       {events.length === 0 && <p className="opacity-60 text-sm">Todavía no creaste eventos.</p>}
       <div className="space-y-4">
-        {events.map((ev) => (
-          <div key={ev.id} className="border border-teal-800 rounded-lg p-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
-              <p className="font-semibold">{ev.name}</p>
-              <div className="flex items-center gap-3 text-sm">
-                <button type="button" onClick={() => edit(ev)} className="text-teal-300">Editar</button>
-                {confirmDeleteId === ev.id ? (
-                  <span className="whitespace-nowrap">
-                    <button type="button" onClick={() => { onDelete(ev.id); setConfirmDeleteId(null); }} className="text-red-400 font-semibold mr-2">Confirmar</button>
-                    <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-teal-400">Cancelar</button>
-                  </span>
-                ) : (
-                  <button type="button" onClick={() => setConfirmDeleteId(ev.id)} className="text-red-400">Eliminar</button>
-                )}
+        {events.map((ev) => {
+          const own = tournaments.filter((t) => t.eventId === ev.id).sort(compareByStart);
+          const others = tournaments.filter((t) => t.eventId !== ev.id);
+          return (
+            <div key={ev.id} className="border border-teal-800 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                <p className="font-semibold">{ev.name}</p>
+                <div className="flex items-center gap-3 text-sm">
+                  <button type="button" onClick={() => edit(ev)} className="text-teal-300">Editar</button>
+                  {confirmDeleteId === ev.id ? (
+                    <span className="whitespace-nowrap">
+                      <button type="button" onClick={() => { onDelete(ev.id); setConfirmDeleteId(null); }} className="text-red-400 font-semibold mr-2">Confirmar</button>
+                      <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-teal-400">Cancelar</button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => setConfirmDeleteId(ev.id)} className="text-red-400" title="Borra el evento; sus torneos quedan sueltos">Eliminar</button>
+                  )}
+                </div>
               </div>
+              <p className="text-[11px] text-teal-500 mb-3">Formato por defecto: {configLabel(ev.config)}</p>
+
+              <div className="space-y-2">
+                {own.map((t) => (
+                  <EventTournamentRow key={t.id} t={t} onOpen={onOpenTournament} onUpdate={onUpdateTournament} onRemove={(x) => onUpdateTournament({ ...x, eventId: null })} />
+                ))}
+                {own.length === 0 && <p className="text-xs opacity-60">Todavía no tiene torneos.</p>}
+              </div>
+
+              {addingToId === ev.id ? (
+                <EventTournamentForm event={ev} onCreate={(data) => { onCreateTournament(data); setAddingToId(null); }} onCancel={() => setAddingToId(null)} />
+              ) : (
+                <button type="button" onClick={() => setAddingToId(ev.id)} className="mt-3 px-3 py-1.5 rounded text-sm font-semibold border border-lime-400 text-lime-400">+ Agregar torneo</button>
+              )}
+
+              {others.length > 0 && (
+                <div className="mt-3">
+                  <button type="button" onClick={() => setLinkingId(linkingId === ev.id ? null : ev.id)} className="text-xs text-teal-400 underline">
+                    {linkingId === ev.id ? "Ocultar" : "Sumar torneos ya creados"}
+                  </button>
+                  {linkingId === ev.id && (
+                    <div className="space-y-1 mt-2">
+                      {others.map((t) => {
+                        const inOther = t.eventId && events.some((e) => e.id === t.eventId);
+                        return (
+                          <label key={t.id} className={`flex items-center gap-2 text-sm ${inOther ? "opacity-50" : ""}`}>
+                            <input type="checkbox" checked={false} disabled={inOther} onChange={() => onUpdateTournament({ ...t, eventId: ev.id })} />
+                            <span>{t.name}</span>
+                            <span className="text-xs text-teal-600">· {formatDateShort(t.date)}</span>
+                            <TournamentTypeTag tournament={t} short />
+                            {inOther && <span className="text-[10px] text-teal-600">(en otro evento)</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <p className="text-xs text-teal-500 mb-1">Torneos del evento (tildá los que van juntos):</p>
-            <div className="space-y-1">
-              {tournaments.map((t) => {
-                const inOther = t.eventId && t.eventId !== ev.id && events.some((e) => e.id === t.eventId);
-                return (
-                  <label key={t.id} className={`flex items-center gap-2 text-sm ${inOther ? "opacity-50" : ""}`}>
-                    <input type="checkbox" checked={t.eventId === ev.id} disabled={inOther} onChange={(e) => toggle(t, ev, e.target.checked)} />
-                    <span>{t.name}</span>
-                    <span className="text-xs text-teal-600">· {formatDateShort(t.date)}</span>
-                    <TournamentTypeTag tournament={t} short />
-                    {inOther && <span className="text-[10px] text-teal-600">(en otro evento)</span>}
-                  </label>
-                );
-              })}
-              {tournaments.length === 0 && <p className="text-xs opacity-60">Todavía no tenés torneos.</p>}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -6015,7 +6764,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       </div>
 
       {tab === "eventos" ? (
-        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} accessToken={organizer.accessToken} />
+        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
       ) : tab === "circuitos" ? (
         <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
       ) : (
@@ -6052,7 +6801,8 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
   const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
 
-  const [justAccepted, setJustAccepted] = useState([]); // aceptadas recién, para ofrecer el aviso por WhatsApp
+  // Aceptadas o rechazadas recién ({ ...inscripcion, estado }), para ofrecer el aviso por WhatsApp
+  const [justResolved, setJustResolved] = useState([]);
 
   const resolve = async (i, accept) => {
     setBusyId(i.id);
@@ -6060,7 +6810,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
     try {
       await onResolve(i, accept);
       setConfirmRejectId(null);
-      if (accept) setJustAccepted((list) => [i, ...list]);
+      setJustResolved((list) => [{ ...i, estado: accept ? "aceptada" : "rechazada" }, ...list]);
     } catch (err) {
       setErrors((e) => ({ ...e, [i.id]: inscripcionErrorText(err) }));
     } finally {
@@ -6069,10 +6819,15 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   };
 
   /* Aviso opcional al jugador: abre el WhatsApp del organizador con el número y el mensaje ya
-     escritos; él decide si lo envía. Nunca frena la aprobación. */
+     escritos; él decide si lo envía. Nunca frena la aprobación ni el rechazo. */
   const whatsappLink = (i) => {
     const category = categoriesById[i.categoria_id]?.name;
-    const text = `¡Hola! Te confirmamos la inscripción de ${names(i)}${category ? ` en ${category}` : ""} para el torneo "${tournament.name}" (${formatDateShort(tournament.date)}). ¡Nos vemos en la cancha!`;
+    // En los torneos de un evento la categoría y el torneo se llaman igual: se nombra una sola vez
+    const inCategory = category && category !== tournament.name ? ` en ${category}` : "";
+    const what = `la inscripción de ${names(i)}${inCategory} para el torneo "${tournament.name}" (${tournamentWhenLabel(tournament)})`;
+    const text = i.estado === "rechazada"
+      ? `¡Hola! Te escribimos por ${what}. Lamentablemente no la pudimos confirmar. Cualquier consulta, escribinos por acá.`
+      : `¡Hola! Te confirmamos ${what}. ¡Nos vemos en la cancha!`;
     return `https://wa.me/${i.telefono}?text=${encodeURIComponent(text)}`;
   };
   const whatsappButton = (i, label = "Avisar por WhatsApp") => (
@@ -6083,14 +6838,18 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
 
   return (
     <div style={F.body}>
-      {justAccepted.length > 0 && (
+      {justResolved.length > 0 && (
         <div className="mb-5 space-y-2">
-          {justAccepted.map((i) => (
-            <div key={i.id} className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap" style={{ ...neonStyle(BRAND.lime), backgroundColor: "rgba(8,18,24,0.6)" }}>
-              <span className="text-sm"><span className="text-lime-400 font-semibold">✓ Aceptada:</span> {names(i)}</span>
+          {justResolved.map((i) => (
+            <div key={i.id} className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap" style={{ ...neonStyle(i.estado === "rechazada" ? "#f87171" : BRAND.lime), backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <span className="text-sm">
+                {i.estado === "rechazada"
+                  ? <span className="text-red-400 font-semibold">✕ Rechazada:</span>
+                  : <span className="text-lime-400 font-semibold">✓ Aceptada:</span>} {names(i)}
+              </span>
               <span className="flex items-center gap-2">
                 {whatsappButton(i)}
-                <button type="button" onClick={() => setJustAccepted((list) => list.filter((x) => x.id !== i.id))} className="text-xs text-teal-400" aria-label="Cerrar aviso">✕</button>
+                <button type="button" onClick={() => setJustResolved((list) => list.filter((x) => x.id !== i.id))} className="text-xs text-teal-400" aria-label="Cerrar aviso">✕</button>
               </span>
             </div>
           ))}
@@ -6112,7 +6871,13 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
         {pending.map((i) => {
           const category = categoriesById[i.categoria_id];
           const left = category ? categorySpotsLeft(category) : null;
-          const conflict = category ? findPlayerCategoryConflict(names(i), tournament, category.id) : null;
+          // Aviso (no bloqueo): algún jugador igual o parecido ya anotado o con otra inscripción pendiente
+          const players = [i.jugador1_nombre, i.jugador2_nombre].filter(Boolean);
+          const others = [
+            ...tournamentPairEntries(tournament),
+            ...pending.filter((x) => x.id !== i.id).map((x) => ({ name: names(x), where: categoriesById[x.categoria_id]?.name || "otra categoría", kind: "pendiente" })),
+          ];
+          const conflict = duplicateNamesText(findNameDuplicates(players, others));
           const busy = busyId === i.id;
           return (
             <div key={i.id} className="rounded-xl p-3" style={{ ...neonStyle("#fb923c"), backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -6135,7 +6900,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
                   {isSuper8(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
                 </p>
               )}
-              {conflict && <p className="text-xs text-amber-400 mt-1">Uno de los jugadores ya está anotado en "{conflict}".</p>}
+              {conflict && <p className="text-xs text-amber-400 mt-1">{conflict}</p>}
               {errors[i.id] && <p className="text-xs text-red-400 mt-1" role="alert">{errors[i.id]}</p>}
               <div className="flex gap-2 mt-3 flex-wrap">
                 {confirmRejectId === i.id ? (
@@ -6171,7 +6936,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
                 <li key={i.id} className="flex justify-between items-center gap-2 border-b border-teal-900 py-1.5">
                   <span className="min-w-0 truncate">{names(i)} <span className="text-teal-500">· {categoriesById[i.categoria_id]?.name || "—"}</span></span>
                   <span className="shrink-0 flex items-center gap-2">
-                    {i.estado === "aceptada" && whatsappButton(i, "WhatsApp")}
+                    {whatsappButton(i, "WhatsApp")}
                     <span className={`text-xs font-semibold ${i.estado === "aceptada" ? "text-lime-400" : "text-red-400"}`}>{i.estado === "aceptada" ? "Aceptada" : "Rechazada"}</span>
                   </span>
                 </li>
@@ -6187,7 +6952,27 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
 /* Pestaña "Partidos y posiciones" de una categoría Súper 8: genera el cuadro fijo de partidos
    (numerando a los jugadores/parejas por orden de inscripción o por sorteo) y después muestra la
    carga de resultados ronda por ronda con la tabla de posiciones debajo. */
-function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover }) {
+/* Canchas del Súper 8: con más de una, los partidos de cada ronda se juegan a la vez (hasta 2 en el
+   Individual y hasta 4 por Parejas; más canchas no cambian nada) */
+function Super8CourtsField({ courts, individual, onChange }) {
+  const max = individual ? 2 : 4;
+  const used = Math.min(courts, max);
+  const btn = "w-8 h-8 rounded-full border border-teal-700 text-teal-200 disabled:opacity-30";
+  return (
+    <div className="flex items-center gap-3 flex-wrap mb-4 text-sm" style={F.body}>
+      <span className="text-teal-400">Canchas</span>
+      <button type="button" className={btn} disabled={courts <= 1} onClick={() => onChange(courts - 1)} aria-label="Una cancha menos">−</button>
+      <span className="font-semibold w-4 text-center">{courts}</span>
+      <button type="button" className={btn} onClick={() => onChange(courts + 1)} aria-label="Una cancha más">+</button>
+      <span className="text-xs text-teal-500">
+        {used === 1 ? "Un partido atrás del otro." : `${used} partidos a la vez en cada turno.`}
+        {courts > max ? ` Con ${individual ? "8 jugadores" : "8 parejas"} entran hasta ${max} a la vez.` : ""}
+      </span>
+    </div>
+  );
+}
+
+function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover, courts = 1, onCourtsChange }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const individual = category.format === "super8_individual";
   const entryWord = individual ? "jugadores" : "parejas";
@@ -6264,16 +7049,19 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
           </div>
         )}
       </div>
-      <Super8View category={category} format={format} onSetScore={onSetScore} onWalkover={onWalkover} />
+      {onCourtsChange && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
+      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} />
     </div>
   );
 }
 
-function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked }) {
+function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament }) {
   const [tab, setTab] = useState("parejas");
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
+  const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
   const [editingPairId, setEditingPairId] = useState(null);
+  const [confirmEliminateId, setConfirmEliminateId] = useState(null);
   const [editPairName, setEditPairName] = useState("");
   const [groupName, setGroupName] = useState("");
   const [groupSelection, setGroupSelection] = useState([]);
@@ -6290,9 +7078,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     if (!pairName.trim()) return;
     if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
     if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
-    const conflict = findPlayerCategoryConflict(pairName, tournament, category.id);
-    if (conflict) { setPairError(`Uno de los jugadores ya está anotado en la categoría "${conflict}". Una pareja/jugador solo puede jugar una categoría por torneo.`); return; }
     setPairError("");
+    // Aviso (no bloqueo) si algún jugador ya está anotado en el torneo con un nombre igual o parecido
+    setPairNotice(duplicateNamesText(findNameDuplicates(splitPair(pairName), tournamentPairEntries(tournament))) || "");
     onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name: pairName.trim(), availability: [] }] });
     setPairName("");
   };
@@ -6307,6 +7095,15 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       pairs: category.pairs.filter((p) => p.id !== id),
       groups: category.groups.map((g) => ({ ...g, pairIds: g.pairIds.filter((pid) => pid !== id) })),
     });
+  };
+
+  /* Eliminar del torneo a una pareja que abandona (distinto del W.O., que solo pierde ese partido):
+     queda al fondo de su grupo y no clasifica, pero sus partidos jugados siguen valiendo, y los
+     pendientes pasan solos a W.O. a favor del rival (ver withForfeits). Se puede deshacer con
+     "Reincorporar", que también saca esos W.O. automáticos. */
+  const setPairEliminated = (id, eliminated) => {
+    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, eliminated } : p)) });
+    setConfirmEliminateId(null);
   };
 
   // La edición de nombre/jugadores de una pareja solo se permite mientras no haya jugado su primer partido
@@ -6356,7 +7153,20 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       ...category,
       groups: category.groups.map((g) => {
         if (g.id !== groupId) return g;
-        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        return { ...g, matches };
+      }),
+    });
+  };
+
+  // Retiro (RET): conserva el marcador cargado; el resto se completa a favor del rival
+  const setGroupRetired = (groupId, matchId, retiredPairId) => {
+    onUpdateCategory({
+      ...category,
+      groups: category.groups.map((g) => {
+        if (g.id !== groupId) return g;
+        let matches = g.matches.map((m) => (m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
         if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
         return { ...g, matches };
       }),
@@ -6430,7 +7240,12 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   const setBracketWalkover = (matchId, walkoverPairId) => {
-    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+  };
+
+  const setBracketRetired = (matchId, retiredPairId) => {
+    const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
   };
 
@@ -6468,7 +7283,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             <button type="button" onClick={addPair} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar</button>
           </div>
           {pairError && <p className="text-xs text-red-400 mb-3" style={F.body}>{pairError}</p>}
-          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Una pareja/jugador solo puede estar anotado en una categoría de este torneo.</p>
+          {pairNotice && <p className="text-xs text-amber-400 mb-3" style={F.body}>{pairNotice} Si son personas distintas, no hace falta hacer nada.</p>}
+          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Si un jugador ya está anotado en el torneo con un nombre igual o parecido, te avisamos (no se bloquea).</p>
           <ul className="space-y-2">
             {category.pairs.map((p) => {
               const played = pairHasPlayed(category, p.id);
@@ -6486,9 +7302,26 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
                       />
                     ) : (
-                      <span style={F.body}>{p.name}</span>
+                      <span className="flex items-center gap-2 min-w-0" style={F.body}>
+                        <span className={p.eliminated ? "line-through decoration-red-400/60 opacity-60" : ""}>{p.name}</span>
+                        {p.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171" }}>ELIMINADA</span>}
+                      </span>
                     )}
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                      {/* Eliminar del torneo: solo con la pareja ya en un grupo (antes alcanza con "Quitar") */}
+                      {!super8 && !isEditing && assignedPairIds.has(p.id) && (
+                        p.eliminated ? (
+                          <button type="button" onClick={() => setPairEliminated(p.id, false)} className="text-sm text-lime-400">Reincorporar</button>
+                        ) : confirmEliminateId === p.id ? (
+                          <span className="flex items-center gap-2 text-sm" style={F.body}>
+                            <span className="text-teal-300">¿Eliminar del torneo? Sus partidos pendientes pasan a W.O.</span>
+                            <button type="button" onClick={() => setPairEliminated(p.id, true)} className="text-red-400 font-semibold">Sí, eliminar</button>
+                            <button type="button" onClick={() => setConfirmEliminateId(null)} className="text-teal-400">Cancelar</button>
+                          </span>
+                        ) : (
+                          <button type="button" onClick={() => setConfirmEliminateId(p.id)} className="text-sm text-red-400" title="La pareja abandona: queda al fondo de su grupo, no clasifica y sus partidos pendientes pasan a W.O.">Eliminar del torneo</button>
+                        )
+                      )}
                       {isEditing ? (
                         <>
                           <button type="button" onClick={() => saveEditPair(p.id)} className="text-sm text-lime-400">Guardar</button>
@@ -6525,6 +7358,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           onGroupsLocked={onGroupsLocked}
           onSetScore={setMatchSetScore}
           onWalkover={setGroupWalkover}
+          courts={tournament.courtsCount || 1}
+          onCourtsChange={onUpdateTournament ? (n) => onUpdateTournament({ ...tournament, courtsCount: n }) : null}
         />
       )}
 
@@ -6634,18 +7469,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             <MatchSetsEditor
                               sets={m.sets}
                               format={format}
+                              partial={!!m.retired}
                               onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
                             />
-                            <div className="flex gap-2 flex-wrap justify-end text-[10px]">
-                              {m.walkover ? (
-                                <button type="button" onClick={() => setGroupWalkover(g.id, m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                              ) : (
-                                <>
-                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
-                                  <button type="button" onClick={() => setGroupWalkover(g.id, m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
-                                </>
-                              )}
-                            </div>
+                            <MatchOutcomeButtons
+                              m={m}
+                              nameA={pairsById[m.pairA]?.name || "pareja 1"}
+                              nameB={pairsById[m.pairB]?.name || "pareja 2"}
+                              onWalkover={(pairId) => setGroupWalkover(g.id, m.id, pairId)}
+                              onRetired={(pairId) => setGroupRetired(g.id, m.id, pairId)}
+                              className="justify-end text-[10px]"
+                            />
                           </div>
                         )}
                       </div>
@@ -6813,7 +7647,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                           {m.walkover ? (
                             <p className="text-amber-400 font-semibold text-xs">WO</p>
                           ) : (() => {
-                            const { a: setsA, b: setsB } = setsWon(m);
+                            const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
@@ -6824,6 +7658,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                                   <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsB : ""}</span>}
                                 </div>
+                                {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                               </>
                             );
                           })()}
@@ -6832,18 +7667,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                               <MatchSetsEditor
                                 sets={m.sets}
                                 format={format}
+                                partial={!!m.retired}
                                 onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
                               />
-                              <div className="flex gap-2 flex-wrap text-[10px]">
-                                {m.walkover ? (
-                                  <button type="button" onClick={() => setBracketWalkover(m.id, null)} className="text-teal-400 underline">Deshacer WO</button>
-                                ) : (
-                                  <>
-                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairA)} className="text-amber-400 underline">WO {pairsById[m.pairA]?.name || "pareja 1"}</button>
-                                    <button type="button" onClick={() => setBracketWalkover(m.id, m.pairB)} className="text-amber-400 underline">WO {pairsById[m.pairB]?.name || "pareja 2"}</button>
-                                  </>
-                                )}
-                              </div>
+                              <MatchOutcomeButtons
+                                m={m}
+                                nameA={pairsById[m.pairA]?.name || "pareja 1"}
+                                nameB={pairsById[m.pairB]?.name || "pareja 2"}
+                                onWalkover={(pairId) => setBracketWalkover(m.id, pairId)}
+                                onRetired={(pairId) => setBracketRetired(m.id, pairId)}
+                                className="text-[10px]"
+                              />
                             </>
                           )}
                         </div>
@@ -7003,89 +7837,91 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
   };
 
   return (
-    <div className="px-6 py-8 max-w-4xl mx-auto">
-      <button onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-2" style={F.body}>← Mis torneos</button>
-      <div className="flex justify-between items-center flex-wrap gap-3 mb-1">
-        <h1 className="text-xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-        <select
-          value={tournament.status}
-          onChange={(e) => update({ ...tournament, status: e.target.value })}
-          className="px-3 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-        >
-          {Object.values(STATUS).map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
-      <p className="text-sm text-teal-400 mb-4" style={F.body}>
-        {usesSchedule
-          ? "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual."
-          : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan uno atrás del otro en la cancha disponible."}
-      </p>
-
-      {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
-      {tournamentType(tournament) !== "super8" && tournament.categories.length > 0 && (
-        <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={F.body}>
-          <span className="shrink-0 self-center text-xs text-teal-400">Inscriptas:</span>
-          {tournament.categories.map((c) => {
-            const cupo = categoryCupo(c);
-            const full = cupo != null && c.pairs.length >= cupo;
-            return (
-              <span key={c.id} className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${full ? "#fb923c" : BRAND.cyan}55`, color: full ? "#fdba74" : BRAND.ink }}>
-                {c.name} · <span className="font-semibold">{c.pairs.length}{cupo != null ? `/${cupo}` : ""}</span> pareja{c.pairs.length !== 1 ? "s" : ""}
-              </span>
-            );
-          })}
-          {tournament.categories.length > 1 && (
-            <span className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime + "22", color: BRAND.lime }}>
-              Total · {tournament.categories.reduce((sum, c) => sum + c.pairs.length, 0)}
-            </span>
-          )}
-        </div>
-      )}
-
-      <div className="flex gap-2 mb-6 overflow-x-auto">
-        {tabs.map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setView(key)}
-            className={`shrink-0 whitespace-nowrap px-4 py-2 rounded text-sm border flex items-center gap-1.5 ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
+    <CourtNamesContext.Provider value={tournament}>
+      <div className="px-6 py-8 max-w-4xl mx-auto">
+        <button onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-2" style={F.body}>← Mis torneos</button>
+        <div className="flex justify-between items-center flex-wrap gap-3 mb-1">
+          <h1 className="text-xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
+          <select
+            value={tournament.status}
+            onChange={(e) => update({ ...tournament, status: e.target.value })}
+            className="px-3 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
           >
-            {label}
-            {key === "inscripciones" && pendingCount > 0 && (
-              <span className="px-1.5 rounded-full text-[10px] font-bold" style={{ backgroundColor: "#fb923c", color: "#14181f" }}>{pendingCount}</span>
+            {Object.values(STATUS).map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <p className="text-sm text-teal-400 mb-4" style={F.body}>
+          {usesSchedule
+            ? "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual."
+            : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan por turnos en las canchas del torneo (se eligen en \"Partidos y posiciones\")."}
+        </p>
+
+        {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
+        {tournamentType(tournament) !== "super8" && tournament.categories.length > 0 && (
+          <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={F.body}>
+            <span className="shrink-0 self-center text-xs text-teal-400">Inscriptas:</span>
+            {tournament.categories.map((c) => {
+              const cupo = categoryCupo(c);
+              const full = cupo != null && c.pairs.length >= cupo;
+              return (
+                <span key={c.id} className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${full ? "#fb923c" : BRAND.cyan}55`, color: full ? "#fdba74" : BRAND.ink }}>
+                  {c.name} · <span className="font-semibold">{c.pairs.length}{cupo != null ? `/${cupo}` : ""}</span> pareja{c.pairs.length !== 1 ? "s" : ""}
+                </span>
+              );
+            })}
+            {tournament.categories.length > 1 && (
+              <span className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime + "22", color: BRAND.lime }}>
+                Total · {tournament.categories.reduce((sum, c) => sum + c.pairs.length, 0)}
+              </span>
             )}
-          </button>
-        ))}
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-6 overflow-x-auto">
+          {tabs.map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className={`shrink-0 whitespace-nowrap px-4 py-2 rounded text-sm border flex items-center gap-1.5 ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+              style={F.body}
+            >
+              {label}
+              {key === "inscripciones" && pendingCount > 0 && (
+                <span className="px-1.5 rounded-full text-[10px] font-bold" style={{ backgroundColor: "#fb923c", color: "#14181f" }}>{pendingCount}</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {view === "inscripciones" ? (
+          <InscripcionesPanel tournament={tournament} update={update} inscripciones={inscripciones} onResolve={onResolveInscripcion} />
+        ) : view === "encancha" ? (
+          <OnCourtView tournament={tournament} update={update} />
+        ) : view === "horarios" ? (
+          <ScheduleAdminView tournament={tournament} update={update} />
+        ) : (
+          <>
+            <TournamentTypeEditor tournament={tournament} update={update} />
+
+            <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Categorías</h2>
+            <CategoryTabs
+              categories={tournament.categories}
+              activeId={categoryId}
+              onSelect={setCategoryId}
+              onAdd={addCategory}
+              onRename={renameCategory}
+              onDelete={deleteCategory}
+            />
+
+            {category ? (
+              <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update} />
+            ) : (
+              <p className="opacity-60 text-sm" style={F.body}>Agregá al menos una categoría para empezar a cargar parejas.</p>
+            )}
+          </>
+        )}
       </div>
-
-      {view === "inscripciones" ? (
-        <InscripcionesPanel tournament={tournament} update={update} inscripciones={inscripciones} onResolve={onResolveInscripcion} />
-      ) : view === "encancha" ? (
-        <OnCourtView tournament={tournament} update={update} />
-      ) : view === "horarios" ? (
-        <ScheduleAdminView tournament={tournament} update={update} />
-      ) : (
-        <>
-          <TournamentTypeEditor tournament={tournament} update={update} />
-
-          <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Categorías</h2>
-          <CategoryTabs
-            categories={tournament.categories}
-            activeId={categoryId}
-            onSelect={setCategoryId}
-            onAdd={addCategory}
-            onRename={renameCategory}
-            onDelete={deleteCategory}
-          />
-
-          {category ? (
-            <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} />
-          ) : (
-            <p className="opacity-60 text-sm" style={F.body}>Agregá al menos una categoría para empezar a cargar parejas.</p>
-          )}
-        </>
-      )}
-    </div>
+    </CourtNamesContext.Provider>
   );
 }
 
@@ -7146,6 +7982,100 @@ function normalizeLoadedTournaments(tours) {
 
 /* ---------- App raíz ---------- */
 
+/* Guardado de torneos de a uno, con número de versión (ver
+   supabase/migrations/20261003_guardar_torneo.sql y src/merge.js). Por cada torneo hay una sola
+   escritura en vuelo; los cambios que llegan mientras tanto se guardan después, sobre la versión
+   nueva. Si otra persona guardó antes, se mezclan los cambios por categoría y se vuelve a guardar. */
+function useTournamentSaver(session, setTournaments, setSaveNotice) {
+  const serverCopy = useRef({}); // id -> última versión que sabemos que está en la base
+  const pending = useRef({});    // id -> último cambio local todavía sin guardar
+  const saving = useRef({});     // id -> true mientras hay una escritura en vuelo
+  const listRef = useRef([]);    // lista actual, para el guardado viejo (lista entera)
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  const setList = useCallback((fn) => setTournaments((prev) => { const next = fn(prev); listRef.current = next; return next; }), [setTournaments]);
+  const replaceLocal = useCallback((t) => setList((list) => (list.some((x) => x.id === t.id) ? list.map((x) => (x.id === t.id ? t : x)) : [...list, t])), [setList]);
+  const busy = (id) => !!(saving.current[id] || pending.current[id]);
+
+  /* La lista recién leída de la base: se anotan las versiones y se reemplazan los torneos que no
+     tienen cambios propios sin guardar */
+  const applyRemote = useCallback((remoteList) => {
+    remoteList.forEach((t) => { if (!busy(t.id)) serverCopy.current[t.id] = t; });
+    setList((prev) => {
+      const remoteIds = new Set(remoteList.map((t) => t.id));
+      const kept = prev.filter((t) => remoteIds.has(t.id) || busy(t.id));
+      const merged = kept.map((t) => (busy(t.id) ? t : remoteList.find((r) => r.id === t.id)));
+      remoteList.forEach((r) => { if (!kept.some((t) => t.id === r.id)) merged.push(r); });
+      return merged;
+    });
+  }, [setList]);
+
+  // Base de datos sin la migración todavía: se guarda como antes (la lista entera)
+  const saveWholeList = async () => kvSet(STORAGE_KEY_TOURNAMENTS, listRef.current, sessionRef.current?.accessToken);
+
+  const flush = async (id) => {
+    if (saving.current[id]) return;
+    saving.current[id] = true;
+    try {
+      for (let tries = 0; pending.current[id] && tries < 8; tries++) {
+        const mine = pending.current[id];
+        pending.current[id] = null;
+        const base = serverCopy.current[id];
+        let res;
+        try {
+          res = await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0 }, sessionRef.current?.accessToken);
+        } catch (err) {
+          if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
+          pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
+          setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
+          return;
+        }
+        if (res?.estado === "ok") {
+          serverCopy.current[id] = { ...mine, rev: res.rev };
+          setList((list) => list.map((x) => (x.id === id ? { ...x, rev: res.rev } : x)));
+        } else if (res?.estado === "conflicto") {
+          const remote = normalizeLoadedTournaments([res.torneo])[0];
+          const { merged, conflicts } = mergeTournament(base, pending.current[id] || mine, remote);
+          serverCopy.current[id] = remote;
+          pending.current[id] = merged;
+          replaceLocal(merged);
+          if (conflicts.length > 0) {
+            setSaveNotice(`Otra persona guardó cambios en ${conflicts.join(", ")} al mismo tiempo que vos y quedó lo suyo. Revisá y, si hace falta, volvé a cargar tu último cambio ahí.`);
+          }
+        }
+      }
+    } finally {
+      saving.current[id] = false;
+    }
+  };
+
+  const save = useCallback((t) => {
+    pending.current[t.id] = t;
+    replaceLocal(t);
+    flush(t.id);
+  }, [replaceLocal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const remove = useCallback(async (id) => {
+    pending.current[id] = null;
+    setList((list) => list.filter((t) => t.id !== id));
+    try {
+      await supabaseRpc("borrar_torneo", { p_id: id }, sessionRef.current?.accessToken);
+      delete serverCopy.current[id];
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await saveWholeList().catch(() => {});
+      else setSaveNotice("No se pudo borrar el torneo. Revisá la conexión y probá de nuevo.");
+    }
+  }, [setList]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const remember = useCallback((list) => {
+    listRef.current = list;
+    list.forEach((t) => { serverCopy.current[t.id] = t; });
+  }, []);
+
+  return useMemo(() => ({ save, remove, applyRemote, remember }), [save, remove, applyRemote, remember]);
+}
+
 function SmashPointAppInner() {
   useBrandFonts();
   const [ready, setReady] = useState(false);
@@ -7159,6 +8089,8 @@ function SmashPointAppInner() {
   const [route, setRoute] = useState("public-home");
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
+  const [saveNotice, setSaveNotice] = useState(null);
+  const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
 
   useEffect(() => {
     (async () => {
@@ -7204,7 +8136,30 @@ function SmashPointAppInner() {
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
 
+        // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
+        const stored = readStoredAuth();
+        if (stored?.refreshToken) {
+          try {
+            const auth = await renewWithLatestToken(stored.refreshToken);
+            const profile = orgs.find((o) => o.id === auth.user?.id);
+            if (profile) {
+              const restored = { ...profile, ...authFields(auth) };
+              writeStoredAuth({ ...stored, refreshToken: restored.refreshToken });
+              setSession(restored);
+              const home = profile.role === "creador" ? "creator-home" : "admin-home";
+              const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
+              setRoute(canResume ? "admin-tournament" : home);
+              if (canResume) setSelectedId(stored.selectedId);
+            } else {
+              writeStoredAuth(null);
+            }
+          } catch (err) {
+            if (err.expired) writeStoredAuth(null); // sin conexión se conserva, para reintentar la próxima vez
+          }
+        }
+
         setOrganizers(orgs);
+        saver.remember(tours);
         setTournaments(tours);
         setAds(loadedAds);
         setCircuits(loadedCircuits);
@@ -7213,6 +8168,64 @@ function SmashPointAppInner() {
       }
     })();
   }, []);
+
+  /* Renueva la sesión unos minutos antes de que venza (vence a la hora), y también al volver a la
+     pestaña si mientras tanto quedó por vencer (en el celular los temporizadores se frenan). Sin
+     conexión se reintenta al minuto; si la sesión ya no sirve, se cierra. */
+  const refreshingRef = useRef(false);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const renewSession = useCallback(async () => {
+    // Si el navegador no deja guardar (modo incógnito), se usa el refresh token de la memoria
+    const current = readStoredAuth() || (sessionRef.current?.refreshToken ? { refreshToken: sessionRef.current.refreshToken } : null);
+    if (!current?.refreshToken || refreshingRef.current) return;
+    refreshingRef.current = true;
+    try {
+      const auth = await renewWithLatestToken(current.refreshToken);
+      const fields = authFields(auth);
+      writeStoredAuth({ ...current, refreshToken: fields.refreshToken });
+      setSession((s) => (s ? { ...s, ...fields } : s));
+    } catch (err) {
+      if (err.expired) {
+        writeStoredAuth(null);
+        setSession(null);
+        setRoute("login");
+        setSaveNotice("Tu sesión venció. Volvé a entrar para seguir cargando.");
+      } else {
+        setSession((s) => (s ? { ...s, expiresAt: Date.now() + 6 * 60 * 1000 } : s)); // reintenta en 1 minuto
+      }
+    } finally {
+      refreshingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session?.expiresAt) return;
+    const wait = Math.max(5000, session.expiresAt - Date.now() - 5 * 60 * 1000);
+    const timer = setTimeout(renewSession, wait);
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && session.expiresAt - Date.now() < 5 * 60 * 1000) renewSession();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session?.expiresAt, renewSession]);
+
+  // Recuerda en qué pantalla del panel estaba, para volver ahí al recargar
+  useEffect(() => {
+    const current = readStoredAuth();
+    if (session && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
+  }, [session, route, selectedId]);
+
+  const startSession = (org) => {
+    writeStoredAuth({ refreshToken: org.refreshToken, route: null, selectedId: null });
+    setSession(org);
+    setRoute(org.role === "creador" ? "creator-home" : "admin-home");
+  };
+  const endSession = () => {
+    writeStoredAuth(null);
+    setSession(null);
+    setRoute("public-home");
+  };
 
   const persistAds = useCallback(async (next) => {
     setAds(next);
@@ -7237,11 +8250,39 @@ function SmashPointAppInner() {
     setEvents(next);
     try { await kvSet(STORAGE_KEY_EVENTS, next, session?.accessToken); } catch {}
   }, [session]);
-  const saveEvent = (ev) => persistEvents(upsertById(events, { ...ev, organizerId: ev.organizerId || session?.id }));
+  /* Eventos y circuitos se guardan de a uno, y la base controla que sean de quien guarda (ver
+     supabase/migrations/20261005_guardar_eventos_circuitos_portadas.sql). Si la base todavía no
+     tiene esa migración, se guarda como antes: la lista entera. */
+  const listSaveError = (err) => setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar esto." : "No se pudo guardar. Revisá la conexión y probá de nuevo.");
+  const saveListItem = async (key, item, wholeList) => {
+    try {
+      await supabaseRpc("guardar_en_lista", { p_clave: key, p_item: item }, session?.accessToken);
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await kvSet(key, wholeList, session?.accessToken).catch(() => {});
+      else listSaveError(err);
+    }
+  };
+  const deleteListItem = async (key, id, wholeList) => {
+    try {
+      await supabaseRpc("borrar_de_lista", { p_clave: key, p_id: id }, session?.accessToken);
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await kvSet(key, wholeList, session?.accessToken).catch(() => {});
+      else listSaveError(err);
+    }
+  };
+
+  const saveEvent = (ev) => {
+    const item = { ...ev, organizerId: ev.organizerId || session?.id };
+    const next = upsertById(events, item);
+    setEvents(next);
+    saveListItem(STORAGE_KEY_EVENTS, item, next);
+  };
   // Al borrar un evento, sus torneos vuelven a mostrarse sueltos
   const deleteEvent = (id) => {
-    persistEvents(events.filter((e) => e.id !== id));
-    if (tournaments.some((t) => t.eventId === id)) persistTournaments(tournaments.map((t) => (t.eventId === id ? { ...t, eventId: null } : t)));
+    const next = events.filter((e) => e.id !== id);
+    setEvents(next);
+    deleteListItem(STORAGE_KEY_EVENTS, id, next);
+    tournaments.filter((t) => t.eventId === id).forEach((t) => saver.save({ ...t, eventId: null }));
   };
 
   const saveCoach = (c) => persistCoaches(upsertById(coaches, c));
@@ -7252,25 +8293,29 @@ function SmashPointAppInner() {
     try { await kvSet(STORAGE_KEY_CIRCUITS, next, session?.accessToken); } catch {}
   }, [session]);
 
+  /* La lista entera de torneos de una vez: solo para restaurar un respaldo (administración). El
+     resto de los cambios se guarda de a un torneo (saver). */
   const persistTournaments = useCallback(async (next) => {
     setTournaments(next);
-    try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); } catch {}
-  }, [session]);
+    try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); saver.remember(next); } catch {}
+  }, [session, saver]);
 
-  /* Vuelve a leer los torneos de Supabase. Se usa después de aceptar una inscripción (la pareja la
-     agrega el servidor) y al volver a la pestaña del panel, para no guardar encima una copia vieja. */
+  /* Vuelve a leer los torneos de Supabase: después de aceptar una inscripción (la pareja la agrega
+     el servidor), al volver a la pestaña del panel y cada 20 segundos con un panel abierto, para ver
+     lo que guardan los demás. No pisa los cambios propios que todavía se están guardando. */
   const reloadTournaments = useCallback(async () => {
     try {
       const tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
-      if (Array.isArray(tours)) setTournaments(normalizeLoadedTournaments(tours));
+      if (Array.isArray(tours)) saver.applyRemote(normalizeLoadedTournaments(tours));
     } catch {}
-  }, []);
+  }, [saver]);
 
   useEffect(() => {
     if (!session) return;
     const onVisible = () => { if (document.visibilityState === "visible") reloadTournaments(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") reloadTournaments(); }, 20000);
+    return () => { document.removeEventListener("visibilitychange", onVisible); clearInterval(id); };
   }, [session, reloadTournaments]);
 
   // Inscripciones de los torneos del organizador logueado (para los avisos de "nuevas" y su pestaña)
@@ -7294,29 +8339,35 @@ function SmashPointAppInner() {
     await Promise.all([accept ? reloadTournaments() : null, reloadInscripciones()]);
   };
 
+  // Cada vez que se guarda un torneo, los pendientes de las parejas que quedaron fuera pasan a W.O.
   const updateTournament = (updated) => {
-    persistTournaments(tournaments.map((t) => (t.id === updated.id ? updated : t)));
+    saver.save({ ...updated, categories: (updated.categories || []).map(withForfeits) });
   };
 
-  const deleteTournament = (id) => {
-    persistTournaments(tournaments.filter((t) => t.id !== id));
-  };
+  const deleteTournament = (id) => saver.remove(id);
 
-  const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas }) => {
-    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}) };
+  // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
+  const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
-    persistTournaments([...tournaments, t]);
+    saver.save(t);
   };
 
   const updateOrganizerProfile = async (id, patch) => {
     const { coverUrl, ...profilePatch } = patch;
     if (Object.keys(profilePatch).length > 0) await updateOrganizerProfileRemote(id, session.accessToken, profilePatch);
     if (coverUrl !== undefined) {
-      // Se relee antes de guardar para no pisar la portada que otro organizador haya cambiado
-      const covers = { ...((await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {}), [id]: coverUrl };
-      await kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session.accessToken);
+      // Solo la portada de este organizador (la base controla que sea suya o del creador)
+      try {
+        await supabaseRpc("guardar_portada", { p_organizador: id, p_url: coverUrl }, session.accessToken);
+      } catch (err) {
+        if (err.pgCode !== "PGRST202") throw err;
+        // Base sin la migración: como antes, se relee para no pisar la portada de otro organizador
+        const covers = { ...((await kvGet(STORAGE_KEY_ORGANIZER_COVERS)) || {}), [id]: coverUrl };
+        await kvSet(STORAGE_KEY_ORGANIZER_COVERS, covers, session.accessToken);
+      }
     }
     setOrganizers((orgs) => orgs.map((o) => (o.id === id ? { ...o, ...patch } : o)));
     setSession((s) => (s && s.id === id ? { ...s, ...patch } : s));
@@ -7346,16 +8397,23 @@ function SmashPointAppInner() {
   };
 
   const addCircuit = (circuit) => {
-    persistCircuits([...circuits, { id: uid(), organizerId: session.id, ...circuit }]);
+    const item = { id: uid(), organizerId: session.id, ...circuit };
+    const next = [...circuits, item];
+    setCircuits(next);
+    saveListItem(STORAGE_KEY_CIRCUITS, item, next);
   };
 
   const updateCircuit = (updated) => {
-    persistCircuits(circuits.map((c) => (c.id === updated.id ? updated : c)));
+    const next = circuits.map((c) => (c.id === updated.id ? updated : c));
+    setCircuits(next);
+    saveListItem(STORAGE_KEY_CIRCUITS, updated, next);
   };
 
   const deleteCircuit = (id) => {
-    persistCircuits(circuits.filter((c) => c.id !== id));
-    persistTournaments(tournaments.map((t) => (t.circuitId === id ? { ...t, circuitId: null } : t)));
+    const next = circuits.filter((c) => c.id !== id);
+    setCircuits(next);
+    deleteListItem(STORAGE_KEY_CIRCUITS, id, next);
+    tournaments.filter((t) => t.circuitId === id).forEach((t) => saver.save({ ...t, circuitId: null }));
   };
 
   /* Los organizadores del archivo no se restauran: son cuentas de Supabase Auth que no se pueden
@@ -7394,7 +8452,7 @@ function SmashPointAppInner() {
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
       : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
-    content = <Login onBack={() => setRoute("public-home")} onLogin={(org) => { setSession(org); setRoute(org.role === "creador" ? "creator-home" : "admin-home"); }} />;
+    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
@@ -7407,7 +8465,7 @@ function SmashPointAppInner() {
         onCreateOrganizer={createOrganizer}
         onDeleteOrganizer={deleteOrganizer}
         onDeleteTournament={deleteTournament}
-        onSaveInfoTournament={(t) => persistTournaments(upsertById(tournaments, t))}
+        onSaveInfoTournament={(t) => saver.save(t)}
         venues={venues}
         coaches={coaches}
         events={events}
@@ -7420,7 +8478,7 @@ function SmashPointAppInner() {
         onUpdateAd={updateAd}
         onDeleteAd={deleteAd}
         onRestoreBackup={restoreBackup}
-        onLogout={() => { setSession(null); setRoute("public-home"); }}
+        onLogout={endSession}
       />
     );
   } else if (route === "admin-home" && session) {
@@ -7431,7 +8489,7 @@ function SmashPointAppInner() {
         circuits={myCircuits}
         onCreate={createTournament}
         onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
-        onLogout={() => { setSession(null); setRoute("public-home"); }}
+        onLogout={endSession}
         onUpdate={updateTournament}
         onDelete={deleteTournament}
         onAddCircuit={addCircuit}
@@ -7466,6 +8524,15 @@ function SmashPointAppInner() {
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
           <AdBanner ads={ads} />
           <ContactFooter />
+        </div>
+      )}
+      {/* Aviso de guardado: choque con otra persona o falta de conexión */}
+      {saveNotice && (
+        <div role="alert" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)" }}>
+          <div className="max-w-md mx-auto rounded-xl p-3 flex items-start gap-3 text-sm" style={{ ...F.body, ...neonStyle("#fb923c"), backgroundColor: "#1b2027", color: "#fed7aa" }}>
+            <span className="flex-1">{saveNotice}</span>
+            <button type="button" onClick={() => setSaveNotice(null)} className="text-teal-300 shrink-0" aria-label="Cerrar aviso">✕</button>
+          </div>
         </div>
       )}
     </div>
