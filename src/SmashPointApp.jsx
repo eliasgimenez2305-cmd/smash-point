@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
+import { findNameDuplicates, splitPair } from "./names.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -1519,24 +1520,20 @@ function autoFormGroups(pairs, playDates) {
   });
   return { groups: formed, warnings };
 }
-/* Separa los nombres de jugadores de una pareja: "Gómez / Ibáñez" -> ["gómez", "ibáñez"] */
-function splitPlayers(pairName) {
-  return pairName.split("/").map((s) => s.trim().toLowerCase()).filter(Boolean);
+/* Parejas ya anotadas en el torneo (todas sus categorías), para el aviso de nombres repetidos */
+function tournamentPairEntries(tournament) {
+  return (tournament.categories || []).flatMap((c) => c.pairs.map((p) => ({ name: p.name, where: c.name, kind: "anotada" })));
 }
 
-/* Busca si algún jugador de esta pareja ya está anotado en otra categoría del mismo torneo.
-   Devuelve el nombre de esa categoría, o null si no hay conflicto. */
-function findPlayerCategoryConflict(pairName, tournament, currentCategoryId) {
-  const players = splitPlayers(pairName);
-  if (players.length === 0) return null;
-  for (const c of tournament.categories) {
-    if (c.id === currentCategoryId) continue;
-    for (const p of c.pairs) {
-      const otherPlayers = splitPlayers(p.name);
-      if (players.some((pl) => otherPlayers.includes(pl))) return c.name;
-    }
-  }
-  return null;
+/* Texto del aviso de nombres repetidos (ver findNameDuplicates). Muestra hasta 3. */
+function duplicateNamesText(found) {
+  if (found.length === 0) return null;
+  const lines = found.slice(0, 3).map((f) => {
+    const pending = f.kind === "pendiente";
+    if (f.match === "igual") return pending ? `"${f.player}" tiene otra inscripción pendiente en ${f.where}` : `"${f.player}" ya está anotado en ${f.where}`;
+    return `"${f.player}" se parece a "${f.other}" (${pending ? "inscripción pendiente" : "anotado"} en ${f.where})`;
+  });
+  return `Ojo, puede estar repetido: ${lines.join(" · ")}${found.length > 3 ? ` y ${found.length - 3} más` : ""}.`;
 }
 
 /* ---------- Circuitos anuales (torneos "fecha" que suman puntos individuales) ---------- */
@@ -6818,7 +6815,13 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
         {pending.map((i) => {
           const category = categoriesById[i.categoria_id];
           const left = category ? categorySpotsLeft(category) : null;
-          const conflict = category ? findPlayerCategoryConflict(names(i), tournament, category.id) : null;
+          // Aviso (no bloqueo): algún jugador igual o parecido ya anotado o con otra inscripción pendiente
+          const players = [i.jugador1_nombre, i.jugador2_nombre].filter(Boolean);
+          const others = [
+            ...tournamentPairEntries(tournament),
+            ...pending.filter((x) => x.id !== i.id).map((x) => ({ name: names(x), where: categoriesById[x.categoria_id]?.name || "otra categoría", kind: "pendiente" })),
+          ];
+          const conflict = duplicateNamesText(findNameDuplicates(players, others));
           const busy = busyId === i.id;
           return (
             <div key={i.id} className="rounded-xl p-3" style={{ ...neonStyle("#fb923c"), backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -6841,7 +6844,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
                   {isSuper8(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
                 </p>
               )}
-              {conflict && <p className="text-xs text-amber-400 mt-1">Uno de los jugadores ya está anotado en "{conflict}".</p>}
+              {conflict && <p className="text-xs text-amber-400 mt-1">{conflict}</p>}
               {errors[i.id] && <p className="text-xs text-red-400 mt-1" role="alert">{errors[i.id]}</p>}
               <div className="flex gap-2 mt-3 flex-wrap">
                 {confirmRejectId === i.id ? (
@@ -7000,6 +7003,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [tab, setTab] = useState("parejas");
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
+  const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
   const [editingPairId, setEditingPairId] = useState(null);
   const [confirmEliminateId, setConfirmEliminateId] = useState(null);
   const [editPairName, setEditPairName] = useState("");
@@ -7018,9 +7022,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     if (!pairName.trim()) return;
     if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
     if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
-    const conflict = findPlayerCategoryConflict(pairName, tournament, category.id);
-    if (conflict) { setPairError(`Uno de los jugadores ya está anotado en la categoría "${conflict}". Una pareja/jugador solo puede jugar una categoría por torneo.`); return; }
     setPairError("");
+    // Aviso (no bloqueo) si algún jugador ya está anotado en el torneo con un nombre igual o parecido
+    setPairNotice(duplicateNamesText(findNameDuplicates(splitPair(pairName), tournamentPairEntries(tournament))) || "");
     onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name: pairName.trim(), availability: [] }] });
     setPairName("");
   };
@@ -7223,7 +7227,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             <button type="button" onClick={addPair} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar</button>
           </div>
           {pairError && <p className="text-xs text-red-400 mb-3" style={F.body}>{pairError}</p>}
-          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Una pareja/jugador solo puede estar anotado en una categoría de este torneo.</p>
+          {pairNotice && <p className="text-xs text-amber-400 mb-3" style={F.body}>{pairNotice} Si son personas distintas, no hace falta hacer nada.</p>}
+          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Si un jugador ya está anotado en el torneo con un nombre igual o parecido, te avisamos (no se bloquea).</p>
           <ul className="space-y-2">
             {category.pairs.map((p) => {
               const played = pairHasPlayed(category, p.id);
