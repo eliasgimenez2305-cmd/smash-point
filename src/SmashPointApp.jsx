@@ -3,6 +3,7 @@ import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
+import { mergeTournament } from "./merge.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -7926,6 +7927,100 @@ function normalizeLoadedTournaments(tours) {
 
 /* ---------- App raíz ---------- */
 
+/* Guardado de torneos de a uno, con número de versión (ver
+   supabase/migrations/20261003_guardar_torneo.sql y src/merge.js). Por cada torneo hay una sola
+   escritura en vuelo; los cambios que llegan mientras tanto se guardan después, sobre la versión
+   nueva. Si otra persona guardó antes, se mezclan los cambios por categoría y se vuelve a guardar. */
+function useTournamentSaver(session, setTournaments, setSaveNotice) {
+  const serverCopy = useRef({}); // id -> última versión que sabemos que está en la base
+  const pending = useRef({});    // id -> último cambio local todavía sin guardar
+  const saving = useRef({});     // id -> true mientras hay una escritura en vuelo
+  const listRef = useRef([]);    // lista actual, para el guardado viejo (lista entera)
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  const setList = useCallback((fn) => setTournaments((prev) => { const next = fn(prev); listRef.current = next; return next; }), [setTournaments]);
+  const replaceLocal = useCallback((t) => setList((list) => (list.some((x) => x.id === t.id) ? list.map((x) => (x.id === t.id ? t : x)) : [...list, t])), [setList]);
+  const busy = (id) => !!(saving.current[id] || pending.current[id]);
+
+  /* La lista recién leída de la base: se anotan las versiones y se reemplazan los torneos que no
+     tienen cambios propios sin guardar */
+  const applyRemote = useCallback((remoteList) => {
+    remoteList.forEach((t) => { if (!busy(t.id)) serverCopy.current[t.id] = t; });
+    setList((prev) => {
+      const remoteIds = new Set(remoteList.map((t) => t.id));
+      const kept = prev.filter((t) => remoteIds.has(t.id) || busy(t.id));
+      const merged = kept.map((t) => (busy(t.id) ? t : remoteList.find((r) => r.id === t.id)));
+      remoteList.forEach((r) => { if (!kept.some((t) => t.id === r.id)) merged.push(r); });
+      return merged;
+    });
+  }, [setList]);
+
+  // Base de datos sin la migración todavía: se guarda como antes (la lista entera)
+  const saveWholeList = async () => kvSet(STORAGE_KEY_TOURNAMENTS, listRef.current, sessionRef.current?.accessToken);
+
+  const flush = async (id) => {
+    if (saving.current[id]) return;
+    saving.current[id] = true;
+    try {
+      for (let tries = 0; pending.current[id] && tries < 8; tries++) {
+        const mine = pending.current[id];
+        pending.current[id] = null;
+        const base = serverCopy.current[id];
+        let res;
+        try {
+          res = await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0 }, sessionRef.current?.accessToken);
+        } catch (err) {
+          if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
+          pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
+          setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
+          return;
+        }
+        if (res?.estado === "ok") {
+          serverCopy.current[id] = { ...mine, rev: res.rev };
+          setList((list) => list.map((x) => (x.id === id ? { ...x, rev: res.rev } : x)));
+        } else if (res?.estado === "conflicto") {
+          const remote = normalizeLoadedTournaments([res.torneo])[0];
+          const { merged, conflicts } = mergeTournament(base, pending.current[id] || mine, remote);
+          serverCopy.current[id] = remote;
+          pending.current[id] = merged;
+          replaceLocal(merged);
+          if (conflicts.length > 0) {
+            setSaveNotice(`Otra persona guardó cambios en ${conflicts.join(", ")} al mismo tiempo que vos y quedó lo suyo. Revisá y, si hace falta, volvé a cargar tu último cambio ahí.`);
+          }
+        }
+      }
+    } finally {
+      saving.current[id] = false;
+    }
+  };
+
+  const save = useCallback((t) => {
+    pending.current[t.id] = t;
+    replaceLocal(t);
+    flush(t.id);
+  }, [replaceLocal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const remove = useCallback(async (id) => {
+    pending.current[id] = null;
+    setList((list) => list.filter((t) => t.id !== id));
+    try {
+      await supabaseRpc("borrar_torneo", { p_id: id }, sessionRef.current?.accessToken);
+      delete serverCopy.current[id];
+    } catch (err) {
+      if (err.pgCode === "PGRST202") await saveWholeList().catch(() => {});
+      else setSaveNotice("No se pudo borrar el torneo. Revisá la conexión y probá de nuevo.");
+    }
+  }, [setList]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const remember = useCallback((list) => {
+    listRef.current = list;
+    list.forEach((t) => { serverCopy.current[t.id] = t; });
+  }, []);
+
+  return useMemo(() => ({ save, remove, applyRemote, remember }), [save, remove, applyRemote, remember]);
+}
+
 function SmashPointAppInner() {
   useBrandFonts();
   const [ready, setReady] = useState(false);
@@ -7939,6 +8034,8 @@ function SmashPointAppInner() {
   const [route, setRoute] = useState("public-home");
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
+  const [saveNotice, setSaveNotice] = useState(null);
+  const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
 
   useEffect(() => {
     (async () => {
@@ -7985,6 +8082,7 @@ function SmashPointAppInner() {
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
 
         setOrganizers(orgs);
+        saver.remember(tours);
         setTournaments(tours);
         setAds(loadedAds);
         setCircuits(loadedCircuits);
@@ -8021,7 +8119,7 @@ function SmashPointAppInner() {
   // Al borrar un evento, sus torneos vuelven a mostrarse sueltos
   const deleteEvent = (id) => {
     persistEvents(events.filter((e) => e.id !== id));
-    if (tournaments.some((t) => t.eventId === id)) persistTournaments(tournaments.map((t) => (t.eventId === id ? { ...t, eventId: null } : t)));
+    tournaments.filter((t) => t.eventId === id).forEach((t) => saver.save({ ...t, eventId: null }));
   };
 
   const saveCoach = (c) => persistCoaches(upsertById(coaches, c));
@@ -8032,25 +8130,29 @@ function SmashPointAppInner() {
     try { await kvSet(STORAGE_KEY_CIRCUITS, next, session?.accessToken); } catch {}
   }, [session]);
 
+  /* La lista entera de torneos de una vez: solo para restaurar un respaldo (administración). El
+     resto de los cambios se guarda de a un torneo (saver). */
   const persistTournaments = useCallback(async (next) => {
     setTournaments(next);
-    try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); } catch {}
-  }, [session]);
+    try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); saver.remember(next); } catch {}
+  }, [session, saver]);
 
-  /* Vuelve a leer los torneos de Supabase. Se usa después de aceptar una inscripción (la pareja la
-     agrega el servidor) y al volver a la pestaña del panel, para no guardar encima una copia vieja. */
+  /* Vuelve a leer los torneos de Supabase: después de aceptar una inscripción (la pareja la agrega
+     el servidor), al volver a la pestaña del panel y cada 20 segundos con un panel abierto, para ver
+     lo que guardan los demás. No pisa los cambios propios que todavía se están guardando. */
   const reloadTournaments = useCallback(async () => {
     try {
       const tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
-      if (Array.isArray(tours)) setTournaments(normalizeLoadedTournaments(tours));
+      if (Array.isArray(tours)) saver.applyRemote(normalizeLoadedTournaments(tours));
     } catch {}
-  }, []);
+  }, [saver]);
 
   useEffect(() => {
     if (!session) return;
     const onVisible = () => { if (document.visibilityState === "visible") reloadTournaments(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") reloadTournaments(); }, 20000);
+    return () => { document.removeEventListener("visibilitychange", onVisible); clearInterval(id); };
   }, [session, reloadTournaments]);
 
   // Inscripciones de los torneos del organizador logueado (para los avisos de "nuevas" y su pestaña)
@@ -8076,13 +8178,10 @@ function SmashPointAppInner() {
 
   // Cada vez que se guarda un torneo, los pendientes de las parejas que quedaron fuera pasan a W.O.
   const updateTournament = (updated) => {
-    const withForfeitsApplied = { ...updated, categories: (updated.categories || []).map(withForfeits) };
-    persistTournaments(tournaments.map((t) => (t.id === updated.id ? withForfeitsApplied : t)));
+    saver.save({ ...updated, categories: (updated.categories || []).map(withForfeits) });
   };
 
-  const deleteTournament = (id) => {
-    persistTournaments(tournaments.filter((t) => t.id !== id));
-  };
+  const deleteTournament = (id) => saver.remove(id);
 
   // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
   const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
@@ -8090,7 +8189,7 @@ function SmashPointAppInner() {
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
-    persistTournaments([...tournaments, t]);
+    saver.save(t);
   };
 
   const updateOrganizerProfile = async (id, patch) => {
@@ -8138,7 +8237,7 @@ function SmashPointAppInner() {
 
   const deleteCircuit = (id) => {
     persistCircuits(circuits.filter((c) => c.id !== id));
-    persistTournaments(tournaments.map((t) => (t.circuitId === id ? { ...t, circuitId: null } : t)));
+    tournaments.filter((t) => t.circuitId === id).forEach((t) => saver.save({ ...t, circuitId: null }));
   };
 
   /* Los organizadores del archivo no se restauran: son cuentas de Supabase Auth que no se pueden
@@ -8190,7 +8289,7 @@ function SmashPointAppInner() {
         onCreateOrganizer={createOrganizer}
         onDeleteOrganizer={deleteOrganizer}
         onDeleteTournament={deleteTournament}
-        onSaveInfoTournament={(t) => persistTournaments(upsertById(tournaments, t))}
+        onSaveInfoTournament={(t) => saver.save(t)}
         venues={venues}
         coaches={coaches}
         events={events}
@@ -8249,6 +8348,15 @@ function SmashPointAppInner() {
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
           <AdBanner ads={ads} />
           <ContactFooter />
+        </div>
+      )}
+      {/* Aviso de guardado: choque con otra persona o falta de conexión */}
+      {saveNotice && (
+        <div role="alert" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)" }}>
+          <div className="max-w-md mx-auto rounded-xl p-3 flex items-start gap-3 text-sm" style={{ ...F.body, ...neonStyle("#fb923c"), backgroundColor: "#1b2027", color: "#fed7aa" }}>
+            <span className="flex-1">{saveNotice}</span>
+            <button type="button" onClick={() => setSaveNotice(null)} className="text-teal-300 shrink-0" aria-label="Cerrar aviso">✕</button>
+          </div>
         </div>
       )}
     </div>
