@@ -552,6 +552,29 @@ function isSuper8(category) {
   return category?.format === "super8_individual" || category?.format === "super8_parejas";
 }
 
+/* Turnos de juego de un Súper 8 con varias canchas: los partidos de una misma ronda pueden ir a
+   la vez (nadie juega dos partidos en la misma ronda), así que cada ronda se reparte en turnos de
+   a tantos partidos como canchas haya. En el Individual entran hasta 2 a la vez (8 jugadores = 2
+   partidos por ronda) y por Parejas hasta 4. Con 1 cancha queda un partido por turno, uno atrás
+   del otro. Devuelve [{ round, matches: [{ m, court }] }]. */
+function super8Turns(matches, courtsCount) {
+  const rounds = [];
+  matches.forEach((m, i) => {
+    const r = m.round || i + 1;
+    let round = rounds.find((x) => x.round === r);
+    if (!round) { round = { round: r, matches: [] }; rounds.push(round); }
+    round.matches.push(m);
+  });
+  const turns = [];
+  rounds.forEach(({ round, matches: list }) => {
+    const perTurn = Math.max(1, Math.min(courtsCount || 1, list.length));
+    for (let i = 0; i < list.length; i += perTurn) {
+      turns.push({ round, matches: list.slice(i, i + perTurn).map((m, j) => ({ m, court: j + 1 })) });
+    }
+  });
+  return turns;
+}
+
 /* Round robin por el método del círculo: el primero queda fijo y el resto rota un lugar por ronda.
    Devuelve las rondas como listas de cruces [a, b]. Con 8 parejas da 7 rondas de 4 partidos. */
 function buildCircleRounds(ids) {
@@ -2607,7 +2630,9 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
   const finalNames = pending && !categoryNames.some((c) => c.toLowerCase() === pending.toLowerCase()) ? [...categoryNames, pending] : categoryNames;
   const create = () => {
     if (!step2Ready || finalNames.length === 0) return;
-    const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] } : null;
+    // Súper 8: arranca con una cancha (un partido atrás del otro); se cambia después en sus partidos
+    const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] }
+      : super8 ? { courtsCount: 1 } : null;
     onCreate({
       name: name.trim(), date, circuitId: config.type === "clasico" ? circuitId || null : null, config, schedule,
       categories: finalNames.map((n) => ({ name: n, cupo: super8 ? null : parseCupo(cupos[n] ?? "") })),
@@ -4677,9 +4702,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
 
 /* Súper 8: lista simple de todos los partidos, uno por renglón y en orden de juego
    ("Elías - Martín vs Juan - Negro"), y debajo la tabla de posiciones (se recalcula sola con cada
-   resultado). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
+   resultado). Con más de una cancha, los partidos van agrupados en turnos con su cancha (ver
+   super8Turns). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
    ellos es la vista de solo lectura para el público. */
-function Super8View({ category, format, onSetScore, onWalkover }) {
+function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
   const group = category.groups[0];
   if (!group) return null;
@@ -4687,36 +4713,54 @@ function Super8View({ category, format, onSetScore, onWalkover }) {
   const individual = category.format === "super8_individual";
   const standingsGroup = individual ? super8IndividualStandingsGroup(category, group) : group;
   const nameOf = (id) => pairsById[id]?.name || "—";
+  const turns = super8Turns(group.matches, courts);
+  const simultaneous = turns.some((turn) => turn.matches.length > 1);
+
+  const row = (m, tag) => {
+    const hasResult = matchIsPlayed(m);
+    const w = hasResult ? matchWinnerId(m) : null;
+    const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
+    return (
+      <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
+        <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+          {tag}
+          {side(m.pairA)}
+          <span className="text-xs text-teal-500">vs</span>
+          {side(m.pairB)}
+          {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+        </div>
+        {editable && (
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
+            {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
+            {m.walkover && (
+              <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div>
-      <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
-        {group.matches.map((m, i) => {
-          const hasResult = matchIsPlayed(m);
-          const w = hasResult ? matchWinnerId(m) : null;
-          const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
-          return (
-            <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>
-                {side(m.pairA)}
-                <span className="text-xs text-teal-500">vs</span>
-                {side(m.pairB)}
-                {!editable && hasResult && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+      {simultaneous ? (
+        // Varias canchas: los partidos de cada ronda se juegan a la vez, un turno abajo del otro
+        <div className="space-y-3">
+          {turns.map((turn, ti) => (
+            <div key={ti} className="rounded-xl border border-teal-800 min-w-0">
+              <p className="px-3 pt-2 text-[11px] font-bold uppercase tracking-wide text-teal-400" style={F.body}>Turno {ti + 1} <span className="text-teal-600 font-normal normal-case">· Ronda {turn.round}</span></p>
+              <div className="divide-y divide-teal-900">
+                {turn.matches.map(({ m, court }) => row(m, <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>Cancha {court}</span>))}
               </div>
-              {editable && (
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
-                  {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
-                  {m.walkover && (
-                    <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
-                  )}
-                </div>
-              )}
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
+          {group.matches.map((m, i) => row(m, <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>))}
+        </div>
+      )}
       <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Tabla de posiciones</h3>
       <StandingsTable group={standingsGroup} pairsById={pairsById} format={format} highlightCount={3} />
       <StandingsLegend />
@@ -4968,7 +5012,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
               <section className="mt-6">
                 <p className="text-xs text-teal-500 mb-4" style={F.body}>{CATEGORY_FORMAT_LABEL[category.format]}</p>
                 {category.groups.length > 0
-                  ? <Super8View category={category} format={format} />
+                  ? <Super8View category={category} format={format} courts={tournament.courtsCount || 1} />
                   : <p className="opacity-60 text-sm" style={F.body}>Todavía no se generaron los partidos.</p>}
               </section>
             ) : (
@@ -6717,7 +6761,27 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
 /* Pestaña "Partidos y posiciones" de una categoría Súper 8: genera el cuadro fijo de partidos
    (numerando a los jugadores/parejas por orden de inscripción o por sorteo) y después muestra la
    carga de resultados ronda por ronda con la tabla de posiciones debajo. */
-function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover }) {
+/* Canchas del Súper 8: con más de una, los partidos de cada ronda se juegan a la vez (hasta 2 en el
+   Individual y hasta 4 por Parejas; más canchas no cambian nada) */
+function Super8CourtsField({ courts, individual, onChange }) {
+  const max = individual ? 2 : 4;
+  const used = Math.min(courts, max);
+  const btn = "w-8 h-8 rounded-full border border-teal-700 text-teal-200 disabled:opacity-30";
+  return (
+    <div className="flex items-center gap-3 flex-wrap mb-4 text-sm" style={F.body}>
+      <span className="text-teal-400">Canchas</span>
+      <button type="button" className={btn} disabled={courts <= 1} onClick={() => onChange(courts - 1)} aria-label="Una cancha menos">−</button>
+      <span className="font-semibold w-4 text-center">{courts}</span>
+      <button type="button" className={btn} onClick={() => onChange(courts + 1)} aria-label="Una cancha más">+</button>
+      <span className="text-xs text-teal-500">
+        {used === 1 ? "Un partido atrás del otro." : `${used} partidos a la vez en cada turno.`}
+        {courts > max ? ` Con ${individual ? "8 jugadores" : "8 parejas"} entran hasta ${max} a la vez.` : ""}
+      </span>
+    </div>
+  );
+}
+
+function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover, courts = 1, onCourtsChange }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const individual = category.format === "super8_individual";
   const entryWord = individual ? "jugadores" : "parejas";
@@ -6794,12 +6858,13 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
           </div>
         )}
       </div>
-      <Super8View category={category} format={format} onSetScore={onSetScore} onWalkover={onWalkover} />
+      {onCourtsChange && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
+      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} />
     </div>
   );
 }
 
-function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked }) {
+function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament }) {
   const [tab, setTab] = useState("parejas");
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
@@ -7099,6 +7164,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           onGroupsLocked={onGroupsLocked}
           onSetScore={setMatchSetScore}
           onWalkover={setGroupWalkover}
+          courts={tournament.courtsCount || 1}
+          onCourtsChange={onUpdateTournament ? (n) => onUpdateTournament({ ...tournament, courtsCount: n }) : null}
         />
       )}
 
@@ -7652,7 +7719,7 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
           />
 
           {category ? (
-            <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} />
+            <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update} />
           ) : (
             <p className="opacity-60 text-sm" style={F.body}>Agregá al menos una categoría para empezar a cargar parejas.</p>
           )}
