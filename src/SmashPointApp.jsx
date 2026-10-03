@@ -3204,8 +3204,104 @@ function OnCourtView({ tournament, update }) {
 /* Grilla completa de horarios (admin): planilla tipo canchas x horarios con arrastrar y soltar.
    Reemplaza la vieja lista: bloquea/reubica automáticamente los choques de cancha y marca visualmente
    los partidos finalizados, ya que no queda un orden lineal como en una lista. */
+/* Grilla completa en una ventana emergente ("Abrir grilla"): todos los días, con las canchas en
+   columnas y las horas en filas, para ver todo de un vistazo. Solo lectura: tocar un partido abre
+   la ventanita de resultado. Pensada para 4 o 5 canchas; con más, se desliza de costado con la
+   columna de horas fija. */
+function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const duration = tournament.matchDurationMinutes || 90;
+  const courts = Array.from({ length: tournament.courtsCount || 4 }, (_, i) => i + 1);
+  const scheduled = matches.filter((m) => m.schedule);
+  const categoryColor = Object.fromEntries(tournament.categories.map((c, i) => [c.id, GROUP_COLORS[i % GROUP_COLORS.length]]));
+  const shortName = (id) => pairsById[id]?.name || "A definir";
+
+  const cell = (m) => {
+    const status = matchDisplayStatus(m);
+    const color = status === "finalizado" ? "#9fe022" : status === "en_curso" ? "#fb923c" : categoryColor[m.categoryId];
+    const w = matchIsPlayed(m) ? matchWinnerId(m) : null;
+    return (
+      <button
+        key={m.key}
+        type="button"
+        onClick={() => !m.placeholder && onOpenResult(m)}
+        className="w-full text-left rounded px-1.5 py-1 text-[10px] leading-tight"
+        style={{ border: `1.5px ${m.draft ? "dashed" : "solid"} ${color}`, backgroundColor: color + "1a", ...F.body }}
+      >
+        <span className="block font-bold truncate" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName} · {m.label}</span>
+        {m.placeholder && !(m.pairA && m.pairB) ? (
+          <span className="block italic text-teal-400">{m.placeholder}</span>
+        ) : (
+          <>
+            <span className={`block truncate ${w === m.pairA ? "text-lime-400 font-semibold" : "text-slate-200"}`}>{shortName(m.pairA)}</span>
+            <span className={`block truncate ${w === m.pairB ? "text-lime-400 font-semibold" : "text-slate-200"}`}>{shortName(m.pairB)}</span>
+          </>
+        )}
+        {matchIsPlayed(m) && <span className="block font-mono text-teal-300 truncate"><MatchResultLabel match={m} format={tournament.matchFormat} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+        {status === "en_curso" && <span className="block font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+      </button>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: "#0b1c24", color: "#e2e8f0" }} role="dialog" aria-modal="true" aria-label="Grilla de horarios">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-teal-900">
+        <h2 className="text-base sm:text-lg" style={F.display}>GRILLA · {tournament.name.toUpperCase()}</h2>
+        <button type="button" onClick={onClose} className="text-teal-400 hover:text-lime-400 text-xl leading-none p-1" aria-label="Cerrar">✕</button>
+      </div>
+      <div className="flex-1 overflow-auto p-3 sm:p-4">
+        {(tournament.playDates || []).length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay fechas cargadas.</p>}
+        {(tournament.playDates || []).map((dateInfo, di) => {
+          const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
+          const times = dayTimeSlots(dateInfo, duration);
+          // Partidos de ese día con un horario que no cae en la grilla (cambió el arranque o la duración)
+          const extraTimes = [...new Set(scheduled.filter((m) => m.schedule.date === dateInfo.date && !times.includes(m.schedule.time)).map((m) => m.schedule.time))];
+          const allTimes = [...times, ...extraTimes].sort();
+          return (
+            <section key={dateInfo.date} className="mb-6">
+              <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(dateInfo.date)}</SkewPill></div>
+              <div className="overflow-x-auto rounded-lg border" style={{ borderColor: dateColor + "33" }}>
+                <table className="border-collapse w-full" style={{ minWidth: 56 + courts.length * 140 }}>
+                  <thead>
+                    <tr>
+                      <th className="sticky left-0 z-10 text-left text-[11px] text-teal-500 px-2 py-1.5 w-14" style={{ ...F.body, backgroundColor: "#0b1c24" }}>Hora</th>
+                      {courts.map((court) => (
+                        <th key={court} className="text-center text-[11px] font-extrabold uppercase tracking-wide px-1 py-1.5" style={{ ...F.body, color: dateColor }}>Cancha {court}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allTimes.map((time) => (
+                      <tr key={time} style={{ borderTop: `1px solid ${dateColor}22` }}>
+                        <td className="sticky left-0 z-10 text-[11px] text-teal-400 align-top px-2 py-1.5 whitespace-nowrap font-semibold" style={{ ...F.body, backgroundColor: "#0b1c24" }}>{time}</td>
+                        {courts.map((court) => {
+                          const here = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
+                          return (
+                            <td key={court} className="align-top p-1" style={{ width: 140, borderLeft: `1px solid ${dateColor}14`, ...(here.length > 1 ? { backgroundColor: "#f8717122" } : {}) }}>
+                              <div className="space-y-1">{here.map(cell)}</div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ScheduleAdminView({ tournament, update }) {
   const [notice, setNotice] = useState(null);
+  const [gridOpen, setGridOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
   const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
@@ -3265,7 +3361,15 @@ function ScheduleAdminView({ tournament, update }) {
 
   return (
     <div>
+      {gridOpen && <ScheduleGridOverlay tournament={tournament} matches={matches} pairsById={pairsById} onOpenResult={openResult} onClose={() => setGridOpen(false)} />}
       {modals}
+      {matches.length > 0 && (
+        <div className="flex justify-end mb-4">
+          <button type="button" onClick={() => setGridOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.cyan), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
+            ▦ Abrir grilla
+          </button>
+        </div>
+      )}
       <CourtsAndDatesEditor tournament={tournament} onChange={update} />
 
       {matches.length === 0 ? (
