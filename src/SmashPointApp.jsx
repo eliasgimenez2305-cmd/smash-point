@@ -1114,6 +1114,21 @@ function scheduleEndPoint(schedule, duration) {
   return { date: schedule.date, minutes: timeToMinutes(schedule.time) + duration };
 }
 
+/* Día y hora de inicio propios de una categoría (torneo Clásico): { date, time } guardado en
+   category.start. Como "piso" para armar horarios: { date, minutes }, o null si no tiene. */
+function categoryStartPoint(category) {
+  const s = category?.start;
+  if (!s?.date) return null;
+  return { date: s.date, minutes: s.time ? timeToMinutes(s.time) : 0 };
+}
+
+/* "Sáb 24/10 · 15 hs" de una categoría con inicio propio, o null */
+function categoryStartLabel(category) {
+  const s = category?.start;
+  if (!s?.date) return null;
+  return `${formatDateShort(s.date)}${s.time ? ` · ${formatHour(s.time)}` : ""}`;
+}
+
 function laterPoint(a, b) {
   if (!a) return b;
   if (!b) return a;
@@ -1560,7 +1575,8 @@ function autoSchedule(tournament) {
   // para esa fase. Los partidos de la llave final los agenda siempre el organizador a mano.
   toSchedule.forEach((m) => {
     const groupKey = `${m.categoryId}:${m.location.groupId}`;
-    let floor = null;
+    // Ninguna categoría juega antes de su día y hora de inicio (si el organizador cargó uno)
+    let floor = categoryStartPoint(categoriesById[m.categoryId]);
     if (m.groupFormat === "bracket4" && m.stage !== "r1") {
       (groupR1Schedules[groupKey] || []).forEach((s) => { floor = laterPoint(floor, scheduleEndPoint(s, duration)); });
     }
@@ -1854,11 +1870,14 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
                 <label className={label} htmlFor="insc-cat">Categoría</label>
                 <select id="insc-cat" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={input} style={inputStyle} required>
                   <option value="">Elegí la categoría…</option>
-                  {categories.map((c) => <option key={c.id} value={c.id} disabled={categorySpotsLeft(c) === 0}>{c.name}{spotsText(c)}</option>)}
+                  {categories.map((c) => <option key={c.id} value={c.id} disabled={categorySpotsLeft(c) === 0}>{c.name}{categoryStartLabel(c) ? ` · ${categoryStartLabel(c)}` : ""}{spotsText(c)}</option>)}
                 </select>
               </div>
             ) : category && (
               <p className="text-sm">Categoría: <span className="font-semibold text-lime-400">{category.name}</span><span className="text-teal-400">{spotsText(category)}</span></p>
+            )}
+            {categoryStartLabel(category) && (
+              <p className="text-sm -mt-2">Empieza: <span className="font-semibold text-lime-400">{categoryStartLabel(category)}</span></p>
             )}
 
             <div>
@@ -2811,6 +2830,44 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
           Agregar fecha
         </button>
       </div>}
+      {tournamentType(tournament) === "clasico" && dates.length > 0 && tournament.categories.length > 0 && (
+        <CategoryStartsEditor tournament={tournament} onChange={onChange} />
+      )}
+    </div>
+  );
+}
+
+/* Clásico: día y hora de inicio de cada categoría. Se ven en la inscripción y en la página del
+   torneo, y "Generar horarios" no le asigna partidos a una categoría antes de ese momento. */
+function CategoryStartsEditor({ tournament, onChange }) {
+  const dates = tournament.playDates || [];
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const setStart = (categoryId, patch) => {
+    onChange({
+      ...tournament,
+      categories: tournament.categories.map((c) => {
+        if (c.id !== categoryId) return c;
+        const start = { ...(c.start || {}), ...patch };
+        return { ...c, start: start.date ? start : null };
+      }),
+    });
+  };
+  return (
+    <div className="border-t border-teal-800 pt-3 mt-4">
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría (opcional)</label>
+      <p className="text-[11px] text-teal-600 mb-2" style={F.body}>Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.</p>
+      <div className="space-y-2">
+        {tournament.categories.map((c) => (
+          <div key={c.id} className="flex items-center gap-2 flex-wrap text-sm" style={F.body}>
+            <span className="flex-1 min-w-[7rem] text-teal-200">{c.name}</span>
+            <select value={c.start?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm" style={input}>
+              <option value="">Sin día fijo</option>
+              {dates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+            </select>
+            <input type="time" lang="es-AR" value={c.start?.time || ""} disabled={!c.start?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -4857,6 +4914,15 @@ function PublicTournament({ tournament, organizers, onBack }) {
         {tournament.venue ? ` · Sede: ${tournament.venue}` : ""}
       </p>
       {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
+      <p className="text-sm text-lime-400 font-semibold mt-2" style={F.body}>{tournamentWhenLabel(tournament)}</p>
+      {/* Clásico con inicio propio por categoría: cuándo arranca cada una */}
+      {tournament.categories.some((c) => categoryStartLabel(c)) && (
+        <ul className="mt-1 text-xs text-teal-300 space-y-0.5" style={F.body}>
+          {tournament.categories.filter((c) => categoryStartLabel(c)).map((c) => (
+            <li key={c.id}><span className="font-semibold text-teal-100">{c.name}</span>: empieza {categoryStartLabel(c)}</li>
+          ))}
+        </ul>
+      )}
 
       <div className="flex gap-2 mt-4 overflow-x-auto">
         {viewTabs.map(([key, label]) => (
