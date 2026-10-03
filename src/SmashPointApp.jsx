@@ -1719,7 +1719,11 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
   const availabilityOk = !askAvailability || (chosenDays.length > 0 && chosenDays.every((d) => d.from && d.to && d.from < d.to) && sameDayBracket !== null);
 
   const category = categories.find((c) => c.id === categoryId);
-  const individual = category?.format === "super8_individual";
+  // Con varias categorías arranca sin ninguna elegida: el formato sale de las categorías del torneo
+  // (en un Súper 8 Individual son todas individuales), así no pide dos jugadores mientras tanto
+  const individual = category
+    ? category.format === "super8_individual"
+    : categories.length > 0 && categories.every((c) => c.format === "super8_individual");
   const full = category ? categorySpotsLeft(category) === 0 : false;
   const normalizedPhone = normalizeArPhone(phone);
   const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
