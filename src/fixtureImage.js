@@ -197,10 +197,16 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
     { title: "PARTIDO", w: tableW - 130 - 270 - 170 },
     { title: "HORA", w: 170 },
   ];
-  const headY = 360, headH = 64;
+  const top = 360, headH = 64;
   const footerH = 120;
-  const avail = H - (headY + headH) - footerH - 20;
-  const rowH = Math.min(96, Math.floor(avail / Math.max(page.rows.length, 1)));
+  const avail = H - (top + headH) - footerH - 20;
+  const n = Math.max(page.rows.length, 1);
+  // Con pocos partidos las filas y las letras crecen (hasta el doble) para llenar la historia; si
+  // igual sobra lugar, la tabla queda centrada entre el encabezado y el pie
+  const rowH = Math.min(140, Math.floor(avail / n));
+  const k = Math.min(2, Math.max(1, rowH / 68));
+  const fs = (size) => Math.round(size * k);
+  const headY = top + Math.max(0, Math.floor((avail - rowH * n) / 2));
 
   roundRect(ctx, x0, headY, tableW, headH + rowH * page.rows.length, 22);
   ctx.save();
@@ -228,31 +234,33 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
 
     // Cancha
     ctx.fillStyle = C.lime;
-    fitText(ctx, `C${r.court}`, x + cols[0].w / 2, mid + 11, cols[0].w - 16, 32, 20, DISPLAY);
+    fitText(ctx, `C${r.court}`, x + cols[0].w / 2, mid + fs(11), cols[0].w - 16, fs(32), 20, DISPLAY);
     x += cols[0].w;
 
     // Categoría y grupo o ronda
     ctx.fillStyle = C.ink;
-    fitText(ctx, r.category, x + cols[1].w / 2, mid - 4, cols[1].w - 20, 24, 15, BODY, "600");
+    fitText(ctx, r.category, x + cols[1].w / 2, mid - fs(4), cols[1].w - 20, fs(24), 15, BODY, "600");
     ctx.fillStyle = C.lime;
-    fitText(ctx, r.stage || "", x + cols[1].w / 2, mid + 24, cols[1].w - 20, 22, 14, BODY, "700");
+    fitText(ctx, r.stage || "", x + cols[1].w / 2, mid + fs(24), cols[1].w - 20, fs(22), 14, BODY, "700");
     x += cols[1].w;
 
     // Pareja VS pareja
     const pw = cols[2].w - 24, pc = x + cols[2].w / 2;
-    const step = Math.min(30, rowH * 0.37);
+    // Tres líneas centradas en la fila: pareja, VS y pareja (líneas de base calculadas con el
+    // tamaño de letra, así no se pisan ni tocan el borde de la fila)
+    const nameSize = fs(20), vsSize = fs(15), gap = nameSize * 0.25;
     ctx.fillStyle = C.ink;
-    fitText(ctx, r.pairA, pc, mid - step + 9, pw, 21, 14, BODY, "600");
+    fitText(ctx, r.pairA, pc, mid - vsSize / 2 - gap, pw, nameSize, 14, BODY, "600");
     ctx.fillStyle = C.lime;
-    ctx.font = `16px ${DISPLAY}`;
-    ctx.fillText("VS", pc, mid + 6);
+    ctx.font = `${vsSize}px ${DISPLAY}`;
+    ctx.fillText("VS", pc, mid + vsSize * 0.36);
     ctx.fillStyle = C.ink;
-    fitText(ctx, r.pairB, pc, mid + step + 5, pw, 21, 14, BODY, "600");
+    fitText(ctx, r.pairB, pc, mid + vsSize / 2 + gap + nameSize * 0.72, pw, nameSize, 14, BODY, "600");
     x += cols[2].w;
 
     // Hora
     ctx.fillStyle = C.cyan;
-    fitText(ctx, r.time, x + cols[3].w / 2, mid + 12, cols[3].w - 16, 34, 22, DISPLAY);
+    fitText(ctx, r.time, x + cols[3].w / 2, mid + fs(12), cols[3].w - 16, fs(34), 22, DISPLAY);
 
     // Separadores de columnas
     ctx.fillStyle = C.line;
