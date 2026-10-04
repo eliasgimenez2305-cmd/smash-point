@@ -2703,12 +2703,12 @@ function Modal({ title, onClose, children }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-4 overflow-y-auto" style={{ backgroundColor: "rgba(0,0,0,0.7)" }} onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ backgroundColor: "rgba(0,0,0,0.7)" }} onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-lg rounded-xl border border-teal-800 p-5 sm:p-6 my-4"
+        className="w-full max-w-lg rounded-xl border border-teal-800 p-5 sm:p-6 my-4 sm:my-auto"
         style={{ backgroundColor: "#1b2027", color: "#e2e8f0" }}
         onClick={(e) => e.stopPropagation()}
       >
