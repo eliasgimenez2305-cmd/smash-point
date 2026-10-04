@@ -3634,10 +3634,14 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
 function FixtureImagesModal({ tournament, matches, pairsById, onClose }) {
   const complexes = React.useContext(ComplexesContext);
   const pages = useMemo(() => fixturePages(tournament, matches, pairsById, complexes), [tournament, matches, pairsById, complexes]);
+  // El torneo cambia seguido (por ejemplo, al volver cada guardado): las imágenes se vuelven a
+  // dibujar solo si cambió lo que muestran
+  const pagesKey = JSON.stringify(pages);
   const [images, setImages] = useState(null); // [{ page, url, blob }]
 
   useEffect(() => {
     let cancelled = false;
+    const pages = JSON.parse(pagesKey);
     (async () => {
       try {
         await Promise.all([document.fonts.load("40px 'Archivo Black'"), document.fonts.load("600 40px 'Work Sans'"), document.fonts.load("700 40px 'Work Sans'")]);
@@ -3656,7 +3660,7 @@ function FixtureImagesModal({ tournament, matches, pairsById, onClose }) {
       else setImages(out);
     })();
     return () => { cancelled = true; };
-  }, [pages, tournament.name]);
+  }, [pagesKey, tournament.name]);
   useEffect(() => () => { (images || []).forEach((o) => URL.revokeObjectURL(o.url)); }, [images]);
 
   const canShare = typeof navigator !== "undefined" && !!navigator.canShare;
