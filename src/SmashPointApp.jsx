@@ -4891,9 +4891,11 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
 /* Súper 8: lista simple de todos los partidos, uno por renglón y en orden de juego
    ("Elías - Martín vs Juan - Negro"), y debajo la tabla de posiciones (se recalcula sola con cada
    resultado). Con más de una cancha, los partidos van agrupados en turnos con su cancha (ver
-   super8Turns). Con onSetScore/onWalkover muestra la carga de resultados para el organizador; sin
-   ellos es la vista de solo lectura para el público. */
-function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
+   super8Turns). Cada partido muestra su estado (Pendiente, En curso o Finalizado, ver
+   matchDisplayStatus). Con onSetScore/onWalkover/onToggleLive muestra la carga de resultados y el
+   botón "En curso" para el organizador, con los partidos en curso repetidos arriba ("En cancha
+   ahora") para cargar ahí el resultado; sin ellos es la vista de solo lectura para el público. */
+function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onToggleLive }) {
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
   const group = category.groups[0];
   if (!group) return null;
@@ -4903,15 +4905,19 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
   const nameOf = (id) => pairsById[id]?.name || "—";
   const turns = super8Turns(group.matches, courts);
   const simultaneous = turns.some((turn) => turn.matches.length > 1);
+  const courtOf = Object.fromEntries(turns.flatMap((turn) => turn.matches.map(({ m, court }) => [m.id, court])));
+  const live = group.matches.filter((m) => matchDisplayStatus(m) === "en_curso");
 
   const row = (m, tag) => {
     const hasResult = matchIsPlayed(m);
+    const status = matchDisplayStatus(m);
     const w = hasResult ? matchWinnerId(m) : null;
     const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
     return (
-      <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={F.body}>
+      <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={{ ...F.body, ...(status === "en_curso" ? { backgroundColor: "rgba(251,146,60,0.08)", boxShadow: "inset 3px 0 0 #fb923c" } : {}) }}>
         <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
           {tag}
+          <MatchStatusBadge status={status} />
           {side(m.pairA)}
           <span className="text-xs text-teal-500">vs</span>
           {side(m.pairB)}
@@ -4919,6 +4925,16 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
         </div>
         {editable && (
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            {!hasResult && onToggleLive && (
+              <button
+                type="button"
+                onClick={() => onToggleLive(group.id, m.id, status === "en_curso" ? null : "en_curso")}
+                className="text-[10px] font-semibold px-2 py-1 rounded border whitespace-nowrap"
+                style={status === "en_curso" ? { borderColor: "#fb923c", color: "#fb923c" } : { borderColor: "#94a3b8", color: "#94a3b8" }}
+              >
+                {status === "en_curso" ? "Quitar \"en curso\"" : "En curso"}
+              </button>
+            )}
             <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
             {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
             {m.walkover && (
@@ -4930,8 +4946,20 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
     );
   };
 
+  const numberTag = (m) => <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{group.matches.indexOf(m) + 1}.</span>;
+  const courtTag = (m) => <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>Cancha {courtOf[m.id]}</span>;
+
   return (
     <div>
+      {editable && live.length > 0 && (
+        // Los partidos en curso, a mano para cargar el resultado que vienen a avisar
+        <div className="rounded-xl mb-4 min-w-0" style={{ border: "1px solid #fb923c66" }}>
+          <p className="px-3 pt-2 text-[11px] font-bold uppercase tracking-wide" style={{ ...F.body, color: "#fb923c" }}>En cancha ahora</p>
+          <div className="divide-y divide-teal-900">
+            {live.map((m) => row(m, simultaneous ? courtTag(m) : numberTag(m)))}
+          </div>
+        </div>
+      )}
       {simultaneous ? (
         // Varias canchas: los partidos de cada ronda se juegan a la vez, un turno abajo del otro
         <div className="space-y-3">
@@ -4939,14 +4967,14 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover }) {
             <div key={ti} className="rounded-xl border border-teal-800 min-w-0">
               <p className="px-3 pt-2 text-[11px] font-bold uppercase tracking-wide text-teal-400" style={F.body}>Turno {ti + 1} <span className="text-teal-600 font-normal normal-case">· Ronda {turn.round}</span></p>
               <div className="divide-y divide-teal-900">
-                {turn.matches.map(({ m, court }) => row(m, <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>Cancha {court}</span>))}
+                {turn.matches.map(({ m }) => row(m, courtTag(m)))}
               </div>
             </div>
           ))}
         </div>
       ) : (
         <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
-          {group.matches.map((m, i) => row(m, <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{i + 1}.</span>))}
+          {group.matches.map((m) => row(m, numberTag(m)))}
         </div>
       )}
       <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Tabla de posiciones</h3>
@@ -6989,7 +7017,7 @@ function Super8CourtsField({ courts, individual, onChange }) {
   );
 }
 
-function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover, courts = 1, onCourtsChange }) {
+function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGroupsLocked, onSetScore, onWalkover, onToggleLive, courts = 1, onCourtsChange }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const individual = category.format === "super8_individual";
   const entryWord = individual ? "jugadores" : "parejas";
@@ -7067,7 +7095,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
         )}
       </div>
       {onCourtsChange && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
-      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} />
+      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} onToggleLive={onToggleLive} />
     </div>
   );
 }
@@ -7157,11 +7185,25 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       ...category,
       groups: category.groups.map((g) => {
         if (g.id !== groupId) return g;
-        let matches = g.matches.map((m) => m.id === matchId ? { ...m, sets: withSetScore(m.sets, setIndex, side, value) } : m);
+        let matches = g.matches.map((m) => {
+          if (m.id !== matchId) return m;
+          const next = { ...m, sets: withSetScore(m.sets, setIndex, side, value) };
+          // Con el resultado cargado pasa solo a Finalizado: se borra la marca "en curso" para que,
+          // si después se borra el resultado, vuelva a Pendiente
+          return matchIsPlayed(next) ? { ...next, liveStatus: null } : next;
+        });
         // En grupos de 4, apenas se cargan los partidos 1 y 2 se arman solos los cruces de ganadores/perdedores
         if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
         return { ...g, matches };
       }),
+    });
+  };
+
+  // "En curso" (o null para sacarlo): lo marca el organizador a mano al mandar el partido a la cancha
+  const setGroupLiveStatus = (groupId, matchId, liveStatus) => {
+    onUpdateCategory({
+      ...category,
+      groups: category.groups.map((g) => (g.id !== groupId ? g : { ...g, matches: g.matches.map((m) => (m.id === matchId ? { ...m, liveStatus } : m)) })),
     });
   };
 
@@ -7375,6 +7417,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           onGroupsLocked={onGroupsLocked}
           onSetScore={setMatchSetScore}
           onWalkover={setGroupWalkover}
+          onToggleLive={setGroupLiveStatus}
           courts={tournament.courtsCount || 1}
           onCourtsChange={onUpdateTournament ? (n) => onUpdateTournament({ ...tournament, courtsCount: n }) : null}
         />
