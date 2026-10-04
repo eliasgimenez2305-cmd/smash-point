@@ -927,6 +927,25 @@ function buildKnockoutSeeding(groups, pairsById, format) {
   return seedKnockoutRound1(entries, compareMerit).map(([a, b]) => [a.row.pairId, b ? b.row.pairId : null]);
 }
 
+/* ¿Cambiaron los clasificados de los grupos desde que se armó la llave? (por ejemplo, porque se
+   corrigió un resultado después). Compara con los cruces que daban los grupos al generarla
+   (category.bracketSeeding), así los cambios hechos a mano con "Editar cruces" no cuentan; en
+   llaves armadas antes de guardar eso, compara solo qué parejas están en la primera ronda.
+   Devuelve null si no cambió nada, o { added, removed } con las parejas que entran y salen
+   (las dos vacías si son las mismas parejas pero cambió el orden de clasificación). */
+function bracketQualifiersChange(category, pairsById, format) {
+  if (!category.bracket || category.bracketIsSkeleton || !(category.groups || []).length) return null;
+  const current = buildKnockoutSeeding(category.groups, pairsById, format);
+  const ids = (rounds) => new Set(rounds.flat().filter(Boolean));
+  const before = category.bracketSeeding ? ids(category.bracketSeeding) : ids(category.bracket[0].map((m) => [m.pairA, m.pairB]));
+  const now = ids(current);
+  const added = [...now].filter((id) => !before.has(id));
+  const removed = [...before].filter((id) => !now.has(id));
+  if (added.length || removed.length) return { added, removed };
+  if (category.bracketSeeding && JSON.stringify(category.bracketSeeding) !== JSON.stringify(current)) return { added: [], removed: [] };
+  return null;
+}
+
 /* Llave eliminación directa a partir de una lista ordenada de pairIds (o null = BYE) */
 function buildBracket(pairIds) {
   let size = 1;
@@ -7365,9 +7384,40 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const generateBracketFromGroups = () => {
     const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
     const realBracket = carrySkeletonSchedules(category.bracketIsSkeleton ? category.bracket : null, buildSeededBracket(seeding));
-    const withBracket = { ...category, bracket: realBracket, bracketIsSkeleton: false, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false };
+    const withBracket = { ...category, bracket: realBracket, bracketSeeding: seeding, bracketIsSkeleton: false, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false };
     onUpdateCategory(autoScheduleBracket(tournament, withBracket));
   };
+
+  // Rearma la llave con los clasificados actuales (si cambiaron después de armarla), sin perder
+  // los horarios ya puestos ni si estaba publicada. Solo se ofrece si la llave no tiene resultados.
+  const rebuildBracketFromGroups = () => {
+    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
+    const realBracket = carrySkeletonSchedules(category.bracket, buildSeededBracket(seeding));
+    onUpdateCategory(autoScheduleBracket(tournament, { ...category, bracket: realBracket, bracketSeeding: seeding }));
+  };
+  const qualifiersChange = bracketQualifiersChange(category, pairsById, format);
+  const bracketHasScores = !!category.bracket && category.bracket.some((round) => round.some(matchHasScore));
+  const groupsFinished = category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m, format)));
+  const qualifiersNotice = qualifiersChange && (
+    <div role="alert" className="rounded-lg p-4 mb-4 text-sm" style={{ ...F.body, border: "1px solid #f59e0b88", backgroundColor: "rgba(245,158,11,0.08)" }}>
+      <p className="text-amber-300 font-semibold mb-1">Cambiaron los clasificados desde que se armó la llave</p>
+      <p className="text-amber-100/80 text-xs mb-2">
+        {qualifiersChange.added.length || qualifiersChange.removed.length
+          ? <>{qualifiersChange.added.length > 0 && <>Entra{qualifiersChange.added.length > 1 ? "n" : ""} {qualifiersChange.added.map((id) => pairsById[id]?.name || "—").join(", ")}. </>}
+              {qualifiersChange.removed.length > 0 && <>Sale{qualifiersChange.removed.length > 1 ? "n" : ""} {qualifiersChange.removed.map((id) => pairsById[id]?.name || "—").join(", ")}.</>}</>
+          : "Son las mismas parejas, pero cambió en qué puesto clasificó alguna, y eso cambia los cruces."}
+      </p>
+      {bracketHasScores ? (
+        <p className="text-xs text-amber-200">La llave ya tiene resultados cargados, así que no se rearma sola: revisala y, si hace falta, reiniciala.</p>
+      ) : !groupsFinished ? (
+        <p className="text-xs text-amber-200">Cuando terminen todos los partidos de grupos vas a poder rearmar la llave con los clasificados actuales.</p>
+      ) : (
+        <button type="button" onClick={rebuildBracketFromGroups} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#f59e0b", color: "#14181f" }}>
+          Rearmar llave con los clasificados actuales
+        </button>
+      )}
+    </div>
+  );
 
   // Precarga SOLO la estructura de la llave (fechas/horas/canchas) apenas se cierran los grupos,
   // sin esperar a saber qué pareja concreta clasifica a cada lugar. Usa placeholders tipo
@@ -7539,6 +7589,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
       {tab === "grupos" && (
         <div>
+          {qualifiersNotice}
           <div className="border border-lime-800 rounded-lg p-4 mb-6" style={{ backgroundColor: "rgba(163,230,53,0.05)" }}>
             <p className="text-sm font-semibold mb-1" style={F.body}>Armado automático (sorteo por disponibilidad)</p>
             <p className="text-xs text-teal-400 mb-3" style={F.body}>
@@ -7709,6 +7760,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
       {tab === "llave" && (
         <div>
+          {qualifiersNotice}
           {usesSchedule && !category.bracket && category.groups.length > 0 && (
             <div className="border border-purple-800 rounded-lg p-4 mb-4">
               <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
