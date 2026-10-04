@@ -1,10 +1,12 @@
 /* Tests de la tabla de posiciones (computeStandings). Se corren con `npm test`.
-   Criterio de desempate: reglamento de la FIP (ver standings.js). */
+   Criterio de desempate (igual para todos los torneos): diferencia de sets, diferencia de games,
+   games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeStandings, DEFAULT_MATCH_FORMAT } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
+const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
 const AMERICANO_7 = { type: "americano", setsToPlay: 1, gamesPerSet: 7, setTiebreak: true, finalSuperTiebreak: false };
 
 /* Partido con resultado: m("A", "B", [6, 3], [6, 4]) → A ganó 6-3 6-4 */
@@ -21,7 +23,7 @@ test("sin empate: ordena por puntos", () => {
   assert.equal(row(rows, "A").pts, 4);
 });
 
-test("empate de a dos: vale el enfrentamiento directo aunque el otro tenga mejor diferencia", () => {
+test("empate de a dos: manda la diferencia de games antes que el resultado entre sí", () => {
   // A y B ganan 2 partidos cada uno; A le ganó a B. B tiene mucha mejor diferencia de games.
   const rows = computeStandings(group(["A", "B", "C", "D"], [
     m("A", "B", [7, 6], [7, 6]),
@@ -32,10 +34,50 @@ test("empate de a dos: vale el enfrentamiento directo aunque el otro tenga mejor
     m("C", "D", [6, 4], [6, 4]),
   ]), {}, CLASICO);
   assert.equal(row(rows, "A").pts, row(rows, "B").pts);
-  assert.ok(order(rows).indexOf("A") < order(rows).indexOf("B"), "A va arriba de B por haberle ganado");
+  assert.ok(order(rows).indexOf("B") < order(rows).indexOf("A"), "B va arriba de A por diferencia de games (+22 contra +2)");
 });
 
-test("triple empate: diferencia de sets solo entre las empatadas (no el enfrentamiento directo)", () => {
+test("Súper 8 a un set: entre empatadas manda la diferencia de games aunque el otro haya ganado entre sí", () => {
+  const rows = computeStandings(group(["A", "B", "C", "D"], [
+    m("A", "B", [4, 3]),
+    m("A", "C", [4, 3]),
+    m("A", "D", [0, 4]),
+    m("B", "C", [4, 0]),
+    m("B", "D", [4, 0]),
+    m("C", "D", [4, 0]),
+  ]), {}, SUPER8_4);
+  // A y B ganan 2. A: games 8-10 (-2) | B: games 11-4 (+7)
+  assert.deepEqual(order(rows).slice(0, 2), ["B", "A"]);
+});
+
+test("empate en sets y games: mandan los games a favor", () => {
+  // A y B ganan 2 y tienen la misma diferencia de sets (+4) y de games (+4), pero A hizo más games
+  const rows = computeStandings(group(["A", "B", "C", "D"], [
+    m("A", "C", [7, 6], [7, 6]),  // A 14-12
+    m("A", "D", [7, 6], [7, 6]),  // A 14-12 → A 28-24 (+4)
+    m("B", "C", [6, 5], [6, 5]),  // B 12-10
+    m("B", "D", [6, 5], [6, 5]),  // B 12-10 → B 24-20 (+4)
+  ]), {}, CLASICO);
+  assert.deepEqual(order(rows).slice(0, 2), ["A", "B"]);
+});
+
+test("empate en sets y en games: manda el resultado entre sí", () => {
+  const rows = computeStandings(group(["A", "B", "C", "D"], [
+    m("A", "B", [6, 4], [6, 4]),
+    m("A", "C", [4, 6], [4, 6]),
+    m("B", "C", [6, 4], [6, 4]),
+    m("A", "D", [6, 0], [6, 0]),
+    m("B", "D", [6, 0], [6, 0]),
+    m("D", "C", [6, 4], [6, 4]),
+  ]), {}, CLASICO);
+  // A y B: 2 ganados, sets 4-2, games 32-20 las dos. A le ganó a B.
+  const a = row(rows, "A"), b = row(rows, "B");
+  assert.deepEqual([a.setsF, a.setsC, a.gamesF, a.gamesC], [b.setsF, b.setsC, b.gamesF, b.gamesC]);
+  assert.deepEqual(order(rows).slice(0, 2), ["A", "B"]);
+  assert.ok(!a.byDraw && !b.byDraw, "no se definió por sorteo");
+});
+
+test("triple empate: diferencia de sets", () => {
   // Círculo: A le gana a B, B a C, C a A. Todos 1 ganado y 1 perdido.
   // Sets entre ellos: A 2-0 y 1-2 → +1 | B 2-1 y 0-2 → -1 | C 2-0... ver abajo
   const rows = computeStandings(group(["A", "B", "C"], [
@@ -47,7 +89,7 @@ test("triple empate: diferencia de sets solo entre las empatadas (no el enfrenta
   assert.deepEqual(order(rows), ["A", "C", "B"]);
 });
 
-test("triple empate: iguales en sets, desempata la diferencia de games entre las empatadas", () => {
+test("triple empate: iguales en sets, desempata la diferencia de games", () => {
   // Todos ganan y pierden 2-0: diferencia de sets 0 para los tres. Games: A +8, B -2, C -6
   const rows = computeStandings(group(["A", "B", "C"], [
     m("A", "B", [6, 1], [6, 1]), // A +10, B -10
@@ -58,9 +100,9 @@ test("triple empate: iguales en sets, desempata la diferencia de games entre las
   assert.deepEqual(order(rows), ["A", "B", "C"]);
 });
 
-test("triple empate: solo cuentan los partidos entre las empatadas", () => {
-  // A, B y C empatan en 2 ganados; D pierde todo. Contra D, C gana 6-0 6-0 (mucha diferencia)
-  // pero eso no debe servirle para el desempate entre A, B y C.
+test("triple empate: cuentan todos los partidos del grupo, no solo los partidos entre las empatadas", () => {
+  // A, B y C empatan en 2 ganados; D pierde todo. Contra D, C gana 6-0 6-0 y eso le sirve.
+  // Games: A 34-23 (+11) | C 29-22 (+7) | B 26-24 (+2)
   const rows = computeStandings(group(["A", "B", "C", "D"], [
     m("A", "B", [6, 1], [6, 1]),
     m("B", "C", [6, 2], [6, 2]),
@@ -69,7 +111,7 @@ test("triple empate: solo cuentan los partidos entre las empatadas", () => {
     m("B", "D", [6, 4], [6, 4]),
     m("C", "D", [6, 0], [6, 0]),
   ]), {}, CLASICO);
-  assert.deepEqual(order(rows), ["A", "B", "C", "D"]);
+  assert.deepEqual(order(rows), ["A", "C", "B", "D"]);
 });
 
 test("triple empate sin diferencias: se define por sorteo, siempre igual y marcado", () => {
@@ -169,7 +211,7 @@ test("pareja eliminada: sus partidos jugados siguen valiendo para sus rivales", 
   assert.equal(row(rows, "M").pj, 1);
 });
 
-test("dos eliminadas en el mismo grupo: las dos al fondo, ordenadas entre ellas por sets y games", () => {
+test("dos eliminadas en el mismo grupo: las dos al fondo, ordenadas entre ellas con el mismo desempate", () => {
   const rows = computeStandings(group(["A", "B", "P", "Q"], [
     m("P", "A", [6, 1], [6, 1]), // P gana antes de abandonar
     m("Q", "A", [1, 6], [1, 6]), // Q pierde antes de abandonar
@@ -210,7 +252,7 @@ test("grupo de 4 con cruces y pareja eliminada: va al fondo aunque haya ganado e
   assert.deepEqual(order(computeStandings(g, { C: { eliminated: true } }, CLASICO)), ["A", "B", "D", "C"]);
 });
 
-test("grupo de 4 todos contra todos: triple empate definido por games entre las empatadas", () => {
+test("grupo de 4 todos contra todos: triple empate definido por diferencia de games", () => {
   const rows = computeStandings(group(["A", "B", "C", "D"], [
     m("A", "B", [6, 4], [6, 4]),
     m("C", "D", [6, 4], [6, 4]),
@@ -219,8 +261,7 @@ test("grupo de 4 todos contra todos: triple empate definido por games entre las 
     m("A", "D", [6, 0], [6, 0]),
     m("B", "C", [6, 0], [6, 0]),
   ]), {}, CLASICO);
-  // A, B y C ganan 2 cada uno y forman un círculo (A>B, B>C, C>A): los tres con diferencia de
-  // sets 0 entre ellos. Games entre ellos: A 12-8 y 8-12 → 0 | B 8-12 y 12-0 → +8 | C 12-8 y 0-12 → -8
+  // A, B y C ganan 2 cada uno (sets 4-2 los tres). Games: A 32-20 (+12) | B 32-14 (+18) | C 24-28 (-4)
   assert.deepEqual(order(rows), ["B", "A", "C", "D"]);
 });
 

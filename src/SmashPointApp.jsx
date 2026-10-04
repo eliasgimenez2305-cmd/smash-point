@@ -890,7 +890,9 @@ function seedKnockoutRound1(entries, compareSamePlace) {
 
 /* Arma el orden de clasificados para la llave final a partir de las tablas de los grupos,
    tomando de cada grupo la cantidad de clasificados que eligió el organizador. Entre parejas del
-   mismo puesto de distintos grupos manda el mérito: puntos, diferencia de sets y diferencia de games. */
+   mismo puesto de distintos grupos manda el mérito: puntos, diferencia de sets, diferencia de games,
+   games a favor y games en contra (el mismo orden que dentro de un grupo, sin el resultado entre
+   sí porque no se enfrentaron). */
 function buildKnockoutSeeding(groups, pairsById, format) {
   const entries = groups.flatMap((g, gi) => {
     const table = computeStandings(g, pairsById, format);
@@ -898,7 +900,7 @@ function buildKnockoutSeeding(groups, pairsById, format) {
     // solo pierde ese partido: si le dan los números, clasifica)
     return table.filter((row) => !row.eliminated).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
   });
-  const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC];
+  const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC, e.row.gamesF, -e.row.gamesC];
   const compareMerit = (a, b) => {
     const ka = meritKey(a), kb = meritKey(b);
     for (let i = 0; i < ka.length; i++) {
@@ -2265,7 +2267,7 @@ function StandingsTable({ group, pairsById, format, accentColor = "#9fe022", hig
                   <PairName id={row.pairId} pairsById={pairsById} />
                 </span>
                 {row.eliminated && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f8717122", color: "#f87171", ...F.body }}>{row.ret ? "RET · ELIMINADA" : "ELIMINADA"}</span>}
-                {row.byDraw && !row.eliminated &&<span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets y games: el lugar se definió por sorteo">(sorteo)</span>}
+                {row.byDraw && !row.eliminated &&<span className="text-[9px] text-teal-500 shrink-0" style={F.body} title="Empate en sets, games y resultado entre sí: el lugar se definió por sorteo">(sorteo)</span>}
               </div>
               <span className="text-sm font-semibold shrink-0" style={{ color: accentColor }}>{row.pts} pts</span>
             </div>

@@ -136,45 +136,49 @@ function tallySetsAndGames(match, rowA, rowB, format) {
 
 const emptyRow = (pairId) => ({ pairId, pj: 0, pg: 0, pp: 0, setsF: 0, setsC: 0, gamesF: 0, gamesC: 0, stb: 0, pts: 0, wo: 0, ret: false, eliminated: false, byDraw: false });
 
-/* Ordena un grupo de parejas empatadas en puntos según el reglamento de la FIP:
-   - Dos empatadas: manda el enfrentamiento directo.
-   - Tres o más: no se mira el enfrentamiento directo (arma un círculo sin salida). Se arma una
-     mini tabla solo con los partidos entre las empatadas y se ordena por diferencia de sets,
-     después diferencia de games y, si sigue el empate, por sorteo.
-   Si todavía no se jugó el partido entre dos empatadas, se usa la diferencia general de sets y de
-   games, y después el sorteo. */
-function orderTied(tied, matches, groupId, format) {
+/* Ordena un grupo de parejas empatadas en puntos. Se usan los números de todo el grupo, no una
+   mini tabla entre las empatadas, y el mismo criterio para todos los tipos de torneo:
+   1. diferencia de sets
+   2. diferencia de games
+   3. games a favor (más es mejor)
+   4. games en contra (menos es mejor)
+   5. resultado entre sí: entre las que siguen empatadas, la que ganó más partidos contra las otras
+   6. sorteo (marca byDraw en las parejas que quedaron ordenadas así) */
+function orderTied(tied, matches, groupId) {
   if (tied.length < 2) return tied;
-  const ids = new Set(tied.map((r) => r.pairId));
-  const between = matches.filter((m) => ids.has(m.pairA) && ids.has(m.pairB));
-  const draw = (r) => drawNumber(groupId, r.pairId);
+  const key = (r) => [setDiff(r), gameDiff(r), r.gamesF, -r.gamesC];
+  const sameKey = (x, y) => key(x).every((v, i) => v === key(y)[i]);
+  const byStats = [...tied].sort((x, y) => {
+    const kx = key(x), ky = key(y);
+    for (let i = 0; i < kx.length; i++) if (ky[i] !== kx[i]) return ky[i] - kx[i];
+    return 0;
+  });
 
-  if (tied.length === 2) {
-    const [x, y] = tied;
-    const winsX = between.filter((m) => matchWinnerId(m) === x.pairId).length;
-    const winsY = between.filter((m) => matchWinnerId(m) === y.pairId).length;
-    if (winsX !== winsY) return winsX > winsY ? [x, y] : [y, x];
-    return sortByDiffThenDraw(tied, (r) => r, draw);
+  // Bloques de parejas iguales en los cuatro números: se definen por resultado entre sí y sorteo
+  const out = [];
+  for (let i = 0; i < byStats.length;) {
+    let j = i + 1;
+    while (j < byStats.length && sameKey(byStats[i], byStats[j])) j++;
+    out.push(...orderByHeadToHead(byStats.slice(i, j), matches, groupId));
+    i = j;
   }
-
-  const mini = Object.fromEntries(tied.map((r) => [r.pairId, emptyRow(r.pairId)]));
-  between.forEach((m) => tallySetsAndGames(m, mini[m.pairA], mini[m.pairB], format));
-  return sortByDiffThenDraw(tied, (r) => mini[r.pairId], draw);
+  return out;
 }
 
-/* Orden por diferencia de sets, después de games (de las estadísticas que da statsOf) y, si
-   sigue el empate, por sorteo. Marca byDraw en las parejas que quedaron ordenadas por sorteo. */
-function sortByDiffThenDraw(rows, statsOf, draw) {
-  const key = (r) => [setDiff(statsOf(r)), gameDiff(statsOf(r))];
-  const sorted = [...rows].sort((x, y) => {
-    const kx = key(x), ky = key(y);
-    if (ky[0] !== kx[0]) return ky[0] - kx[0];
-    if (ky[1] !== kx[1]) return ky[1] - kx[1];
-    return draw(x) - draw(y);
+/* Resultado entre sí y, si sigue el empate, sorteo */
+function orderByHeadToHead(block, matches, groupId) {
+  if (block.length < 2) return block;
+  const ids = new Set(block.map((r) => r.pairId));
+  const wins = Object.fromEntries(block.map((r) => [r.pairId, 0]));
+  matches.forEach((m) => {
+    if (!ids.has(m.pairA) || !ids.has(m.pairB)) return;
+    const w = matchWinnerId(m);
+    if (w) wins[w]++;
   });
+  const draw = (r) => drawNumber(groupId, r.pairId);
+  const sorted = [...block].sort((x, y) => wins[y.pairId] - wins[x.pairId] || draw(x) - draw(y));
   for (let i = 1; i < sorted.length; i++) {
-    const a = key(sorted[i - 1]), b = key(sorted[i]);
-    if (a[0] === b[0] && a[1] === b[1]) { sorted[i - 1].byDraw = true; sorted[i].byDraw = true; }
+    if (wins[sorted[i - 1].pairId] === wins[sorted[i].pairId]) { sorted[i - 1].byDraw = true; sorted[i].byDraw = true; }
   }
   return sorted;
 }
@@ -185,13 +189,14 @@ function sortByDiffThenDraw(rows, statsOf, draw) {
    Orden:
    - Grupo de 4 con sorteo y cruces (format "bracket4"): lo definen los cruces de ganadores y de
      perdedores; mientras no se jueguen, orden provisorio por puntos, sets y games.
-   - El resto: puntos y, entre empatadas, el desempate de la FIP (ver orderTied).
+   - El resto: puntos y, entre empatadas, diferencia de sets, de games, games a favor, games en
+     contra, resultado entre sí y sorteo (ver orderTied).
    - W.O.: afecta solo ese partido. Cuenta como ganado sin jugar por la pareja que se presentó
      (ver walkoverSets) y 0 puntos para la que no vino, que sigue en el torneo y puede clasificar
      si le dan los números. wo cuenta cuántos W.O. dio (solo informativo).
    - Pareja eliminada (pairsById[id].eliminated: la sacó el organizador porque abandonó): va
-     siempre al fondo, sea cual sea su puntaje; si hay más de una, entre ellas se ordenan por sets
-     y después por games. Sus partidos jugados siguen valiendo para sus rivales.
+     siempre al fondo, sea cual sea su puntaje; si hay más de una, entre ellas se ordenan con el
+     mismo desempate (ver orderTied). Sus partidos jugados siguen valiendo para sus rivales.
    - Retiro por lesión (RET): el partido cuenta con el marcador completado a favor del rival (ver
      retiredSets) y la pareja que se retiró queda eliminada (ret: true y eliminated: true). */
 export function computeStandings(group, pairsById, format) {
@@ -214,7 +219,7 @@ export function computeStandings(group, pairsById, format) {
 
   const rows = Object.values(table);
   const present = rows.filter((r) => !r.eliminated);
-  const eliminated = sortByDiffThenDraw(rows.filter((r) => r.eliminated), (r) => r, (r) => drawNumber(group.id, r.pairId));
+  const eliminated = orderTied(rows.filter((r) => r.eliminated), counted, group.id);
 
   let ordered;
   if (group.format === "bracket4" && group.matches.length === 4) {
@@ -241,7 +246,7 @@ export function computeStandings(group, pairsById, format) {
   } else {
     const byPoints = new Map();
     present.forEach((r) => byPoints.set(r.pts, [...(byPoints.get(r.pts) || []), r]));
-    ordered = [...byPoints.keys()].sort((a, b) => b - a).flatMap((pts) => orderTied(byPoints.get(pts), counted, group.id, f));
+    ordered = [...byPoints.keys()].sort((a, b) => b - a).flatMap((pts) => orderTied(byPoints.get(pts), counted, group.id));
   }
   return [...ordered, ...eliminated];
 }
