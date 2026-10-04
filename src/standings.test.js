@@ -3,7 +3,7 @@
    games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete } from "./standings.js";
+import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete, isByeMatch } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
 const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
@@ -431,4 +431,14 @@ test("set único (Súper 8 a 4): 4-3 termina; 3-2 o 5-3 no", () => {
 test("llave: un resultado a medias no hace avanzar a nadie", () => {
   const { rounds } = walkBracket([[bm("A", "B", [6, 4]), bm("C", "D", [6, 1], [6, 1])], [empty()]], CLASICO);
   assert.deepEqual([rounds[1][0].pairA, rounds[1][0].pairB], [null, "C"]);
+});
+
+test("llave: qué lugares son bye y cuáles esperan un ganador", () => {
+  const { byes } = walkBracket([[bm("A", null), bm("B", "C"), empty(), bm("D", "E")], [empty(), empty()], [empty()]]);
+  assert.deepEqual(byes[0][0], { pairA: false, pairB: true }, "A contra nadie: bye");
+  assert.equal(isByeMatch(byes, 0, 0), true);
+  assert.equal(isByeMatch(byes, 0, 1), false);
+  assert.deepEqual(byes[1][0], { pairA: false, pairB: false }, "espera al ganador de B-C: no es bye");
+  assert.deepEqual(byes[1][1], { pairA: true, pairB: false }, "del partido vacío nunca llega nadie: bye");
+  assert.equal(isByeMatch(byes, 2, 0), false, "la final se juega");
 });

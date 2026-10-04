@@ -113,15 +113,19 @@ export function loserOf(m, format) {
    Un lugar vacío solo es un bye (la pareja del otro lado pasa sola) si nunca va a llegar nadie:
    en la primera ronda, cuando no tiene pareja ni texto de "1° Grupo A"; en las siguientes, cuando
    los dos partidos que lo alimentan también están vacíos para siempre. Si el lugar está esperando
-   al ganador de un partido que todavía no se jugó, no pasa nadie. */
+   al ganador de un partido que todavía no se jugó, no pasa nadie.
+   byes[r][i] = { pairA, pairB }: qué lugares del partido son un bye (nunca va a llegar nadie). Un
+   partido con algún bye no se juega: no lleva horario ni cancha. */
 export function walkBracket(rounds, format) {
   const next = rounds.map((r) => r.map((m) => ({ ...m })));
   const winners = [];
+  const byes = [];
   let deadPrev = null; // deadPrev[i]: el partido i de la ronda anterior no va a tener ganador nunca
   for (let r = 0; r < next.length; r++) {
     const feederDead = (i, slot) => (r === 0 ? false : deadPrev[2 * i + (slot === "pairA" ? 0 : 1)]);
     const slotDead = (m, i, slot) => !m[slot] && (r === 0 ? !m[slot === "pairA" ? "placeholderA" : "placeholderB"] : feederDead(i, slot));
-    const dead = next[r].map((m, i) => slotDead(m, i, "pairA") && slotDead(m, i, "pairB"));
+    byes[r] = next[r].map((m, i) => ({ pairA: slotDead(m, i, "pairA"), pairB: slotDead(m, i, "pairB") }));
+    const dead = byes[r].map((b) => b.pairA && b.pairB);
     winners[r] = next[r].map((m, i) => {
       if (m.pairA && m.pairB) return matchWinnerId(m, format);
       const lone = m.pairA || m.pairB;
@@ -133,7 +137,13 @@ export function walkBracket(rounds, format) {
     }
     deadPrev = dead;
   }
-  return { rounds: next, winners };
+  return { rounds: next, winners, byes };
+}
+
+/* ¿El partido i de la ronda r es un bye (no se juega)? */
+export function isByeMatch(byes, r, i) {
+  const b = byes[r] && byes[r][i];
+  return !!b && (b.pairA || b.pairB);
 }
 
 /* Un W.O. se computa como el partido ganado sin jugar por la pareja que se presentó: a sets, dos

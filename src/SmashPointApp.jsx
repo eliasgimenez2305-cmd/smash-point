@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, setIsComplete, isSuperTiebreakSet } from "./standings.js";
+import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
 import { mergeTournament } from "./merge.js";
 
@@ -1265,7 +1265,9 @@ function collectAllSchedules(tournament) {
   const list = [];
   (tournament.categories || []).forEach((c) => {
     (c.groups || []).forEach((g) => g.matches.forEach((m) => { if (m.schedule) list.push(m.schedule); }));
-    (c.bracket || []).forEach((round) => round.forEach((m) => { if (m.schedule) list.push(m.schedule); }));
+    // Los byes de la llave no se juegan: si les quedó un horario viejo, no ocupa la cancha
+    const byes = c.bracket ? walkBracket(c.bracket).byes : [];
+    (c.bracket || []).forEach((round, ri) => round.forEach((m, mi) => { if (m.schedule && !isByeMatch(byes, ri, mi)) list.push(m.schedule); }));
   });
   return list;
 }
@@ -1276,8 +1278,9 @@ function collectAllSchedules(tournament) {
 function collectBracketScheduleTiers(tournament) {
   const tiers = {};
   (tournament.categories || []).forEach((c) => {
+    const byes = c.bracket ? walkBracket(c.bracket).byes : [];
     (c.bracket || []).forEach((round, ri) => {
-      round.forEach((m) => { if (m.schedule) (tiers[ri] = tiers[ri] || []).push(m.schedule); });
+      round.forEach((m, mi) => { if (m.schedule && !isByeMatch(byes, ri, mi)) (tiers[ri] = tiers[ri] || []).push(m.schedule); });
     });
   });
   return tiers;
@@ -1337,13 +1340,16 @@ function autoScheduleBracket(tournament, category) {
   });
 
   const rounds = category.bracket.map((round) => round.map((m) => ({ ...m })));
+  const { byes } = walkBracket(rounds);
 
   rounds.forEach((round, ri) => {
     // El piso de esta ronda es el final más tardío de CUALQUIER ronda anterior, de cualquier categoría
     let floor = null;
     for (let t = 0; t < ri; t++) floor = laterPoint(floor, tierEnd[t]);
 
-    round.forEach((match) => {
+    round.forEach((match, mi) => {
+      // Un bye no se juega: no ocupa horario ni cancha (ni empuja más tarde la ronda siguiente)
+      if (isByeMatch(byes, ri, mi)) { match.schedule = null; return; }
       if (match.schedule) return; // ya tenía horario asignado a mano; no lo tocamos
       const startIdx = floor ? slots.findIndex((s) => s.date > floor.date || (s.date === floor.date && s.minutes >= floor.minutes)) : 0;
       for (let i = Math.max(startIdx, 0); i < slots.length; i++) {
@@ -2200,8 +2206,10 @@ function Badge({ status }) {
   );
 }
 
-function PairName({ id, pairsById }) {
-  if (id === null) return <span className="italic opacity-50">Libre (bye)</span>;
+/* En la llave, un lugar vacío es "Libre (bye)" solo si nunca va a llegar nadie (bye=false: está
+   esperando al ganador de un partido sin jugar, y dice "A definir") */
+function PairName({ id, pairsById, bye = true, placeholder = null }) {
+  if (id === null) return <span className="italic opacity-50">{bye ? "Libre (bye)" : placeholder || "A definir"}</span>;
   if (!id) return <span className="italic opacity-50">A definir</span>;
   return <span>{pairsById[id]?.name || "—"}</span>;
 }
@@ -5066,7 +5074,7 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
                 {status === "en_curso" ? "Quitar \"en curso\"" : "En curso"}
               </button>
             )}
-            <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />
+            {!m.walkover && <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => onSetScore(group.id, m.id, setIndex, s, value)} />}
             {/* En el Súper 8 no hay W.O. (solo en Americano y Clásico); si quedó uno cargado de antes, se puede deshacer */}
             {m.walkover && (
               <button type="button" onClick={() => onWalkover(group.id, m.id, null)} className="text-[10px] text-teal-400 underline">Deshacer WO</button>
@@ -5203,13 +5211,13 @@ function CategoryBracketPublicView({ category, format }) {
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                      <ScheduleLabel schedule={m.schedule} />
+                      {!isByeMatch(walked.byes, ri, mi) && <ScheduleLabel schedule={m.schedule} />}
                       <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
                       </div>
                       <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
                       </div>
                       {matchIsPlayed(m, format) && (
@@ -7691,12 +7699,15 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         </div>
                         {editable && (
                           <div className="flex flex-col items-end gap-1">
-                            <MatchSetsEditor
-                              sets={m.sets}
-                              format={format}
-                              partial={!!m.retired}
-                              onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
-                            />
+                            {/* Con W.O. no se carga resultado (quedaría guardado y escondido): primero "Deshacer WO" */}
+                            {!m.walkover && (
+                              <MatchSetsEditor
+                                sets={m.sets}
+                                format={format}
+                                partial={!!m.retired}
+                                onSetScore={(setIndex, side, value) => setMatchSetScore(g.id, m.id, setIndex, side, value)}
+                              />
+                            )}
                             <MatchOutcomeButtons
                               m={m}
                               nameA={pairsById[m.pairA]?.name || "pareja 1"}
@@ -7869,7 +7880,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       const w = walked.winners[ri][mi];
                       return (
                         <div key={m.id} className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                          <ScheduleLabel schedule={m.schedule} />
+                          {!isByeMatch(walked.byes, ri, mi) && <ScheduleLabel schedule={m.schedule} />}
                           {m.walkover ? (
                             <p className="text-amber-400 font-semibold text-xs">WO</p>
                           ) : (() => {
@@ -7877,11 +7888,11 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} /></span>
                                   {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
                                 </div>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} /></span>
                                   {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
                                 </div>
                                 {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
@@ -7890,12 +7901,14 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                           })()}
                           {editable && (
                             <>
-                              <MatchSetsEditor
-                                sets={m.sets}
-                                format={format}
-                                partial={!!m.retired}
-                                onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
-                              />
+                              {!m.walkover && (
+                                <MatchSetsEditor
+                                  sets={m.sets}
+                                  format={format}
+                                  partial={!!m.retired}
+                                  onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
+                                />
+                              )}
                               <MatchOutcomeButtons
                                 m={m}
                                 nameA={pairsById[m.pairA]?.name || "pareja 1"}
