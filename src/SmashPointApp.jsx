@@ -548,7 +548,7 @@ function seedTournaments(organizerId) {
       organizerId,
       matchFormat: { ...DEFAULT_MATCH_FORMAT },
       courtsCount: 6,
-      matchDurationMinutes: 90,
+      matchDurationMinutes: DEFAULT_MATCH_DURATION,
       playDates,
       categories: [
         {
@@ -629,6 +629,8 @@ const CATEGORY_FORMAT_LABEL = {
   super8_individual: "Súper 8 Individual",
   super8_parejas: "Súper 8 por Parejas Fijas",
 };
+/* Duración predeterminada de un partido de torneo clásico, en minutos (arma la grilla de horarios) */
+const DEFAULT_MATCH_DURATION = 60;
 const SUPER8_SIZE = 8;
 /* Canchas del Súper 8: con 8 jugadores entran hasta 2 partidos a la vez y con 8 parejas hasta 4.
    Al crearlo se propone 1 cancha para el Individual y 2 para el de Parejas. */
@@ -1295,7 +1297,7 @@ function laterPoint(a, b) {
    la Ronda 1 de TODAS las categorías, después la Ronda 2 de todas, y así — por eso el piso de cada
    ronda se calcula mirando lo que ya se jugó en rondas anteriores de cualquier categoría, no solo la propia. */
 function autoScheduleBracket(tournament, category) {
-  const duration = tournament.matchDurationMinutes || 90;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const courts = tournament.courtsCount || 4;
   const dates = tournament.playDates || [];
   if (!tournamentUsesSchedule(tournament) || dates.length === 0 || !category.bracket) return category;
@@ -1685,7 +1687,7 @@ function computeCircuitStandings(circuit, tournaments) {
 function autoSchedule(tournament) {
   if (!tournamentUsesSchedule(tournament)) return tournament; // El Súper 8 no tiene grilla
   const courts = tournament.courtsCount || 4;
-  const duration = tournament.matchDurationMinutes || 90;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const dates = (tournament.playDates || []).map((d) => d.date);
   const all = collectScheduleableMatches(tournament);
 
@@ -2900,7 +2902,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
   const [courtsText, setCourtsText] = useState(String(tournament.courtsCount ?? 4));
   // Las sedes también cambian la cantidad de canchas: el campo sigue al valor guardado
   useEffect(() => { setCourtsText(String(tournament.courtsCount ?? 4)); }, [tournament.courtsCount]);
-  const [durationText, setDurationText] = useState(String(tournament.matchDurationMinutes ?? 90));
+  const [durationText, setDurationText] = useState(String(tournament.matchDurationMinutes ?? DEFAULT_MATCH_DURATION));
   const dates = tournament.playDates || [];
   const singleDay = tournamentType(tournament) === "americano"; // el Americano se juega en un solo día
   const classic = tournamentType(tournament) === "clasico";
@@ -2953,7 +2955,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
             onBlur={() => {
               const n = Number(durationText);
               const valid = durationText.trim() !== "" && n >= 10;
-              const final = valid ? n : (tournament.matchDurationMinutes ?? 90);
+              const final = valid ? n : (tournament.matchDurationMinutes ?? DEFAULT_MATCH_DURATION);
               setDurationText(String(final));
               if (final !== tournament.matchDurationMinutes) onChange({ ...tournament, matchDurationMinutes: final });
             }}
@@ -3284,7 +3286,7 @@ function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, o
    cancha. Si ese lugar ya tiene un partido, los dos se intercambian de lugar. */
 function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) {
   const playDates = tournament.playDates || [];
-  const duration = tournament.matchDurationMinutes || 90;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const courtsCount = tournament.courtsCount || 4;
   const [date, setDate] = useState(m.schedule?.date || playDates[0]?.date || "");
   const dateInfo = playDates.find((d) => d.date === date);
@@ -3544,7 +3546,7 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  const duration = tournament.matchDurationMinutes || 90;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const courts = Array.from({ length: tournament.courtsCount || 4 }, (_, i) => i + 1);
   const scheduled = matches.filter((m) => m.schedule);
   const categoryColor = Object.fromEntries(tournament.categories.map((c, i) => [c.id, GROUP_COLORS[i % GROUP_COLORS.length]]));
@@ -3705,7 +3707,7 @@ function ScheduleAdminView({ tournament, update }) {
   const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
   const unscheduled = matches.filter((m) => !m.schedule);
-  const duration = tournament.matchDurationMinutes || 90;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const courtsCount = tournament.courtsCount || 4;
   const playDates = tournament.playDates || [];
 
@@ -6623,7 +6625,7 @@ function EventTournamentForm({ event, onCreate, onCancel }) {
     // Americano y Clásico: el día y la hora de inicio arman la grilla de horarios
     const schedule = super8
       ? { courtsCount: courts }
-      : { courtsCount: courts, matchDurationMinutes: config.type === "americano" ? 40 : 90, playDates: [{ date, from: time, to: "23:59" }] };
+      : { courtsCount: courts, matchDurationMinutes: config.type === "americano" ? 40 : DEFAULT_MATCH_DURATION, playDates: [{ date, from: time, to: "23:59" }] };
     onCreate({
       name: category.trim(), date, circuitId: null, config, schedule,
       categories: [{ name: category.trim(), cupo: super8 ? null : parseCupo(cupoText) }],
@@ -8125,7 +8127,7 @@ function normalizeLoadedTournaments(tours) {
       ...rest,
       matchFormat: t.matchFormat || { ...DEFAULT_MATCH_FORMAT },
       courtsCount: t.courtsCount ?? 4,
-      matchDurationMinutes: t.matchDurationMinutes ?? 90,
+      matchDurationMinutes: t.matchDurationMinutes ?? DEFAULT_MATCH_DURATION,
       playDates: fixPlayDates(t.playDates),
       categories,
     };
@@ -8500,7 +8502,7 @@ function SmashPointAppInner() {
 
   // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
   const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
-    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: 90, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: DEFAULT_MATCH_DURATION, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
