@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
+import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
 import { mergeTournament } from "./merge.js";
@@ -506,6 +507,10 @@ function courtName(t, court, short = false) {
   }
   return `${label}${court}`;
 }
+
+/* Lista de Complejos (la que carga el administrador), para elegir las sedes de un torneo y tomar
+   su logo en la imagen del fixture sin pasarla de componente en componente */
+const ComplexesContext = React.createContext([]);
 
 /* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
    cancha) puedan nombrar las canchas con su sede sin recibir el torneo entero */
@@ -3007,9 +3012,17 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
 
 /* Clásico: varias sedes, cada una con sus canchas. La cantidad de canchas del torneo pasa a ser la
    suma, numeradas de corrido para armar los horarios, y en pantalla se muestran con su sede (ver
-   courtName). Sin sedes, el torneo usa solo "Cantidad de canchas", como siempre. */
+   courtName). Sin sedes, el torneo usa solo "Cantidad de canchas", como siempre.
+   Cada sede se elige de la lista de Complejos (complexId: de ahí sale el logo de la imagen del
+   fixture) o, con "Otra sede…", se escribe a mano. */
 function VenuesField({ tournament, onChange }) {
   const venues = tournament.venues || [];
+  const complexes = React.useContext(ComplexesContext);
+  const sortedComplexes = [...complexes].sort((a, b) => a.name.localeCompare(b.name, "es"));
+  const chooseComplex = (v, complexId) => {
+    const c = complexes.find((x) => x.id === complexId);
+    update(v.id, c ? { complexId: c.id, name: c.name } : { complexId: null, name: v.complexId ? "" : v.name });
+  };
   const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
   const save = (next) => {
     const clean = next.map((v) => ({ ...v, courts: Math.max(1, Number(v.courts) || 1) }));
@@ -3022,7 +3035,7 @@ function VenuesField({ tournament, onChange }) {
   if (venues.length === 0) {
     return (
       <button type="button" onClick={start} className="text-xs text-teal-400 underline mb-4" style={F.body}>
-        ¿Se juega en más de una sede? Cargar sedes
+        ¿Se juega en uno o más complejos? Cargar sedes
       </button>
     );
   }
@@ -3032,7 +3045,11 @@ function VenuesField({ tournament, onChange }) {
       <div className="space-y-2">
         {venues.map((v) => (
           <div key={v.id} className="flex items-center gap-2 flex-wrap text-sm" style={F.body}>
-            <input value={v.name} onChange={(e) => update(v.id, { name: e.target.value })} placeholder="Nombre de la sede" className="flex-1 min-w-[9rem] px-2 py-1.5 rounded border text-sm" style={input} />
+            <select value={v.complexId || ""} onChange={(e) => chooseComplex(v, e.target.value)} className="flex-1 min-w-[9rem] px-2 py-1.5 rounded border text-sm" style={input}>
+              <option value="">Otra sede…</option>
+              {sortedComplexes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            {!v.complexId && <input value={v.name} onChange={(e) => update(v.id, { name: e.target.value })} placeholder="Nombre de la sede" className="flex-1 min-w-[9rem] px-2 py-1.5 rounded border text-sm" style={input} />}
             <label className="text-xs text-teal-400 flex items-center gap-1">
               Canchas
               <input type="number" min="1" inputMode="numeric" value={v.courts} onChange={(e) => update(v.id, { courts: e.target.value })} className="w-16 px-2 py-1.5 rounded border text-sm" style={input} />
@@ -3612,9 +3629,74 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
   );
 }
 
+/* Imágenes del fixture para redes (ver fixtureImage.js): una por sede y por día, con vista previa,
+   Descargar y, en el celular, Compartir (para subirla directo a una historia o a WhatsApp) */
+function FixtureImagesModal({ tournament, matches, pairsById, onClose }) {
+  const complexes = React.useContext(ComplexesContext);
+  const pages = useMemo(() => fixturePages(tournament, matches, pairsById, complexes), [tournament, matches, pairsById, complexes]);
+  const [images, setImages] = useState(null); // [{ page, url, blob }]
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await Promise.all([document.fonts.load("40px 'Archivo Black'"), document.fonts.load("600 40px 'Work Sans'"), document.fonts.load("700 40px 'Work Sans'")]);
+      } catch { /* sin las fuentes se dibuja igual */ }
+      const brand = await loadImage(logoMarkUrl);
+      const logos = {};
+      for (const pg of pages) if (pg.logoUrl && !(pg.logoUrl in logos)) logos[pg.logoUrl] = await loadImage(pg.logoUrl);
+      const out = [];
+      for (const pg of pages) {
+        const canvas = document.createElement("canvas");
+        drawFixture(canvas, pg, tournament.name, logos[pg.logoUrl] || null, brand);
+        const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+        if (blob) out.push({ page: pg, url: URL.createObjectURL(blob), blob });
+      }
+      if (cancelled) out.forEach((o) => URL.revokeObjectURL(o.url));
+      else setImages(out);
+    })();
+    return () => { cancelled = true; };
+  }, [pages, tournament.name]);
+  useEffect(() => () => { (images || []).forEach((o) => URL.revokeObjectURL(o.url)); }, [images]);
+
+  const canShare = typeof navigator !== "undefined" && !!navigator.canShare;
+  const share = async (o) => {
+    const file = new File([o.blob], fixtureFileName(o.page), { type: "image/png" });
+    if (!navigator.canShare({ files: [file] })) return;
+    try { await navigator.share({ files: [file], title: tournament.name }); } catch { /* la cerró sin compartir */ }
+  };
+
+  return (
+    <Modal title="Imágenes para redes" onClose={onClose}>
+      <p className="text-xs text-teal-400 mb-4" style={F.body}>Una imagen por sede y por día (formato historia, 1080×1920), con los partidos que ya tienen horario.</p>
+      {!images ? (
+        <p className="text-sm text-teal-300" style={F.body}>Armando las imágenes…</p>
+      ) : images.length === 0 ? (
+        <p className="text-sm opacity-70" style={F.body}>Todavía no hay partidos con horario.</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-4">
+          {images.map((o) => (
+            <div key={o.url} className="min-w-0">
+              <img src={o.url} alt={`Fixture ${o.page.venueName} ${fixtureDateLabel(o.page.date)}`} className="w-full rounded-lg border border-teal-800" />
+              <p className="text-[11px] text-teal-300 mt-1 truncate" style={F.body}>
+                {o.page.venueName || tournament.name} · {fixtureDateLabel(o.page.date)}{o.page.pages > 1 ? ` (${o.page.page}/${o.page.pages})` : ""}
+              </p>
+              <div className="flex gap-2 mt-1 flex-wrap">
+                <a href={o.url} download={fixtureFileName(o.page)} className="px-3 py-1.5 rounded font-semibold text-xs" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Descargar</a>
+                {canShare && <button type="button" onClick={() => share(o)} className="px-3 py-1.5 rounded font-semibold text-xs border border-teal-600 text-teal-200">Compartir</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ScheduleAdminView({ tournament, update }) {
   const [notice, setNotice] = useState(null);
   const [gridOpen, setGridOpen] = useState(false);
+  const [fixtureOpen, setFixtureOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
   const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
@@ -3675,9 +3757,15 @@ function ScheduleAdminView({ tournament, update }) {
   return (
     <div>
       {gridOpen && <ScheduleGridOverlay tournament={tournament} matches={matches} pairsById={pairsById} onOpenResult={openResult} onClose={() => setGridOpen(false)} />}
+      {fixtureOpen && <FixtureImagesModal tournament={tournament} matches={matches} pairsById={pairsById} onClose={() => setFixtureOpen(false)} />}
       {modals}
       {matches.length > 0 && (
-        <div className="flex justify-end mb-4">
+        <div className="flex justify-end gap-2 flex-wrap mb-4">
+          {tournamentType(tournament) === "clasico" && scheduled.length > 0 && (
+            <button type="button" onClick={() => setFixtureOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.lime), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
+              📸 Imágenes para redes
+            </button>
+          )}
           <button type="button" onClick={() => setGridOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.cyan), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
             ▦ Abrir grilla
           </button>
@@ -8577,6 +8665,7 @@ function SmashPointAppInner() {
   }
 
   return (
+    <ComplexesContext.Provider value={venues}>
     <div className="min-h-screen overflow-x-hidden" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
       {showFooterAds && (
@@ -8596,6 +8685,7 @@ function SmashPointAppInner() {
         </div>
       )}
     </div>
+    </ComplexesContext.Provider>
   );
 }
 
