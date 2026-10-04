@@ -3,7 +3,7 @@
    games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket } from "./standings.js";
+import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
 const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
@@ -51,12 +51,12 @@ test("Súper 8 a un set: entre empatadas manda la diferencia de games aunque el 
 });
 
 test("empate en sets y games: mandan los games a favor", () => {
-  // A y B ganan 2 y tienen la misma diferencia de sets (+4) y de games (+4), pero A hizo más games
+  // A y B ganan 2 y tienen la misma diferencia de sets (+4) y de games (+8), pero A hizo más games
   const rows = computeStandings(group(["A", "B", "C", "D"], [
-    m("A", "C", [7, 6], [7, 6]),  // A 14-12
-    m("A", "D", [7, 6], [7, 6]),  // A 14-12 → A 28-24 (+4)
-    m("B", "C", [6, 5], [6, 5]),  // B 12-10
-    m("B", "D", [6, 5], [6, 5]),  // B 12-10 → B 24-20 (+4)
+    m("A", "C", [7, 5], [7, 5]),  // A 14-10
+    m("A", "D", [7, 5], [7, 5]),  // A 14-10 → A 28-20 (+8)
+    m("B", "C", [6, 4], [6, 4]),  // B 12-8
+    m("B", "D", [6, 4], [6, 4]),  // B 12-8 → B 24-16 (+8)
   ]), {}, CLASICO);
   assert.deepEqual(order(rows).slice(0, 2), ["A", "B"]);
 });
@@ -94,7 +94,7 @@ test("triple empate: iguales en sets, desempata la diferencia de games", () => {
   const rows = computeStandings(group(["A", "B", "C"], [
     m("A", "B", [6, 1], [6, 1]), // A +10, B -10
     m("B", "C", [6, 2], [6, 2]), // B +8,  C -8
-    m("C", "A", [6, 5], [7, 5]), // C +3,  A -3
+    m("C", "A", [6, 4], [7, 6]), // C +3,  A -3
   ]), {}, CLASICO);
   // A: +10 -3 = +7 | B: -10 +8 = -2 | C: -8 +3 = -5
   assert.deepEqual(order(rows), ["A", "B", "C"]);
@@ -106,7 +106,7 @@ test("triple empate: cuentan todos los partidos del grupo, no solo los partidos 
   const rows = computeStandings(group(["A", "B", "C", "D"], [
     m("A", "B", [6, 1], [6, 1]),
     m("B", "C", [6, 2], [6, 2]),
-    m("C", "A", [6, 5], [7, 5]),
+    m("C", "A", [6, 4], [7, 6]),
     m("A", "D", [6, 4], [6, 4]),
     m("B", "D", [6, 4], [6, 4]),
     m("C", "D", [6, 0], [6, 0]),
@@ -367,4 +367,68 @@ test("llave: campeón recién cuando se juega la final", () => {
   const final = { ...empty(), sets: [{ a: 6, b: 2 }, { a: 6, b: 2 }] };
   w = walkBracket([r1, [final]]);
   assert.equal(w.winners[1][0], "A");
+});
+
+/* ---------- Partido terminado y sets válidos ---------- */
+test("partido a medias (un set): no terminó, no tiene ganador y no suma en la tabla", () => {
+  const x = m("A", "B", [6, 4]);
+  assert.equal(matchIsPlayed(x, CLASICO), false);
+  assert.equal(matchWinnerId(x, CLASICO), null);
+  assert.equal(matchHasScore(x), true, "pero ya tiene resultado cargado (para los bloqueos)");
+  const rows = computeStandings(group(["A", "B"], [x]), {}, CLASICO);
+  assert.equal(row(rows, "A").pj, 0);
+  assert.equal(row(rows, "A").pts, 0);
+});
+
+test("1-1 sin el super tie-break cargado: todavía no terminó", () => {
+  assert.equal(matchIsPlayed(m("A", "B", [6, 4], [4, 6]), CLASICO), false);
+});
+
+test("set en juego (6-4 3-2): no define el partido", () => {
+  const x = m("A", "B", [6, 4], [3, 2]);
+  assert.equal(matchIsPlayed(x, CLASICO), false);
+  assert.equal(matchWinnerId(x, CLASICO), null);
+});
+
+test("set imposible (7-3) no cuenta como set ganado", () => {
+  assert.equal(setIsComplete({ a: 7, b: 3 }, 0, CLASICO), false);
+  assert.equal(matchIsPlayed(m("A", "B", [7, 3], [6, 0]), CLASICO), false);
+});
+
+test("sets válidos con sets a 6 y tie break: 6-4, 7-5, 7-6 sí; 6-5, 8-6 no", () => {
+  const ok = (a, b) => setIsComplete({ a, b }, 0, CLASICO);
+  assert.ok(ok(6, 0) && ok(6, 4) && ok(7, 5) && ok(7, 6) && ok(4, 6) && ok(6, 7));
+  assert.ok(!ok(6, 5) && !ok(8, 6) && !ok(5, 3) && !ok(7, 4) && !ok(6, 6));
+});
+
+test("super tie-break: 10-8 o 12-10 sí; 5-3, 10-9 u 11-8 no", () => {
+  const ok = (a, b) => setIsComplete({ a, b }, 2, CLASICO);
+  assert.ok(ok(10, 8) && ok(10, 0) && ok(12, 10) && ok(8, 10));
+  assert.ok(!ok(5, 3) && !ok(10, 9) && !ok(11, 8) && !ok(9, 7));
+  assert.equal(matchIsPlayed(m("A", "B", [4, 6], [6, 4], [5, 3]), CLASICO), false);
+  assert.equal(matchWinnerId(m("A", "B", [4, 6], [6, 4], [11, 9]), CLASICO), "A");
+});
+
+test("2-0 con un super tie-break cargado de más: no se suma a la tabla", () => {
+  const rows = computeStandings(group(["A", "B"], [m("A", "B", [6, 4], [6, 4], [3, 10])]), {}, CLASICO);
+  assert.deepEqual([row(rows, "A").setsF, row(rows, "A").setsC], [2, 0]);
+  assert.deepEqual([row(rows, "A").gamesF, row(rows, "A").gamesC], [12, 8]);
+});
+
+test("2 sets directos: 1-1 es partido terminado, sin ganador", () => {
+  const DOS_SETS = { setsToPlay: 2, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: false };
+  const x = m("A", "B", [6, 4], [4, 6]);
+  assert.equal(matchIsPlayed(x, DOS_SETS), true);
+  assert.equal(matchWinnerId(x, DOS_SETS), null);
+});
+
+test("set único (Súper 8 a 4): 4-3 termina; 3-2 o 5-3 no", () => {
+  assert.equal(matchWinnerId(m("A", "B", [4, 3]), SUPER8_4), "A");
+  assert.equal(matchIsPlayed(m("A", "B", [3, 2]), SUPER8_4), false);
+  assert.equal(matchIsPlayed(m("A", "B", [5, 3]), SUPER8_4), false);
+});
+
+test("llave: un resultado a medias no hace avanzar a nadie", () => {
+  const { rounds } = walkBracket([[bm("A", "B", [6, 4]), bm("C", "D", [6, 1], [6, 1])], [empty()]], CLASICO);
+  assert.deepEqual([rounds[1][0].pairA, rounds[1][0].pairB], [null, "C"]);
 });

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket } from "./standings.js";
+import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, setIsComplete, isSuperTiebreakSet } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
 import { mergeTournament } from "./merge.js";
 
@@ -798,13 +798,18 @@ function super8IndividualStandingsGroup(category, group) {
 
 
 /* Avance del torneo: cuántos partidos ya se jugaron sobre el total (grupos + llave con ambas parejas definidas) */
+/* ¿Hay algún resultado cargado en el torneo, aunque sea a medias? */
+function tournamentHasScores(t) {
+  return (t.categories || []).some((c) => (c.groups || []).some((g) => g.matches.some(matchHasScore)) || (c.bracket || []).some((round) => round.some(matchHasScore)));
+}
+
 function tournamentProgress(t) {
   let total = 0, played = 0;
   if (isInfoOnly(t)) return { total, played, pct: 0 }; // los informativos no tienen partidos
   (t.categories || []).forEach((c) => {
-    (c.groups || []).forEach((g) => g.matches.forEach((m) => { total++; if (matchIsPlayed(m)) played++; }));
+    (c.groups || []).forEach((g) => g.matches.forEach((m) => { total++; if (matchIsPlayed(m, t.matchFormat)) played++; }));
     (c.bracket || []).forEach((round) => round.forEach((m) => {
-      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m)) played++; }
+      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m, t.matchFormat)) played++; }
     }));
   });
   return { total, played, pct: total > 0 ? Math.round((played / total) * 100) : 0 };
@@ -813,8 +818,8 @@ function tournamentProgress(t) {
 
 /* Estado visual de un partido para la tabla de horarios: "finalizado" se calcula solo al cargar
    resultado o walkover; "en_curso" lo marca el organizador a mano mientras no haya resultado. */
-function matchDisplayStatus(m) {
-  if (matchIsPlayed(m)) return "finalizado";
+function matchDisplayStatus(m, format) {
+  if (matchIsPlayed(m, format)) return "finalizado";
   if (m && m.liveStatus === "en_curso") return "en_curso";
   return "pendiente";
 }
@@ -822,8 +827,8 @@ function matchDisplayStatus(m) {
 /* Chequea si una pareja (o jugador del Súper 8 Individual) ya jugó algún partido (de grupos o de la llave) dentro de la categoría */
 function pairHasPlayed(category, pairId) {
   const plays = (m) => [m.pairA, m.pairB].some((side) => sideParticipantIds(category, side).includes(pairId));
-  const inGroups = (category.groups || []).some((g) => g.matches.some((m) => plays(m) && matchIsPlayed(m)));
-  const inBracket = (category.bracket || []).some((round) => round.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchIsPlayed(m)));
+  const inGroups = (category.groups || []).some((g) => g.matches.some((m) => plays(m) && matchHasScore(m)));
+  const inBracket = (category.bracket || []).some((round) => round.some((m) => (m.pairA === pairId || m.pairB === pairId) && matchHasScore(m)));
   return inGroups || inBracket;
 }
 
@@ -977,11 +982,11 @@ function buildSeededBracket(round1Pairs) {
 
 /* En un grupo de 4 parejas, arma solos los cruces de ganadores y de perdedores apenas se cargan
    los dos primeros resultados (partido 1 y partido 2 del sorteo inicial) */
-function propagateGroupBracket4(matches) {
+function propagateGroupBracket4(matches, format) {
   const next = matches.map((m) => ({ ...m }));
   const [m1, m2] = next;
-  next[2] = { ...next[2], pairA: winnerOf(m1), pairB: winnerOf(m2) };
-  next[3] = { ...next[3], pairA: loserOf(m1), pairB: loserOf(m2) };
+  next[2] = { ...next[2], pairA: winnerOf(m1, format), pairB: winnerOf(m2, format) };
+  next[3] = { ...next[3], pairA: loserOf(m1, format), pairB: loserOf(m2, format) };
   return next;
 }
 
@@ -1011,8 +1016,8 @@ function swapBracketPairs(bracket, pairIdA, pairIdB) {
 /* Completa cada ronda de la llave con los ganadores de la anterior. Solo avanza quien ganó de
    verdad (o pasó por un bye real): un lugar que espera un partido sin jugar no cuenta como bye
    (ver walkBracket) */
-function propagateBracket(rounds) {
-  return walkBracket(rounds).rounds;
+function propagateBracket(rounds, format) {
+  return walkBracket(rounds, format).rounds;
 }
 
 /* Parejas fuera del torneo en una categoría: las que eliminó el organizador y las que se
@@ -1029,12 +1034,12 @@ function categoryOutPairIds(category) {
    (marcados con autoWalkover). Si se la reincorpora o se deshace el RET, esos W.O. automáticos se
    sacan. Se repite hasta que no cambie nada, porque un W.O. puede completar un cruce de un grupo
    de 4 o una ronda de la llave donde esa pareja vuelve a aparecer. En el Súper 8 no se aplica. */
-function withForfeits(category) {
+function withForfeits(category, format) {
   if (isSuper8(category)) return category;
   const out = categoryOutPairIds(category);
   const fix = (m) => {
     if (m.autoWalkover && !out.has(m.walkover)) return { ...m, walkover: null, autoWalkover: false };
-    if (m.pairA && m.pairB && !matchIsPlayed(m)) {
+    if (m.pairA && m.pairB && !matchHasScore(m)) {
       const gone = out.has(m.pairA) ? m.pairA : out.has(m.pairB) ? m.pairB : null;
       if (gone) return { ...m, walkover: gone, autoWalkover: true, sets: [], liveStatus: null };
     }
@@ -1046,9 +1051,9 @@ function withForfeits(category) {
       ...current,
       groups: (current.groups || []).map((g) => {
         const matches = g.matches.map(fix);
-        return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches) : matches };
+        return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches, format) : matches };
       }),
-      bracket: current.bracket ? propagateBracket(current.bracket.map((round) => round.map(fix))) : current.bracket,
+      bracket: current.bracket ? propagateBracket(current.bracket.map((round) => round.map(fix)), format) : current.bracket,
     };
     if (JSON.stringify(next) === JSON.stringify(current)) return current;
     current = next;
@@ -1179,12 +1184,12 @@ function withMatchResult(tournament, categoryId, location, matchId, change) {
           groups: c.groups.map((g) => {
             if (g.id !== location.groupId) return g;
             const matches = g.matches.map((m) => (m.id === matchId ? change(m) : m));
-            return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches) : matches };
+            return { ...g, matches: g.format === "bracket4" ? propagateGroupBracket4(matches, tournament.matchFormat) : matches };
           }),
         };
       }
       const rounds = c.bracket.map((round, ri) => (ri !== location.roundIndex ? round : round.map((m) => (m.id === matchId ? change(m) : m))));
-      return { ...c, bracket: propagateBracket(rounds) };
+      return { ...c, bracket: propagateBracket(rounds, tournament.matchFormat) };
     }),
   };
 }
@@ -1194,7 +1199,7 @@ function withMatchResult(tournament, categoryId, location, matchId, change) {
    los de grupos y después las llaves). Sirve cuando cambia el horario de arranque, la cantidad de
    canchas o el tiempo entre partidos con los horarios ya generados. */
 function rescheduleTournament(tournament) {
-  const keep = (m) => matchIsPlayed(m) || m.liveStatus === "en_curso";
+  const keep = (m) => matchHasScore(m) || m.liveStatus === "en_curso";
   const clear = (m) => (m.schedule && !keep(m) ? { ...m, schedule: null } : m);
   let next = {
     ...tournament,
@@ -1607,11 +1612,11 @@ const CIRCUIT_TIER_ORDER = ["campeon", "finalista", "semifinalista", "cuartos", 
 
 /* A partir de la llave final de una categoría, determina en qué instancia quedó eliminada cada pareja.
    Las que nunca entraron a la llave (o no hay llave todavía) quedan en "fase de grupos". */
-function categoryPlacements(category) {
+function categoryPlacements(category, format) {
   const results = []; // { pairId, tier }
   if (category.bracket && category.bracket.length > 0) {
     // Recalculada desde la primera ronda: no se confía en parejas que hayan avanzado de más
-    const { rounds: bracket, winners } = walkBracket(category.bracket);
+    const { rounds: bracket, winners } = walkBracket(category.bracket, format);
     const finalMatch = bracket[bracket.length - 1][0];
     const champion = winners[bracket.length - 1][0];
     [finalMatch.pairA, finalMatch.pairB].filter(Boolean).forEach((pid) => {
@@ -1656,7 +1661,7 @@ function computeCircuitStandings(circuit, tournaments) {
       if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
       if (!matchName) return;
-      categoryPlacements(cat).forEach(({ pairId, tier }) => {
+      categoryPlacements(cat, t.matchFormat).forEach(({ pairId, tier }) => {
         const pair = cat.pairs.find((p) => p.id === pairId);
         if (!pair) return;
         const pts = points[tier] ?? 0;
@@ -2212,7 +2217,7 @@ function MatchResultLabel({ match, winnerIsA, format }) {
   if (match && match.retired) {
     return <span><SetsSummary sets={effectiveSets(match, format)} winnerIsA={match.retired === match.pairA ? false : true} /> · <span className="text-red-400 font-semibold">RET</span></span>;
   }
-  return <SetsSummary sets={match.sets} winnerIsA={winnerIsA} />;
+  return <SetsSummary sets={countedSets(match, format)} winnerIsA={winnerIsA} />;
 }
 
 /* Tilde que marca a la pareja ganadora de un partido, para que se vea de un vistazo sin tener que leer el resultado */
@@ -2344,8 +2349,25 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
   const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet);
   const tieAt = format?.gamesPerSet - 1;
   const singleSetNote = !singleSetLoaded || partial ? null
-    : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}).`
+    : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}). Hasta corregirlo, el partido no cuenta.`
     : Math.min(setA, setB) === tieAt ? "Definido en tie break" : null;
+  // A sets (Clásico): avisa del set que todavía no es un resultado final (en juego o mal tipeado) y
+  // del que se cargó de más cuando el partido ya estaba definido. Esos sets no cuentan.
+  let multiSetNote = null;
+  if (!singleSet && !partial) {
+    const f = format || DEFAULT_MATCH_FORMAT;
+    const need = f.setsToPlay === 1 ? 1 : Math.floor(f.setsToPlay / 2) + 1;
+    let a = 0, b = 0;
+    for (let i = 0; i < rows.length && !multiSetNote; i++) {
+      const s = rows[i];
+      if (s.a == null && s.b == null) continue;
+      const label = isSuperTiebreakSet(i, f) ? "El super tie-break" : `El set ${i + 1}`;
+      if (a >= need || b >= need) multiSetNote = `${label} no cuenta: el partido ya se definió.`;
+      else if (s.a == null || s.b == null) continue;
+      else if (!setIsComplete(s, i, f)) multiSetNote = `${label} (${s.a}-${s.b}) todavía no es un resultado final: el partido no cuenta hasta completarlo.`;
+      else if (s.a > s.b) a++; else b++;
+    }
+  }
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap gap-2">
@@ -2392,6 +2414,7 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
       {singleSetNote && (
         <span className={`text-[10px] text-right ${singleSetInvalid ? "text-amber-400" : "text-teal-500"}`} style={F.body}>{singleSetNote}</span>
       )}
+      {multiSetNote && <span className="text-[10px] text-right text-amber-400 max-w-[16rem]" style={F.body}>{multiSetNote}</span>}
     </div>
   );
 }
@@ -2571,7 +2594,7 @@ function TournamentTypeEditor({ tournament, update }) {
   const [config, setConfig] = useState(() => tournamentConfig(tournament));
   const [classicFormat, setClassicFormat] = useState(() => (isSingleSetFormat(tournament.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : tournament.matchFormat || { ...DEFAULT_MATCH_FORMAT }));
   const blocked = tournamentConfigChangeBlocked(tournament, config);
-  const hasResults = tournamentProgress(tournament).played > 0;
+  const hasResults = tournamentHasScores(tournament);
 
   const start = () => {
     setConfig(tournamentConfig(tournament));
@@ -3158,8 +3181,8 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
 function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive, draggable, onDragStart }) {
   const s = m.schedule;
   const courtLabel = useCourtName();
-  const hasResult = matchIsPlayed(m);
-  const w = hasResult ? matchWinnerId(m) : null;
+  const hasResult = matchIsPlayed(m, format);
+  const w = hasResult ? matchWinnerId(m, format) : null;
   const winnerIsA = w == null ? null : w === m.pairA;
   return (
     <div
@@ -3171,7 +3194,7 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
       <div className="min-w-[200px] max-w-full">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
           <span className="text-xs text-teal-500">{m.categoryName} · {m.label}</span>
-          {!m.placeholder && <MatchStatusBadge status={matchDisplayStatus(m)} />}
+          {!m.placeholder && <MatchStatusBadge status={matchDisplayStatus(m, format)} />}
           {m.draft && <span className="text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ backgroundColor: "#a78bfa22", color: "#a78bfa" }}>Borrador</span>}
         </div>
         {m.placeholder ? (
@@ -3233,7 +3256,7 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
 function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, onResult, onMove }) {
-  const status = m.placeholder ? "pendiente" : matchDisplayStatus(m);
+  const status = m.placeholder ? "pendiente" : matchDisplayStatus(m, format);
   const finished = status === "finalizado";
   const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
   const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : "#38bdf81a";
@@ -3265,7 +3288,7 @@ function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, o
           <p className="truncate opacity-60">vs <PairName id={m.pairB} pairsById={pairsById} /></p>
           {onResult && (
             <button type="button" onClick={onResult} className="mt-0.5 text-[10px] underline text-teal-300 hover:text-lime-400">
-              {finished ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={matchWinnerId(m) === m.pairA} /> ✎</span> : "+ Resultado"}
+              {finished ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={matchWinnerId(m, format) === m.pairA} /> ✎</span> : "+ Resultado"}
             </button>
           )}
         </>
@@ -3442,16 +3465,16 @@ function OnCourtView({ tournament, update }) {
   const [showDone, setShowDone] = useState(false);
 
   const real = matches.filter((m) => !m.draft || m.schedule);
-  const done = real.filter((m) => !m.placeholder && matchIsPlayed(m)).filter((m) => m.schedule).sort(compareBySchedule).reverse();
-  const live = real.filter((m) => !m.placeholder && !matchIsPlayed(m) && m.liveStatus === "en_curso")
+  const done = real.filter((m) => !m.placeholder && matchIsPlayed(m, tournament.matchFormat)).filter((m) => m.schedule).sort(compareBySchedule).reverse();
+  const live = real.filter((m) => !m.placeholder && !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus === "en_curso")
     .sort((a, b) => (a.schedule?.court || 99) - (b.schedule?.court || 99));
-  const upcoming = real.filter((m) => m.schedule && !matchIsPlayed(m) && m.liveStatus !== "en_curso").sort(compareBySchedule);
-  const unscheduled = real.filter((m) => !m.schedule && !m.placeholder && !matchIsPlayed(m));
+  const upcoming = real.filter((m) => m.schedule && !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso").sort(compareBySchedule);
+  const unscheduled = real.filter((m) => !m.schedule && !m.placeholder && !matchIsPlayed(m, tournament.matchFormat));
   const shownNext = showAllNext ? upcoming : upcoming.slice(0, 8);
 
   const card = (m, kind) => {
-    const hasResult = !m.placeholder && matchIsPlayed(m);
-    const w = hasResult ? matchWinnerId(m) : null;
+    const hasResult = !m.placeholder && matchIsPlayed(m, tournament.matchFormat);
+    const w = hasResult ? matchWinnerId(m, tournament.matchFormat) : null;
     const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
     const accent = kind === "live" ? "#fb923c" : kind === "done" ? "#9fe022" : "#38bdf8";
     const btn = "flex-1 min-w-[6.5rem] px-3 py-2.5 rounded-lg text-sm font-semibold";
@@ -3548,9 +3571,9 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
   const shortName = (id) => pairsById[id]?.name || "A definir";
 
   const cell = (m) => {
-    const status = matchDisplayStatus(m);
+    const status = matchDisplayStatus(m, tournament.matchFormat);
     const color = status === "finalizado" ? "#9fe022" : status === "en_curso" ? "#fb923c" : categoryColor[m.categoryId];
-    const w = matchIsPlayed(m) ? matchWinnerId(m) : null;
+    const w = matchIsPlayed(m, tournament.matchFormat) ? matchWinnerId(m, tournament.matchFormat) : null;
     return (
       <button
         key={m.key}
@@ -3568,7 +3591,7 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
             <span className={`block truncate ${w === m.pairB ? "text-lime-400 font-semibold" : "text-slate-200"}`}>{shortName(m.pairB)}</span>
           </>
         )}
-        {matchIsPlayed(m) && <span className="block font-mono text-teal-300 truncate"><MatchResultLabel match={m} format={tournament.matchFormat} winnerIsA={w == null ? null : w === m.pairA} /></span>}
+        {matchIsPlayed(m, tournament.matchFormat) && <span className="block font-mono text-teal-300 truncate"><MatchResultLabel match={m} format={tournament.matchFormat} winnerIsA={w == null ? null : w === m.pairA} /></span>}
         {status === "en_curso" && <span className="block font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
       </button>
     );
@@ -3721,7 +3744,7 @@ function ScheduleAdminView({ tournament, update }) {
       for (let c = 1; c <= courtsCount; c++) gridSlots.add(`${d.date}|${time}|${c}`);
     });
   });
-  const offGrid = scheduled.filter((m) => !matchIsPlayed(m) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
+  const offGrid = scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
 
@@ -3970,7 +3993,7 @@ function ScheduleAdminView({ tournament, update }) {
    presentó. */
 function Scoreboard({ match, pairsById, format }) {
   const sets = effectiveSets(match, format).filter((s) => s && s.a != null && s.b != null);
-  const winner = matchWinnerId(match);
+  const winner = matchWinnerId(match, format);
   const line = (side) => {
     const id = side === "a" ? match.pairA : match.pairB;
     const other = side === "a" ? "b" : "a";
@@ -4023,8 +4046,8 @@ function SchedulePublicView({ tournament }) {
   const slotId = (m) => `slot-${m.schedule.date}-${m.schedule.time.replace(":", "")}`;
   // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante)
   const today = todayISO();
-  const pending = scheduled.filter((m) => !m.placeholder && !matchIsPlayed(m));
-  const nowMatch = scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m))
+  const pending = scheduled.filter((m) => !m.placeholder && !matchIsPlayed(m, tournament.matchFormat));
+  const nowMatch = scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m, tournament.matchFormat))
     || pending.find((m) => m.schedule.date >= today)
     || pending[0];
   const goToNow = () => { if (nowMatch) document.getElementById(slotId(nowMatch))?.scrollIntoView({ behavior: "smooth", block: "start" }); };
@@ -4052,8 +4075,8 @@ function SchedulePublicView({ tournament }) {
                   <span className="text-sm font-extrabold w-11 shrink-0 pt-0.5" style={{ color: dateColor, ...F.body }}>{time}</span>
                   <div className="flex-1 min-w-0 space-y-1.5">
                     {byTime[time].map((m) => {
-                      const hasResult = !m.placeholder && matchIsPlayed(m);
-                      const w = hasResult ? matchWinnerId(m) : null;
+                      const hasResult = !m.placeholder && matchIsPlayed(m, tournament.matchFormat);
+                      const w = hasResult ? matchWinnerId(m, tournament.matchFormat) : null;
                       const live = !hasResult && m.liveStatus === "en_curso";
                       const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
                       return (
@@ -4995,12 +5018,12 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
   const turns = super8Turns(group.matches, courts);
   const simultaneous = turns.some((turn) => turn.matches.length > 1);
   const courtOf = Object.fromEntries(turns.flatMap((turn) => turn.matches.map(({ m, court }) => [m.id, court])));
-  const live = group.matches.filter((m) => matchDisplayStatus(m) === "en_curso");
+  const live = group.matches.filter((m) => matchDisplayStatus(m, format) === "en_curso");
 
   const row = (m, tag) => {
-    const hasResult = matchIsPlayed(m);
-    const status = matchDisplayStatus(m);
-    const w = hasResult ? matchWinnerId(m) : null;
+    const hasResult = matchIsPlayed(m, format);
+    const status = matchDisplayStatus(m, format);
+    const w = hasResult ? matchWinnerId(m, format) : null;
     const side = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{nameOf(id)}</span>;
     return (
       <div key={m.id} className="flex items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm flex-wrap" style={{ ...F.body, ...(status === "en_curso" ? { backgroundColor: "rgba(251,146,60,0.08)", boxShadow: "inset 3px 0 0 #fb923c" } : {}) }}>
@@ -5091,9 +5114,9 @@ function CategoryGroupsPublicView({ category, format }) {
               <StandingsTable group={g} pairsById={pairsById} format={format} accentColor={color} highlightCount={groupQualifiersCount(g)} />
               <div className="mt-3 space-y-2">
                 {g.matches.map((m) => {
-                  const hasResult = matchIsPlayed(m);
+                  const hasResult = matchIsPlayed(m, format);
                   const pending = !m.pairA || !m.pairB;
-                  const w = hasResult ? matchWinnerId(m) : null;
+                  const w = hasResult ? matchWinnerId(m, format) : null;
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="text-sm" style={F.body}>
@@ -5137,7 +5160,7 @@ function CategoryGroupsPublicView({ category, format }) {
 function CategoryBracketPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
   // Recalculada desde la primera ronda (corrige parejas que hayan avanzado de más en datos viejos)
-  const walked = useMemo(() => (category.bracket ? walkBracket(category.bracket) : null), [category.bracket]);
+  const walked = useMemo(() => (category.bracket ? walkBracket(category.bracket, format) : null), [category.bracket, format]);
 
   return (
     <section className="mt-6">
@@ -5157,20 +5180,20 @@ function CategoryBracketPublicView({ category, format }) {
                 </span>
                 {round.map((m, mi) => {
                   const w = walked.winners[ri][mi];
-                  const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
+                  const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                       <ScheduleLabel schedule={m.schedule} />
                       <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                         <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
-                        <span>{m.walkover ? "" : matchIsPlayed(m) ? setsA : ""}</span>
+                        <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
                       </div>
                       <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                         <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
-                        <span>{m.walkover ? "" : matchIsPlayed(m) ? setsB : ""}</span>
+                        <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
                       </div>
-                      {matchIsPlayed(m) && (
+                      {matchIsPlayed(m, format) && (
                         <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
                       )}
                     </div>
@@ -7114,7 +7137,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   const entryWord = individual ? "jugadores" : "parejas";
   const group = category.groups[0];
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
-  const anyResult = !!group && group.matches.some((m) => matchIsPlayed(m));
+  const anyResult = !!group && group.matches.some((m) => matchHasScore(m));
 
   const generate = (shuffle) => {
     const ids = category.pairs.map((p) => p.id);
@@ -7281,10 +7304,10 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           const next = { ...m, sets: withSetScore(m.sets, setIndex, side, value) };
           // Con el resultado cargado pasa solo a Finalizado: se borra la marca "en curso" para que,
           // si después se borra el resultado, vuelva a Pendiente
-          return matchIsPlayed(next) ? { ...next, liveStatus: null } : next;
+          return matchIsPlayed(next, format) ? { ...next, liveStatus: null } : next;
         });
         // En grupos de 4, apenas se cargan los partidos 1 y 2 se arman solos los cruces de ganadores/perdedores
-        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches, format);
         return { ...g, matches };
       }),
     });
@@ -7304,7 +7327,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       groups: category.groups.map((g) => {
         if (g.id !== groupId) return g;
         let matches = g.matches.map((m) => (m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
-        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches, format);
         return { ...g, matches };
       }),
     });
@@ -7317,7 +7340,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
       groups: category.groups.map((g) => {
         if (g.id !== groupId) return g;
         let matches = g.matches.map((m) => (m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
-        if (g.format === "bracket4") matches = propagateGroupBracket4(matches);
+        if (g.format === "bracket4") matches = propagateGroupBracket4(matches, format);
         return { ...g, matches };
       }),
     });
@@ -7366,7 +7389,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [moveGroupTargetId, setMoveGroupTargetId] = useState("");
 
   // Solo se puede editar la composición de los grupos mientras ningún partido de zona esté jugado.
-  const anyGroupHasResults = category.groups.some((g) => g.matches.some((m) => matchIsPlayed(m)));
+  const anyGroupHasResults = category.groups.some((g) => g.matches.some((m) => matchHasScore(m)));
 
   const applyMoveGroupPair = () => {
     if (!moveGroupPairId || !moveGroupTargetId) return;
@@ -7376,7 +7399,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     setMoveGroupPairId(""); setMoveGroupTargetId("");
   };
 
-  const round1HasResults = category.bracket && category.bracket[0].some((m) => matchIsPlayed(m));
+  const round1HasResults = category.bracket && category.bracket[0].some((m) => matchHasScore(m));
 
   const applySwap = () => {
     if (!swapA || !swapB || swapA === swapB) return;
@@ -7386,17 +7409,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
   const setBracketSetScore = (matchId, setIndex, side, value) => {
     const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, sets: withSetScore(m.sets, setIndex, side, value) } : m));
-    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
   const setBracketWalkover = (matchId, walkoverPairId) => {
     const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, walkover: walkoverPairId, retired: null, sets: walkoverPairId ? [] : m.sets, liveStatus: null } : m));
-    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
   const setBracketRetired = (matchId, retiredPairId) => {
     const rounds = category.bracket.map((r) => r.map((m) => m.id === matchId ? { ...m, retired: retiredPairId, walkover: null, liveStatus: null } : m));
-    onUpdateCategory({ ...category, bracket: propagateBracket(rounds) });
+    onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
   const categoryTabs = super8
@@ -7595,8 +7618,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                   {g.matches.map((m) => {
                     const stageLabel = groupMatchStageLabel(g, m);
                     const editable = m.pairA && m.pairB;
-                    const hasResult = matchIsPlayed(m);
-                    const w = hasResult ? matchWinnerId(m) : null;
+                    const hasResult = matchIsPlayed(m, format);
+                    const w = hasResult ? matchWinnerId(m, format) : null;
                     const winnerIsA = w == null ? null : w === m.pairA;
                     return (
                       <div key={m.id} className="flex items-start justify-between gap-3 text-sm flex-wrap">
@@ -7725,7 +7748,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
                 Esta es la estructura precargada de la llave, todavía sin parejas confirmadas. Podés seguir ajustando los horarios en la grilla. Cuando los grupos terminen, generá la llave final desde la pestaña de grupos para completar las parejas.
               </p>
-              {category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m))) && (
+              {category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m, format))) && (
                 <button
                   onClick={generateBracketFromGroups}
                   className="px-4 py-2 rounded font-semibold text-sm"
@@ -7776,7 +7799,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               )}
             </div>
           )}
-          {category.bracket && (() => { const walked = walkBracket(category.bracket); return (
+          {category.bracket && (() => { const walked = walkBracket(category.bracket, format); return (
             <div className="flex gap-8 overflow-x-auto pb-4">
               {walked.rounds.map((round, ri) => {
                 const isFinal = ri === category.bracket.length - 1;
@@ -7798,16 +7821,16 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                           {m.walkover ? (
                             <p className="text-amber-400 font-semibold text-xs">WO</p>
                           ) : (() => {
-                            const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
+                            const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                                   <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
-                                  {editable && <span>{matchIsPlayed(m) ? setsA : ""}</span>}
+                                  {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
                                 </div>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                                   <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
-                                  {editable && <span>{matchIsPlayed(m) ? setsB : ""}</span>}
+                                  {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
                                 </div>
                                 {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                               </>
@@ -8492,7 +8515,7 @@ function SmashPointAppInner() {
 
   // Cada vez que se guarda un torneo, los pendientes de las parejas que quedaron fuera pasan a W.O.
   const updateTournament = (updated) => {
-    saver.save({ ...updated, categories: (updated.categories || []).map(withForfeits) });
+    saver.save({ ...updated, categories: (updated.categories || []).map((c) => withForfeits(c, updated.matchFormat)) });
   };
 
   const deleteTournament = (id) => saver.remove(id);
