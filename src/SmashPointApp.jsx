@@ -625,6 +625,10 @@ const CATEGORY_FORMAT_LABEL = {
   super8_parejas: "Súper 8 por Parejas Fijas",
 };
 const SUPER8_SIZE = 8;
+/* Canchas del Súper 8: con 8 jugadores entran hasta 2 partidos a la vez y con 8 parejas hasta 4.
+   Al crearlo se propone 1 cancha para el Individual y 2 para el de Parejas. */
+const super8MaxCourts = (mode) => (mode === "individual" ? 2 : 4);
+const super8DefaultCourts = (mode) => (mode === "individual" ? 1 : 2);
 
 function isSuper8(category) {
   return category?.format === "super8_individual" || category?.format === "super8_parejas";
@@ -2731,7 +2735,10 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
   const [courtsText, setCourtsText] = useState("2");
   const [startTime, setStartTime] = useState("09:00");
   const [intervalText, setIntervalText] = useState("40");
+  // Súper 8: null = todavía no lo tocó, se usa el valor sugerido según el tipo (Individual o Parejas)
+  const [super8CourtsChosen, setSuper8CourtsChosen] = useState(null);
   const super8 = config.type === "super8";
+  const super8Courts = Math.min(super8CourtsChosen ?? super8DefaultCourts(config.super8Mode), super8MaxCourts(config.super8Mode));
   const americano = config.type === "americano";
   const courts = Number(courtsText), interval = Number(intervalText);
   const scheduleReady = !americano || (Number.isInteger(courts) && courts >= 1 && startTime && Number.isInteger(interval) && interval >= 10);
@@ -2748,9 +2755,9 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
   const finalNames = pending && !categoryNames.some((c) => c.toLowerCase() === pending.toLowerCase()) ? [...categoryNames, pending] : categoryNames;
   const create = () => {
     if (!step2Ready || finalNames.length === 0) return;
-    // Súper 8: arranca con una cancha (un partido atrás del otro); se cambia después en sus partidos
+    // Súper 8: las canchas elegidas acá; se pueden cambiar después en sus partidos
     const schedule = americano ? { courtsCount: courts, matchDurationMinutes: interval, playDates: [{ date, from: startTime, to: "23:59" }] }
-      : super8 ? { courtsCount: 1 } : null;
+      : super8 ? { courtsCount: super8Courts } : null;
     onCreate({
       name: name.trim(), date, circuitId: config.type === "clasico" ? circuitId || null : null, config, schedule,
       categories: finalNames.map((n) => ({ name: n, cupo: super8 ? null : parseCupo(cupos[n] ?? "") })),
@@ -2797,6 +2804,12 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
             )}
           </div>
           <TournamentTypeOptions config={config} onChange={setConfig} />
+          {super8 && config.super8Mode && (
+            <div className="mt-4">
+              <Super8CourtsField courts={super8Courts} individual={config.super8Mode === "individual"} onChange={setSuper8CourtsChosen} />
+              <p className="text-[11px] text-teal-600 -mt-2" style={F.body}>Se puede cambiar después en los partidos del torneo.</p>
+            </div>
+          )}
           {americano && (
             <div className="mt-4">
               <p className="block text-xs text-teal-400 mb-2" style={F.body}>Horarios del día</p>
@@ -6474,13 +6487,15 @@ function EventTournamentForm({ event, onCreate, onCancel }) {
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [category, setCategory] = useState("");
-  const [courtsText, setCourtsText] = useState("1");
+  // null = todavía no lo tocó: se sugiere según el formato (Súper 8 Individual 1, por Parejas 2)
+  const [courtsChosen, setCourtsText] = useState(null);
   const [cupoText, setCupoText] = useState("");
   const [registrationOpen, setRegistrationOpen] = useState(true);
   const [config, setConfig] = useState(defaults);
   const [changingFormat, setChangingFormat] = useState(!tournamentConfigIsComplete(defaults));
-  const courts = Number(courtsText);
   const super8 = config.type === "super8";
+  const courtsText = courtsChosen ?? String(super8 && config.super8Mode ? super8DefaultCourts(config.super8Mode) : 1);
+  const courts = Number(courtsText);
   const ready = date && time && category.trim() && Number.isInteger(courts) && courts >= 1 && tournamentConfigIsComplete(config);
 
   const create = () => {
@@ -6957,7 +6972,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
 /* Canchas del Súper 8: con más de una, los partidos de cada ronda se juegan a la vez (hasta 2 en el
    Individual y hasta 4 por Parejas; más canchas no cambian nada) */
 function Super8CourtsField({ courts, individual, onChange }) {
-  const max = individual ? 2 : 4;
+  const max = super8MaxCourts(individual ? "individual" : "parejas");
   const used = Math.min(courts, max);
   const btn = "w-8 h-8 rounded-full border border-teal-700 text-teal-200 disabled:opacity-30";
   return (
@@ -6965,7 +6980,7 @@ function Super8CourtsField({ courts, individual, onChange }) {
       <span className="text-teal-400">Canchas</span>
       <button type="button" className={btn} disabled={courts <= 1} onClick={() => onChange(courts - 1)} aria-label="Una cancha menos">−</button>
       <span className="font-semibold w-4 text-center">{courts}</span>
-      <button type="button" className={btn} onClick={() => onChange(courts + 1)} aria-label="Una cancha más">+</button>
+      <button type="button" className={btn} disabled={courts >= max} onClick={() => onChange(courts + 1)} aria-label="Una cancha más">+</button>
       <span className="text-xs text-teal-500">
         {used === 1 ? "Un partido atrás del otro." : `${used} partidos a la vez en cada turno.`}
         {courts > max ? ` Con ${individual ? "8 jugadores" : "8 parejas"} entran hasta ${max} a la vez.` : ""}
