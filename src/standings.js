@@ -41,6 +41,34 @@ export function loserOf(m) {
   return w === m.pairA ? m.pairB : m.pairA;
 }
 
+/* Recorre una llave ronda por ronda: completa cada ronda con los ganadores de la anterior y
+   devuelve { rounds, winners } (winners[r][i]: ganador del partido i de la ronda r, o null).
+   Un lugar vacío solo es un bye (la pareja del otro lado pasa sola) si nunca va a llegar nadie:
+   en la primera ronda, cuando no tiene pareja ni texto de "1° Grupo A"; en las siguientes, cuando
+   los dos partidos que lo alimentan también están vacíos para siempre. Si el lugar está esperando
+   al ganador de un partido que todavía no se jugó, no pasa nadie. */
+export function walkBracket(rounds) {
+  const next = rounds.map((r) => r.map((m) => ({ ...m })));
+  const winners = [];
+  let deadPrev = null; // deadPrev[i]: el partido i de la ronda anterior no va a tener ganador nunca
+  for (let r = 0; r < next.length; r++) {
+    const feederDead = (i, slot) => (r === 0 ? false : deadPrev[2 * i + (slot === "pairA" ? 0 : 1)]);
+    const slotDead = (m, i, slot) => !m[slot] && (r === 0 ? !m[slot === "pairA" ? "placeholderA" : "placeholderB"] : feederDead(i, slot));
+    const dead = next[r].map((m, i) => slotDead(m, i, "pairA") && slotDead(m, i, "pairB"));
+    winners[r] = next[r].map((m, i) => {
+      if (m.pairA && m.pairB) return matchWinnerId(m);
+      const lone = m.pairA || m.pairB;
+      if (!lone) return null;
+      return slotDead(m, i, m.pairA ? "pairB" : "pairA") ? lone : null;
+    });
+    if (r < next.length - 1) {
+      next[r].forEach((m, i) => { next[r + 1][Math.floor(i / 2)][i % 2 === 0 ? "pairA" : "pairB"] = winners[r][i]; });
+    }
+    deadPrev = dead;
+  }
+  return { rounds: next, winners };
+}
+
 /* Un W.O. se computa como el partido ganado sin jugar por la pareja que se presentó: a sets, dos
    sets a cero (6-0 6-0 con sets de 6 games); en un set único (Americano), un set a cero con los
    games del torneo (7-0 o 9-0). Los sets quedan del lado de cada pareja (a = pairA). */

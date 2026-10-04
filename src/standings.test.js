@@ -3,7 +3,7 @@
    games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeStandings, DEFAULT_MATCH_FORMAT } from "./standings.js";
+import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
 const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
@@ -318,4 +318,53 @@ test("grupo de 4 con cruces: si se juega antes el de perdedores, las del de gana
   const o = order(computeStandings(g, {}, CLASICO));
   assert.deepEqual(o.slice(2), ["B", "D"], "3° y 4° ya definidos");
   assert.deepEqual([...o.slice(0, 2)].sort(), ["A", "C"], "A y C juegan por el 1° y el 2°");
+});
+
+/* ---------- Llave (walkBracket) ---------- */
+const bm = (pairA, pairB, ...sets) => ({ id: `${pairA}-${pairB}`, pairA, pairB, sets: sets.map(([a, b]) => ({ a, b })) });
+const empty = () => ({ id: Math.random().toString(36).slice(2), pairA: null, pairB: null, sets: [] });
+
+test("llave: el bye de la primera ronda pasa solo", () => {
+  const { rounds, winners } = walkBracket([[bm("A", null), bm("B", "C", [6, 1], [6, 1])], [empty()]]);
+  assert.deepEqual(winners[0], ["A", "B"]);
+  assert.deepEqual([rounds[1][0].pairA, rounds[1][0].pairB], ["A", "B"]);
+});
+
+test("llave: un lugar que espera un partido sin jugar no es un bye (no avanza solo hasta la final)", () => {
+  // Octavos: E le gana a F, el partido de al lado (G vs H) no se jugó. E no puede pasar cuartos ni semis solo.
+  const r1 = [bm("A", null), bm("B", null), bm("C", null), bm("D", null), bm("E", "F", [6, 4], [6, 4]), bm("G", "H"), bm("I", null), bm("J", null)];
+  const { rounds, winners } = walkBracket([r1, [empty(), empty(), empty(), empty()], [empty(), empty()], [empty()]]);
+  assert.deepEqual([rounds[1][2].pairA, rounds[1][2].pairB], ["E", null], "E llega a cuartos y espera rival");
+  assert.equal(winners[1][2], null, "E no gana cuartos sin jugar");
+  assert.deepEqual([rounds[2][1].pairA, rounds[2][1].pairB], [null, null], "nadie llega a esa semifinal todavía");
+  assert.deepEqual([rounds[3][0].pairA, rounds[3][0].pairB], [null, null], "la final sigue vacía");
+});
+
+test("llave: corrige parejas que habían avanzado de más en datos guardados", () => {
+  const r1 = [bm("A", "B"), bm("C", "D")];
+  const final = { ...empty(), pairA: "A" }; // guardado por error: A en la final sin jugar
+  const { rounds, winners } = walkBracket([r1, [final]]);
+  assert.equal(rounds[1][0].pairA, null);
+  assert.equal(winners[1][0], null);
+});
+
+test("llave: si del otro lado nunca va a llegar nadie (doble bye armado a mano), pasa sola", () => {
+  const { rounds, winners } = walkBracket([[bm("A", null), empty()], [empty()]]);
+  assert.deepEqual([rounds[1][0].pairA, rounds[1][0].pairB], ["A", null]);
+  assert.equal(winners[1][0], "A");
+});
+
+test("llave: un lugar con texto de clasificado (1° Grupo A) no es un bye", () => {
+  const m1 = { ...bm("A", null), placeholderB: "2° Grupo B" };
+  const { winners } = walkBracket([[m1, bm("C", "D")], [empty()]]);
+  assert.equal(winners[0][0], null);
+});
+
+test("llave: campeón recién cuando se juega la final", () => {
+  const r1 = [bm("A", "B", [6, 1], [6, 1]), bm("C", "D", [6, 1], [6, 1])];
+  let w = walkBracket([r1, [empty()]]);
+  assert.equal(w.winners[1][0], null);
+  const final = { ...empty(), sets: [{ a: 6, b: 2 }, { a: 6, b: 2 }] };
+  w = walkBracket([r1, [final]]);
+  assert.equal(w.winners[1][0], "A");
 });

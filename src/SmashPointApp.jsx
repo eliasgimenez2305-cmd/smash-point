@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings } from "./standings.js";
+import { DEFAULT_MATCH_FORMAT, setsWon, matchIsPlayed, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
 import { mergeTournament } from "./merge.js";
 
@@ -1008,17 +1008,11 @@ function swapBracketPairs(bracket, pairIdA, pairIdB) {
   return propagateBracket(rounds);
 }
 
+/* Completa cada ronda de la llave con los ganadores de la anterior. Solo avanza quien ganó de
+   verdad (o pasó por un bye real): un lugar que espera un partido sin jugar no cuenta como bye
+   (ver walkBracket) */
 function propagateBracket(rounds) {
-  const next = rounds.map((r) => r.map((m) => ({ ...m })));
-  for (let r = 0; r < next.length - 1; r++) {
-    for (let i = 0; i < next[r].length; i++) {
-      const w = winnerOf(next[r][i]);
-      const targetMatch = next[r + 1][Math.floor(i / 2)];
-      const slot = i % 2 === 0 ? "pairA" : "pairB";
-      targetMatch[slot] = w;
-    }
-  }
-  return next;
+  return walkBracket(rounds).rounds;
 }
 
 /* Parejas fuera del torneo en una categoría: las que eliminó el organizador y las que se
@@ -1615,30 +1609,31 @@ const CIRCUIT_TIER_ORDER = ["campeon", "finalista", "semifinalista", "cuartos", 
    Las que nunca entraron a la llave (o no hay llave todavía) quedan en "fase de grupos". */
 function categoryPlacements(category) {
   const results = []; // { pairId, tier }
-  const bracket = category.bracket;
-  if (bracket && bracket.length > 0) {
+  if (category.bracket && category.bracket.length > 0) {
+    // Recalculada desde la primera ronda: no se confía en parejas que hayan avanzado de más
+    const { rounds: bracket, winners } = walkBracket(category.bracket);
     const finalMatch = bracket[bracket.length - 1][0];
-    const champion = winnerOf(finalMatch);
+    const champion = winners[bracket.length - 1][0];
     [finalMatch.pairA, finalMatch.pairB].filter(Boolean).forEach((pid) => {
       results.push({ pairId: pid, tier: pid === champion ? "campeon" : "finalista" });
     });
     if (bracket.length >= 2) {
-      bracket[bracket.length - 2].forEach((m) => {
-        const w = winnerOf(m);
+      bracket[bracket.length - 2].forEach((m, i) => {
+        const w = winners[bracket.length - 2][i];
         [m.pairA, m.pairB].filter(Boolean).forEach((pid) => { if (pid !== w) results.push({ pairId: pid, tier: "semifinalista" }); });
       });
     }
     // Cuartos de Final es exactamente la ronda bracket.length-3
     if (bracket.length >= 3) {
-      bracket[bracket.length - 3].forEach((m) => {
-        const w = winnerOf(m);
+      bracket[bracket.length - 3].forEach((m, i) => {
+        const w = winners[bracket.length - 3][i];
         [m.pairA, m.pairB].filter(Boolean).forEach((pid) => { if (pid !== w) results.push({ pairId: pid, tier: "cuartos" }); });
       });
     }
     // Octavos y cualquier ronda anterior (16avos, etc.) se agrupan en "octavos" por no tener escalón propio
     for (let r = 0; r <= bracket.length - 4; r++) {
-      bracket[r].forEach((m) => {
-        const w = winnerOf(m);
+      bracket[r].forEach((m, i) => {
+        const w = winners[r][i];
         [m.pairA, m.pairB].filter(Boolean).forEach((pid) => { if (pid !== w) results.push({ pairId: pid, tier: "octavos" }); });
       });
     }
@@ -3183,14 +3178,14 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
           <span className="italic opacity-70">{m.placeholder}</span>
         ) : (
           <div className="leading-snug">
-            <div className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
+            <div className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
             <div className="text-[11px] opacity-50 flex items-center gap-2">
               <span>vs</span>
               {hasResult && (
                 <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></span>
               )}
             </div>
-            <div className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
+            <div className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
           </div>
         )}
       </div>
@@ -5113,11 +5108,11 @@ function CategoryGroupsPublicView({ category, format }) {
                       ) : (
                         <>
                           <div className="flex items-center gap-1 min-w-0">
-                            {w === m.pairA && <WinnerCheck />}
+                            {w && w === m.pairA && <WinnerCheck />}
                             <GroupPairName id={m.pairA} pairsById={pairsById} />
                           </div>
                           <div className="flex items-center gap-1 min-w-0">
-                            {w === m.pairB && <WinnerCheck />}
+                            {w && w === m.pairB && <WinnerCheck />}
                             <GroupPairName id={m.pairB} pairsById={pairsById} />
                           </div>
                           <div className="flex justify-between items-baseline gap-3 mt-0.5">
@@ -5141,13 +5136,15 @@ function CategoryGroupsPublicView({ category, format }) {
 
 function CategoryBracketPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
+  // Recalculada desde la primera ronda (corrige parejas que hayan avanzado de más en datos viejos)
+  const walked = useMemo(() => (category.bracket ? walkBracket(category.bracket) : null), [category.bracket]);
 
   return (
     <section className="mt-6">
       {!category.bracket && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se generó.</p>}
       {category.bracket && (
         <div className="flex gap-8 overflow-x-auto pb-4">
-          {category.bracket.map((round, ri) => {
+          {walked.rounds.map((round, ri) => {
             const isFinal = ri === category.bracket.length - 1;
             const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
             return (
@@ -5158,19 +5155,19 @@ function CategoryBracketPublicView({ category, format }) {
                 >
                   {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
                 </span>
-                {round.map((m) => {
-                  const w = winnerOf(m);
+                {round.map((m, mi) => {
+                  const w = walked.winners[ri][mi];
                   const { a: setsA, b: setsB } = setsWon({ sets: effectiveSets(m, format) }); // con RET, sets completados
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                       <ScheduleLabel schedule={m.schedule} />
                       <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m) ? setsA : ""}</span>
                       </div>
                       <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m) ? setsB : ""}</span>
                       </div>
                       {matchIsPlayed(m) && (
@@ -7606,11 +7603,11 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         <div className="min-w-0">
                           {stageLabel && <span className="text-[10px] text-teal-500 block mb-1">{stageLabel}</span>}
                           <div className="flex items-center gap-1 flex-wrap" style={F.body}>
-                            {w === m.pairA && <WinnerCheck />}
+                            {w && w === m.pairA && <WinnerCheck />}
                             <GroupPairName id={m.pairA} pairsById={pairsById} />
                           </div>
                           <div className="flex items-center gap-1 flex-wrap" style={F.body}>
-                            {w === m.pairB && <WinnerCheck />}
+                            {w && w === m.pairB && <WinnerCheck />}
                             <GroupPairName id={m.pairB} pairsById={pairsById} />
                           </div>
                           <div className="flex items-center gap-2 flex-wrap mt-0.5" style={F.body}>
@@ -7779,9 +7776,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               )}
             </div>
           )}
-          {category.bracket && (
+          {category.bracket && (() => { const walked = walkBracket(category.bracket); return (
             <div className="flex gap-8 overflow-x-auto pb-4">
-              {category.bracket.map((round, ri) => {
+              {walked.rounds.map((round, ri) => {
                 const isFinal = ri === category.bracket.length - 1;
                 const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
                 return (
@@ -7792,9 +7789,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                     >
                       {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
                     </span>
-                    {round.map((m) => {
+                    {round.map((m, mi) => {
                       const editable = m.pairA && m.pairB;
-                      const w = winnerOf(m);
+                      const w = walked.winners[ri][mi];
                       return (
                         <div key={m.id} className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                           <ScheduleLabel schedule={m.schedule} />
@@ -7805,11 +7802,11 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsA : ""}</span>}
                                 </div>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></span>
                                   {editable && <span>{matchIsPlayed(m) ? setsB : ""}</span>}
                                 </div>
                                 {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
@@ -7842,7 +7839,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               })}
               <button onClick={() => onUpdateCategory({ ...category, bracket: null })} className="text-xs text-red-400 self-start" style={F.body}>Reiniciar llave</button>
             </div>
-          )}
+          ); })()}
         </div>
       )}
     </div>
