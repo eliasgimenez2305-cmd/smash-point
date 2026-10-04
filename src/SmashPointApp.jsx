@@ -1342,9 +1342,18 @@ function autoScheduleBracket(tournament, category) {
   const rounds = category.bracket.map((round) => round.map((m) => ({ ...m })));
   const { byes } = walkBracket(rounds);
 
+  // La llave de una categoría no arranca antes de su día y hora de inicio ni antes de que termine
+  // su último partido de grupos (por ejemplo, si la 6ta juega los grupos el domingo, sus octavos
+  // no pueden quedar el sábado)
+  let categoryFloor = categoryStartPoint(category);
+  (category.groups || []).forEach((g) => g.matches.forEach((m) => {
+    if (m.schedule) categoryFloor = laterPoint(categoryFloor, scheduleEndPoint(m.schedule, duration));
+  }));
+
   rounds.forEach((round, ri) => {
-    // El piso de esta ronda es el final más tardío de CUALQUIER ronda anterior, de cualquier categoría
-    let floor = null;
+    // El piso de esta ronda: el de la categoría y el final más tardío de CUALQUIER ronda anterior,
+    // de cualquier categoría
+    let floor = categoryFloor;
     for (let t = 0; t < ri; t++) floor = laterPoint(floor, tierEnd[t]);
 
     round.forEach((match, mi) => {
