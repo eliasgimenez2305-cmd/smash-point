@@ -601,9 +601,11 @@ function moveGroupPair(groups, pairId, fromGroupId, toGroupId) {
   });
 }
 
-function buildGroupMatches(pairIds) {
+/* `keepOrder`: el armado automático ya eligió los cruces del grupo de 4 (los dos primeros contra
+   sí y los dos últimos contra sí, entre parejas con horario en común), así que no se sortean. */
+function buildGroupMatches(pairIds, keepOrder = false) {
   if (pairIds.length === 4) {
-    const shuffled = [...pairIds].sort(() => Math.random() - 0.5);
+    const shuffled = keepOrder ? [...pairIds] : [...pairIds].sort(() => Math.random() - 0.5);
     return {
       format: "bracket4",
       matches: [
@@ -1453,172 +1455,126 @@ function groupCombinedAvailability(tournament, categoryId, pairIds) {
 
 const GROUP_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-/* Arma grupos por sorteo, priorizando juntar en el mismo grupo a las parejas que comparten
-   fechas de disponibilidad (para que el grupo se pueda jugar en la menor cantidad de días posible).
-   `pairs` son objetos {id, availability}. */
-function autoFormGroups(pairs, playDates) {
+/* Arma grupos por sorteo cuidando que en cada grupo todas las parejas tengan algún horario en común
+   entre sí (al menos un turno del largo de un partido, no alcanza con compartir el día). Entre los
+   armados posibles prefiere el que deja más turnos en común, así después la grilla tiene de dónde
+   elegir. En los grupos de 4 también elige los cruces de la primera ronda entre parejas compatibles.
+   `pairs` son objetos {id, name, availability}. */
+function autoFormGroups(pairs, playDates, duration = DEFAULT_MATCH_DURATION) {
   const TARGET_SIZE = 3;
   const total = pairs.length;
-  // Cantidad de grupos fija segun el total de parejas: siempre se arman en base a grupos de 3.
-  // Lo que sobra al dividir por 3 (0, 1 o 2 parejas) se reparte como cuarto integrante en esa
-  // cantidad de grupos. Ej: 12 parejas -> 4 grupos de 3. 13 parejas -> 3 grupos de 3 + 1 de 4.
-  // 14 parejas -> 2 grupos de 3 + 2 de 4. Nunca se arman grupos de menos de 3.
-  const numGroups = Math.max(1, Math.floor(total / TARGET_SIZE));
-  const remainder = total - numGroups * TARGET_SIZE; // 0, 1 o 2
-  const groupSizes = Array.from({ length: numGroups }, (_, i) => TARGET_SIZE + (i < remainder ? 1 : 0));
+  if (total === 0) return { groups: [], warnings: [] };
+  // Cantidad de grupos fija según el total de parejas: siempre en base a grupos de 3. Lo que sobra
+  // al dividir por 3 (0, 1 o 2 parejas) va como cuarto integrante en esa cantidad de grupos.
+  // Ej: 12 parejas -> 4 grupos de 3. 13 -> 3 de 3 + 1 de 4. 14 -> 2 de 3 + 2 de 4. Con menos de 6
+  // parejas va un solo grupo con todas.
+  const groupSizes = total < 6
+    ? [total]
+    : Array.from({ length: Math.floor(total / TARGET_SIZE) }, (_, i) => TARGET_SIZE + (i < total % TARGET_SIZE ? 1 : 0));
 
-  const pairsById = Object.fromEntries(pairs.map((p) => [p.id, p]));
-  const allDates = (playDates || []).map((d) => d.date);
-
-  // Ventanas horarias por pareja y fecha, en minutos: { fecha: { from, to } }.
-  // Sin disponibilidad cargada = disponible todos los dias del torneo, en el horario general.
-  const windowsById = Object.fromEntries(pairs.map((p) => {
-    const avail = (p.availability && p.availability.length > 0)
-      ? p.availability
-      : (playDates || []).map((d) => ({ date: d.date, from: d.from, to: d.to }));
+  // Ventanas horarias por pareja y fecha, en minutos. Sin disponibilidad cargada = disponible todos
+  // los días del torneo, en el horario general.
+  const windowsOf = (p) => {
+    const avail = p.availability && p.availability.length > 0 ? p.availability : playDates || [];
     const map = {};
-    avail.forEach((a) => {
-      if (a && a.date && a.from && a.to) map[a.date] = { from: timeToMinutes(a.from), to: timeToMinutes(a.to) };
+    avail.forEach((a) => { if (a && a.date && a.from && a.to) map[a.date] = { from: timeToMinutes(a.from), to: timeToMinutes(a.to) }; });
+    return map;
+  };
+  const wins = pairs.map(windowsOf);
+  // Turnos de un partido en los que pueden jugar todas las parejas indicadas (índices)
+  const commonSlots = (idxs) => {
+    let n = 0;
+    Object.keys(wins[idxs[0]]).forEach((date) => {
+      const ws = idxs.map((i) => wins[i][date]);
+      if (ws.some((w) => !w)) return;
+      const span = Math.min(...ws.map((w) => w.to)) - Math.max(...ws.map((w) => w.from));
+      if (span >= duration) n += Math.floor(span / duration);
     });
-    return [p.id, map];
+    return n;
+  };
+  const slots = pairs.map((_, i) => pairs.map((__, j) => (i === j ? 0 : commonSlots([i, j]))));
+
+  // Puntaje de un grupo (menos es mejor): cada par de parejas sin turno en común pesa muchísimo; en
+  // un grupo de 4 también pesa que no haya un turno de las 4 juntas (los cruces de ganadores y de
+  // perdedores se programan antes de saber quién los juega). Después, más turnos en común = mejor.
+  const groupCost = (g) => {
+    let cost = 0;
+    for (let a = 0; a < g.length; a++) {
+      for (let b = a + 1; b < g.length; b++) {
+        const s = slots[g[a]][g[b]];
+        cost += s === 0 ? 1000 : -Math.min(s, 4);
+      }
+    }
+    if (g.length === 4 && commonSlots(g) === 0) cost += 300;
+    return cost;
+  };
+
+  const shuffle = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  };
+
+  // Un armado: sorteo, ubicando primero a las parejas con menos compatibles (las más difíciles) en
+  // el grupo donde menos daño hacen, y después intercambios de a dos parejas entre grupos mientras
+  // mejore el puntaje total.
+  const buildOnce = () => {
+    const groups = groupSizes.map(() => []);
+    const order = shuffle(pairs.map((_, i) => i))
+      .sort((a, b) => slots[a].filter((s) => s > 0).length - slots[b].filter((s) => s > 0).length);
+    order.forEach((i) => {
+      let best = null, bestDelta = Infinity;
+      shuffle(groups.map((_, gi) => gi)).forEach((gi) => {
+        if (groups[gi].length >= groupSizes[gi]) return;
+        const delta = groupCost([...groups[gi], i]) - groupCost(groups[gi]);
+        if (delta < bestDelta) { bestDelta = delta; best = gi; }
+      });
+      groups[best].push(i);
+    });
+    let improved = true, guard = 0;
+    while (improved && guard++ < 50) {
+      improved = false;
+      for (let g1 = 0; g1 < groups.length; g1++) {
+        for (let g2 = g1 + 1; g2 < groups.length; g2++) {
+          for (let x = 0; x < groups[g1].length; x++) {
+            for (let y = 0; y < groups[g2].length; y++) {
+              const before = groupCost(groups[g1]) + groupCost(groups[g2]);
+              const a = [...groups[g1]], b = [...groups[g2]];
+              [a[x], b[y]] = [b[y], a[x]];
+              if (groupCost(a) + groupCost(b) < before) { groups[g1] = a; groups[g2] = b; improved = true; }
+            }
+          }
+        }
+      }
+    }
+    return { groups, cost: groups.reduce((s, g) => s + groupCost(g), 0) };
+  };
+  // Varios sorteos y se queda con el mejor
+  let best = null;
+  for (let k = 0; k < 20; k++) {
+    const r = buildOnce();
+    if (!best || r.cost < best.cost) best = r;
+  }
+
+  // Grupo de 4: los cruces de la primera ronda (0 vs 1, 2 vs 3) entre parejas con turno en común
+  const orderForFirstRound = (g) => {
+    if (g.length !== 4) return g;
+    const [a, b, c, d] = g;
+    const options = shuffle([[a, b, c, d], [a, c, b, d], [a, d, b, c]]);
+    const bad = (o) => (slots[o[0]][o[1]] === 0 ? 1 : 0) + (slots[o[2]][o[3]] === 0 ? 1 : 0);
+    return options.sort((x, y) => bad(x) - bad(y))[0];
+  };
+
+  // Aviso: parejas que quedaron con alguien de su grupo sin ningún turno en común
+  const warnings = [];
+  best.groups.forEach((g) => g.forEach((i) => {
+    if (g.some((j) => j !== i && slots[i][j] === 0)) warnings.push(pairs[i].name || "Pareja");
   }));
 
-  // Interseccion de ventanas horarias: solo quedan las fechas donde ambas partes coinciden
-  // Y el rango horario realmente se superpone (no alcanza con compartir el dia).
-  const intersectWindows = (winsA, winsB) => {
-    const result = {};
-    Object.keys(winsA).forEach((date) => {
-      const b = winsB[date];
-      if (!b) return;
-      const a = winsA[date];
-      const from = Math.max(a.from, b.from);
-      const to = Math.min(a.to, b.to);
-      if (from < to) result[date] = { from, to };
-    });
-    return result;
-  };
-  const overlapCount = (winsA, winsB) => Object.keys(intersectWindows(winsA, winsB)).length;
-
-  const groups = []; // { pairIds: [], commonWindows: {fecha: {from,to}}, targetSize }
-  const remainingSizes = [...groupSizes]; // cupos de grupo que todavia hay que llenar, se van consumiendo
-
-  // Fase 1: buscamos, entre todas las fechas del torneo, la franja horaria donde mas parejas del
-  // pool coinciden realmente (no solo el dia, sino el rango horario superpuesto entre todas ellas).
-  // Usamos un barrido de eventos (sweep line). El tamano de cada grupo ya esta fijado de antemano
-  // (3, salvo el resto que va a 4); aca solo elegimos QUE parejas entran juntas, respetando ese tamano.
-  let pool = pairs.map((p) => p.id).sort(() => Math.random() - 0.5); // sorteo para desempatar
-  while (remainingSizes.length > 0 && pool.length >= TARGET_SIZE) {
-    const wantSize = remainingSizes[0];
-    let best = null; // { date, ids: [...], from, to }
-    allDates.forEach((date) => {
-      const candidates = pool.filter((id) => windowsById[id][date]);
-      if (candidates.length < TARGET_SIZE) return;
-      const events = [];
-      candidates.forEach((id) => {
-        const w = windowsById[id][date];
-        events.push({ t: w.from, type: 1, id });
-        events.push({ t: w.to, type: -1, id });
-      });
-      // Los cierres se procesan antes que las aperturas en el mismo minuto exacto, para no
-      // contar como "simultaneas" a dos ventanas que solo se tocan en un punto (superposicion nula).
-      events.sort((a, b) => a.t - b.t || a.type - b.type);
-      const active = new Set();
-      events.forEach((ev) => {
-        if (ev.type === 1) {
-          active.add(ev.id);
-          if (active.size >= TARGET_SIZE && (!best || active.size > best.ids.length)) {
-            best = { date, ids: [...active], from: ev.t };
-          }
-        } else {
-          active.delete(ev.id);
-        }
-      });
-    });
-    if (!best) break;
-    // Tomamos hasta el tamano de grupo pedido; si sobran parejas compatibles, quedan en el pool
-    // para el proximo grupo (sigue siendo mutuamente compatible, se podra usar despues).
-    const chunkIds = best.ids.slice(0, Math.min(best.ids.length, wantSize));
-    const finalIds = chunkIds;
-    let commonWindows = null;
-    finalIds.forEach((id) => {
-      commonWindows = commonWindows ? intersectWindows(commonWindows, windowsById[id]) : windowsById[id];
-    });
-    groups.push({ pairIds: finalIds, commonWindows: commonWindows || {}, targetSize: wantSize });
-    pool = pool.filter((id) => !finalIds.includes(id));
-    remainingSizes.shift();
-  }
-
-  // Fase 2: lo que sobro no alcanza para llenar un grupo con horario realmente compatible, o ya
-  // no quedan cupos de grupo "nuevo" por abrir. Se acomoda de a una pareja, completando primero
-  // los grupos ya armados que todavia no llegaron a su tamano objetivo, buscando siempre la mejor
-  // coincidencia posible con lo ya armado.
-  pool.sort((a, b) => {
-    const aEmpty = Object.keys(windowsById[a]).length === 0, bEmpty = Object.keys(windowsById[b]).length === 0;
-    if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
-    return Object.keys(windowsById[a]).length - Object.keys(windowsById[b]).length;
-  });
-  // Si quedaron cupos de grupo sin abrir (no se encontro franja compatible), los abrimos vacios
-  // para que sigan existiendo como destino valido en esta fase.
-  remainingSizes.forEach((size) => {
-    groups.push({ pairIds: [], commonWindows: {}, targetSize: size });
-  });
-  const leftover = [];
-  pool.forEach((id) => {
-    const wins = windowsById[id];
-    let best = null, bestOverlap = -1;
-    groups.forEach((g) => {
-      if (g.pairIds.length >= g.targetSize) return;
-      const overlap = g.pairIds.length === 0 ? 0 : overlapCount(g.commonWindows, wins);
-      if (!best || overlap > bestOverlap) { bestOverlap = overlap; best = g; }
-    });
-    if (best) {
-      best.pairIds.push(id);
-      best.commonWindows = best.pairIds.length === 1 ? wins : intersectWindows(best.commonWindows, wins);
-    } else {
-      leftover.push({ pairIds: [id], commonWindows: wins, targetSize: TARGET_SIZE });
-    }
-  });
-  groups.push(...leftover);
-
-  // Ningun grupo puede quedar con menos de 3 parejas (en padel se juega de a 3, con 4 solo para
-  // la que sobra). Cualquier grupo chico se desarma y sus parejas se reparten en los demas grupos,
-  // subiendo hasta un maximo de 4, priorizando siempre la mejor coincidencia horaria real.
-  const warnings = [];
-  let orphans = [];
-  for (let i = groups.length - 1; i >= 0; i--) {
-    if (groups[i].pairIds.length >= TARGET_SIZE) continue;
-    orphans.push(...groups[i].pairIds);
-    groups.splice(i, 1);
-  }
-  orphans.forEach((orphanId) => {
-    const orphanWins = windowsById[orphanId];
-    let best = null, bestOverlap = -1;
-    groups.forEach((g) => {
-      if (g.pairIds.length >= 4) return;
-      const overlap = overlapCount(g.commonWindows, orphanWins);
-      if (overlap > bestOverlap) { bestOverlap = overlap; best = g; }
-    });
-    if (best) {
-      if (bestOverlap === 0) warnings.push(pairsById[orphanId]?.name || "Pareja");
-      best.pairIds.push(orphanId);
-      best.commonWindows = intersectWindows(best.commonWindows, orphanWins);
-    } else {
-      groups.push({ pairIds: [orphanId], commonWindows: orphanWins, targetSize: TARGET_SIZE });
-    }
-  });
-  // Ultimo recurso: si quedaron grupos sueltos de menos de 3 (no habia donde meterlos), se
-  // combinan entre si para no dejar a nadie sin grupo.
-  for (let i = groups.length - 1; i >= 0; i--) {
-    if (groups[i].pairIds.length >= TARGET_SIZE || groups.length === 1) continue;
-    const small = groups.splice(i, 1)[0];
-    const target = groups.find((g) => g.pairIds.length < 4) || groups[0];
-    if (target) target.pairIds.push(...small.pairIds);
-    else groups.push(small);
-  }
-
-  const formed = groups.map((g, i) => {
-    const built = buildGroupMatches(g.pairIds);
-    return { id: uid(), name: `Grupo ${GROUP_LETTERS[i] || i + 1}`, pairIds: g.pairIds, format: built.format, matches: built.matches };
+  const formed = best.groups.map((g, gi) => {
+    const pairIds = orderForFirstRound(g).map((i) => pairs[i].id);
+    const built = buildGroupMatches(pairIds, true);
+    return { id: uid(), name: `Grupo ${GROUP_LETTERS[gi] || gi + 1}`, pairIds, format: built.format, matches: built.matches };
   });
   return { groups: formed, warnings };
 }
@@ -1749,12 +1705,39 @@ function autoSchedule(tournament) {
     (groupR1Schedules[key] = groupR1Schedules[key] || []).push(m.schedule);
   });
 
+  // Disponibilidad de los dos lados de un partido. En el cruce de ganadores/perdedores de un grupo
+  // de 4 todavía no se sabe quién juega, así que vale el horario en que coinciden las 4 parejas.
+  const sidesAvailability = (m) => {
+    if (!m.pairA || !m.pairB) {
+      const group = categoriesById[m.categoryId]?.groups.find((g) => g.id === m.location.groupId);
+      const combined = groupCombinedAvailability(tournament, m.categoryId, group?.pairIds || []);
+      return [combined, combined];
+    }
+    return [pairAvailability(tournament, m.categoryId, m.pairA), pairAvailability(tournament, m.categoryId, m.pairB)];
+  };
+  // Cuántos turnos (sin mirar canchas ni otros partidos) podría ocupar un partido
+  const slotOptions = (m) => {
+    const [availA, availB] = sidesAvailability(m);
+    let n = 0;
+    dates.forEach((date) => {
+      const aSlot = availA.find((a) => a.date === date), bSlot = availB.find((a) => a.date === date);
+      if (!aSlot || !bSlot) return;
+      const span = Math.min(timeToMinutes(aSlot.to), timeToMinutes(bSlot.to)) - Math.max(timeToMinutes(aSlot.from), timeToMinutes(bSlot.from));
+      if (span >= duration) n += Math.floor(span / duration);
+    });
+    return n;
+  };
+
+  // Primero los partidos con menos turnos posibles (parejas que pueden un solo día o pocas horas) y
+  // al final los más flexibles, que se acomodan en lo que queda: si no, los flexibles llenan el
+  // primer día y las parejas que solo pueden ese día se quedan sin lugar. Los cruces de un grupo de
+  // 4 van siempre después de su primera ronda (necesitan saber cuándo termina).
+  const rank = (x) => (x.groupFormat === "bracket4" && x.stage !== "r1" ? 1 : 0);
   const toSchedule = all
     .filter((m) => !m.schedule && m.location.type === "group")
-    .sort((a, b) => {
-      const rank = (x) => (x.groupFormat === "bracket4" && x.stage !== "r1" ? 1 : 0);
-      return rank(a) - rank(b);
-    });
+    .map((m) => ({ m, options: slotOptions(m) }))
+    .sort((a, b) => rank(a.m) - rank(b.m) || a.options - b.options)
+    .map((x) => x.m);
 
   // Solo se auto-programan partidos de grupos: las parejas únicamente informan disponibilidad
   // para esa fase. Los partidos de la llave final los agenda siempre el organizador a mano.
@@ -1767,17 +1750,7 @@ function autoSchedule(tournament) {
     }
 
     const isPlaceholder = !m.pairA || !m.pairB;
-    let availA, availB;
-    if (isPlaceholder) {
-      const cat = updated.categories.find((c) => c.id === m.categoryId);
-      const group = cat?.groups.find((g) => g.id === m.location.groupId);
-      const combined = groupCombinedAvailability(updated, m.categoryId, group?.pairIds || []);
-      availA = combined;
-      availB = combined;
-    } else {
-      availA = pairAvailability(updated, m.categoryId, m.pairA);
-      availB = pairAvailability(updated, m.categoryId, m.pairB);
-    }
+    const [availA, availB] = sidesAvailability(m);
     let placed = null;
     for (const date of dates) {
       if (floor && date < floor.date) continue;
@@ -7320,7 +7293,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   const runAutoGroups = () => {
-    const { groups, warnings } = autoFormGroups(category.pairs, playDates);
+    const { groups, warnings } = autoFormGroups(category.pairs, playDates, tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION);
     (onGroupsLocked || onUpdateCategory)({ ...category, groups: groups.map((g) => ({ ...g, qualifiersCount: 2 })), bracket: null });
     setGroupWarnings(warnings);
     setConfirmingAutoGroups(false);
@@ -7610,7 +7583,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           <div className="border border-lime-800 rounded-lg p-4 mb-6" style={{ backgroundColor: "rgba(163,230,53,0.05)" }}>
             <p className="text-sm font-semibold mb-1" style={F.body}>Armado automático (sorteo por disponibilidad)</p>
             <p className="text-xs text-teal-400 mb-3" style={F.body}>
-              Arma grupos de 3 parejas (como se juega en pádel), dejando un grupo de 4 solo con la o las que sobran, priorizando juntar a quienes comparten fechas disponibles. Reemplaza los grupos actuales.
+              Arma grupos de 3 parejas (como se juega en pádel), dejando un grupo de 4 solo con la o las que sobran, y junta a parejas que tengan horarios en común para jugar entre sí. Reemplaza los grupos actuales.
             </p>
             <div className="flex items-end gap-3 flex-wrap">
               {!confirmingAutoGroups ? (
@@ -7635,7 +7608,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             </div>
             {groupWarnings.length > 0 && (
               <p className="text-xs text-amber-400 mt-3" style={F.body}>
-                ⚠ No comparten ningún día disponible con el resto de su grupo, quedaron ubicadas igual porque no había otra opción: {groupWarnings.join(", ")}. Revisá su disponibilidad o ajustá el grupo a mano.
+                ⚠ No tienen ningún horario en común con alguna pareja de su grupo (no había otra forma de armarlos): {groupWarnings.join(", ")}. Esos partidos no se van a poder programar solos: revisá su disponibilidad con ellos o movelas de grupo a mano.
               </p>
             )}
           </div>
