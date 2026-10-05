@@ -1141,8 +1141,12 @@ function collectScheduleableMatches(tournament) {
         }
       });
     });
+    // Un bye (la pareja pasa directo) no se juega: no tiene horario y no va en la grilla ni en
+    // "Sin horario asignado"
+    const byes = c.bracket ? walkBracket(c.bracket).byes : [];
     (c.bracket || []).forEach((round, ri) => {
       round.forEach((m, mi) => {
+        if (isByeMatch(byes, ri, mi)) return;
         // En un esqueleto precargado, no solo la ronda 1 tiene placeholders de texto propios:
         // TODAS las rondas siguientes (semis, final...) también deben poder programarse de
         // antemano, aunque todavía no tengan ni pairA/pairB ni placeholderA/placeholderB propios
