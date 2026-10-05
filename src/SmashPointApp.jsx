@@ -508,6 +508,17 @@ function courtName(t, court, short = false) {
   return `${label}${court}`;
 }
 
+/* Sede de una cancha (su posición en la lista de sedes del torneo); sin sedes, todas son la misma */
+function courtVenueIndex(t, court) {
+  let offset = 0;
+  const venues = t?.venues || [];
+  for (let i = 0; i < venues.length; i++) {
+    if (court <= offset + venues[i].courts) return i;
+    offset += venues[i].courts;
+  }
+  return 0;
+}
+
 /* Lista de Complejos (la que carga el administrador), para elegir las sedes de un torneo y tomar
    su logo en la imagen del fixture sin pasarla de componente en componente */
 const ComplexesContext = React.createContext([]);
@@ -1697,13 +1708,34 @@ function autoSchedule(tournament) {
   const categoriesById = Object.fromEntries((tournament.categories || []).map((c) => [c.id, c]));
   const participants = (m) => [m.pairA, m.pairB].flatMap((side) => sideParticipantIds(categoriesById[m.categoryId], side));
 
+  // En el cruce de ganadores/perdedores de un grupo de 4 todavía no se sabe quién juega: para la
+  // sede cuenta cualquiera de las 4 parejas del grupo
+  const venueParticipants = (m) => {
+    if (m.pairA && m.pairB) return participants(m);
+    return categoriesById[m.categoryId]?.groups.find((g) => g.id === m.location.groupId)?.pairIds || [];
+  };
+
   const courtBusy = new Set();
   const pairBusy = new Set();
+  // Partidos de cada pareja por día, con su sede: `${fecha}|${pareja}` -> [{ t: minutos, venue }]
+  const pairDay = {};
+  const addPairDay = (date, time, court, ids) => ids.forEach((pid) => {
+    (pairDay[`${date}|${pid}`] = pairDay[`${date}|${pid}`] || []).push({ t: timeToMinutes(time), venue: courtVenueIndex(tournament, court) });
+  });
   all.filter((m) => m.schedule).forEach((m) => {
     const { date, time, court } = m.schedule;
     courtBusy.add(`${date}|${time}|${court}`);
     participants(m).forEach((pid) => pairBusy.add(`${date}|${time}|${pid}`));
+    addPairDay(date, time, court, venueParticipants(m));
   });
+  // Una pareja con dos partidos seguidos (sin un turno libre en el medio) los juega en la misma
+  // sede: si el primero se demora, no llega a otra.
+  const venueAllowed = (ids, date, t, venue) => ids.every((pid) => (pairDay[`${date}|${pid}`] || []).every((e) => {
+    const gap = e.t < t ? t - (e.t + duration) : e.t - (t + duration);
+    return gap < 0 || gap >= duration || e.venue === venue;
+  }));
+  // Entre las canchas posibles, mejor una sede donde esas parejas ya juegan ese día
+  const playsAtVenue = (ids, date, venue) => ids.some((pid) => (pairDay[`${date}|${pid}`] || []).some((e) => e.venue === venue));
 
   let updated = tournament;
 
@@ -1776,11 +1808,13 @@ function autoSchedule(tournament) {
         // Para el cruce de ganadores/perdedores todavía no sabemos qué pareja concreta juega,
         // así que solo evitamos pisar otra cancha (no hay pareja puntual que chequear todavía).
         if (!isPlaceholder && participants(m).some((pid) => pairBusy.has(`${date}|${time}|${pid}`))) continue;
-        let freeCourt = null;
+        const ids = venueParticipants(m);
+        const freeCourts = [];
         for (let c = 1; c <= courts; c++) {
-          if (!courtBusy.has(`${date}|${time}|${c}`)) { freeCourt = c; break; }
+          if (!courtBusy.has(`${date}|${time}|${c}`) && venueAllowed(ids, date, t, courtVenueIndex(tournament, c))) freeCourts.push(c);
         }
-        if (freeCourt == null) continue;
+        if (freeCourts.length === 0) continue;
+        const freeCourt = freeCourts.find((c) => playsAtVenue(ids, date, courtVenueIndex(tournament, c))) ?? freeCourts[0];
         placed = { date, time, court: freeCourt };
         break;
       }
@@ -1789,6 +1823,7 @@ function autoSchedule(tournament) {
     if (placed) {
       courtBusy.add(`${placed.date}|${placed.time}|${placed.court}`);
       if (!isPlaceholder) participants(m).forEach((pid) => pairBusy.add(`${placed.date}|${placed.time}|${pid}`));
+      addPairDay(placed.date, placed.time, placed.court, venueParticipants(m));
       if (m.stage === "r1") (groupR1Schedules[groupKey] = groupR1Schedules[groupKey] || []).push(placed);
       updated = withMatchSchedule(updated, m.categoryId, m.location, m.matchId, placed);
     }
