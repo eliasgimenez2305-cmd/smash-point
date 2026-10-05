@@ -1318,6 +1318,30 @@ function categoryStartLabel(category) {
   return `${formatDateShort(s.date)}${s.time ? ` · ${formatHour(s.time)}` : ""}`;
 }
 
+/* Para qué es cada día de juego de un Clásico: "grupos", "llaves" o "ambos". Los días de torneos
+   de antes no lo tienen y valen como "ambos" (como funcionaban). Al agregar días, el último queda
+   para llaves y los demás para grupos (useAuto: lo eligió la app, se recalcula al agregar o quitar
+   días hasta que el organizador lo cambie a mano). */
+const DAY_USES = [["grupos", "Grupos"], ["llaves", "Llaves"], ["ambos", "Ambos"]];
+const dayUse = (d) => d?.use || "ambos";
+const isGroupDay = (d) => dayUse(d) !== "llaves";
+const isBracketDay = (d) => dayUse(d) !== "grupos";
+/* Días en que se juegan los grupos (los únicos en que importa la disponibilidad de las parejas) */
+const groupPlayDates = (t) => (t?.playDates || []).filter(isGroupDay);
+function withAutoDayUses(dates) {
+  const last = dates.length - 1;
+  return dates.map((d, i) => (d.useAuto ? { ...d, use: dates.length === 1 ? "ambos" : i === last ? "llaves" : "grupos" } : d));
+}
+
+/* "La llave arranca" de una categoría: { date, time } en category.bracketStart. Si lo tiene, la
+   primera ronda de su llave puede jugarse ese día desde esa hora, aunque sea un día de grupos; desde
+   la segunda ronda, todas las llaves van a los días de llaves. Como "piso": { date, minutes }. */
+function bracketStartPoint(category) {
+  const s = category?.bracketStart;
+  if (!s?.date) return null;
+  return { date: s.date, minutes: s.time ? timeToMinutes(s.time) : 0 };
+}
+
 function laterPoint(a, b) {
   if (!a) return b;
   if (!b) return a;
@@ -1748,7 +1772,8 @@ function autoSchedule(tournament) {
   if (!tournamentUsesSchedule(tournament)) return tournament; // El Súper 8 no tiene grilla
   const courts = tournament.courtsCount || 4;
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
-  const dates = (tournament.playDates || []).map((d) => d.date);
+  // Los grupos se juegan solo en los días de grupos (o "ambos"), nunca en un día de llaves
+  const dates = groupPlayDates(tournament).map((d) => d.date);
   const all = collectScheduleableMatches(tournament);
 
   // Quiénes no pueden estar en dos canchas a la vez: las dos parejas, o los 4 jugadores en el
@@ -2024,7 +2049,8 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
 
   // Torneos clásicos: disponibilidad por cada día que cargó el organizador (nunca se asume qué días
   // son) y si pueden jugar el primer cruce de llave el mismo día que termina la zona
-  const playDates = tournamentType(tournament) === "clasico" ? tournament.playDates || [] : [];
+  // Solo los días de grupos: la disponibilidad no se usa para la llave
+  const playDates = tournamentType(tournament) === "clasico" ? groupPlayDates(tournament) : [];
   const askAvailability = playDates.length > 0;
   const [availability, setAvailability] = useState(() => Object.fromEntries(playDates.map((d) => [d.date, { on: true, from: d.from, to: d.to }])));
   const [sameDayBracket, setSameDayBracket] = useState(null); // null = sin responder
@@ -3031,13 +3057,21 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
 
   const addDate = () => {
     if (!newDate || dates.some((d) => d.date === newDate)) return;
-    const next = [...dates, { date: newDate, from: newFrom, to: newTo }].sort((a, b) => (a.date < b.date ? -1 : 1));
-    onChange({ ...tournament, playDates: next });
+    const added = { date: newDate, from: newFrom, to: newTo, ...(classic ? { useAuto: true } : {}) };
+    const next = [...dates, added].sort((a, b) => (a.date < b.date ? -1 : 1));
+    onChange({ ...tournament, playDates: classic ? withAutoDayUses(next) : next });
     setNewDate("");
   };
-  const removeDate = (date) => onChange({ ...tournament, playDates: dates.filter((d) => d.date !== date) });
+  const removeDate = (date) => {
+    const next = dates.filter((d) => d.date !== date);
+    onChange({ ...tournament, playDates: classic ? withAutoDayUses(next) : next });
+  };
   const updateDateRange = (date, side, value) => {
     onChange({ ...tournament, playDates: dates.map((d) => (d.date === date ? { ...d, [side]: value } : d)) });
+  };
+  // Elegido a mano: ya no lo recalcula la app
+  const setDayUse = (date, use) => {
+    onChange({ ...tournament, playDates: dates.map((d) => (d.date === date ? { ...d, use, useAuto: false } : d)) });
   };
 
   return (
@@ -3086,12 +3120,27 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
       </div>
       {classic && <VenuesField tournament={tournament} onChange={onChange} />}
       <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Día y horario en que se juega" : "Fechas y horario en que se juega cada una"}</label>
+      {classic && dates.length > 0 && (
+        <p className="text-[11px] text-teal-600 mb-2" style={F.body}>Grupos: ahí se arman los horarios de los grupos y la inscripción pide disponibilidad. Llaves: ahí se juega la llave. Ambos: las dos cosas.</p>
+      )}
       <div className="space-y-2 mb-4">
         {dates.map((d) => (
           <div key={d.date} className="border border-teal-800 rounded-lg px-3 py-3 text-sm" style={F.body}>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between gap-2 mb-2">
               <span className="text-teal-200 font-medium">{formatDateShort(d.date)}</span>
-              <button type="button" onClick={() => removeDate(d.date)} className="text-red-400 text-xs">Quitar ✕</button>
+              <span className="flex items-center gap-3">
+                {classic && (
+                  <select
+                    value={dayUse(d)}
+                    onChange={(e) => setDayUse(d.date, e.target.value)}
+                    aria-label={`Para qué es el ${formatDateShort(d.date)}`}
+                    className="px-2 py-1 rounded border text-xs" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                  >
+                    {DAY_USES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </select>
+                )}
+                <button type="button" onClick={() => removeDate(d.date)} className="text-red-400 text-xs">Quitar ✕</button>
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <input type="time" lang="es-AR" value={d.from} onChange={(e) => updateDateRange(d.date, "from", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
@@ -7404,7 +7453,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   const runAutoGroups = () => {
-    const { groups, warnings } = autoFormGroups(category.pairs, playDates, tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION);
+    const { groups, warnings } = autoFormGroups(category.pairs, groupPlayDates(tournament), tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION);
     (onGroupsLocked || onUpdateCategory)({ ...category, groups: groups.map((g) => ({ ...g, qualifiersCount: 2 })), bracket: null });
     setGroupWarnings(warnings);
     setConfirmingAutoGroups(false);
@@ -7659,7 +7708,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       {!super8Generated && <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>}
                     </div>
                   </div>
-                  {usesSchedule && <PairAvailabilityEditor pair={p} playDates={playDates || []} onChange={(availability) => updatePairAvailability(p.id, availability)} />}
+                  {usesSchedule && <PairAvailabilityEditor pair={p} playDates={groupPlayDates(tournament)} onChange={(availability) => updatePairAvailability(p.id, availability)} />}
                 </li>
               );
             })}
