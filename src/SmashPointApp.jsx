@@ -1475,6 +1475,110 @@ function autoScheduleBracket(tournament, category) {
   return { ...category, bracket: rounds };
 }
 
+/* Aviso de lugar para las llaves de un Clásico (texto, o null si entran): cuántos partidos de llave
+   van a hacer falta en los días de llaves contra los turnos libres que hay, y si alcanzan los
+   horarios para jugar las rondas una después de otra. Con llave armada se cuentan sus partidos (sin
+   byes); si todavía no, salen de los clasificados de los grupos (n clasificados = n - 1 partidos).
+   La primera ronda de una categoría con "La llave arranca" no ocupa los días de llaves. Si la llave
+   ya está armada y quedaron partidos sin horario, también lo dice. */
+function bracketCapacityNotice(tournament) {
+  if (tournamentType(tournament) !== "clasico") return null;
+  const dates = tournament.playDates || [];
+  if (dates.length === 0) return null;
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
+  const courts = tournament.courtsCount || 4;
+  let needed = 0, rounds = 0, unscheduled = 0;
+  (tournament.categories || []).forEach((c) => {
+    if (isSuper8(c)) return;
+    const startDay = dates.find((d) => d.date === c.bracketStart?.date);
+    const earlyFirstRound = !!startDay && !isBracketDay(startDay);
+    let total, firstRound, depth;
+    if (c.bracket) {
+      const { byes } = walkBracket(c.bracket);
+      const played = c.bracket.map((round, ri) => round.filter((m, mi) => !isByeMatch(byes, ri, mi)));
+      total = played.reduce((s, r) => s + r.length, 0);
+      firstRound = played[0]?.length || 0;
+      depth = c.bracket.length;
+      unscheduled += played.flat().filter((m) => !m.schedule).length;
+    } else {
+      const n = (c.groups || []).reduce((s, g) => s + groupQualifiersCount(g), 0);
+      if (n < 2) return;
+      depth = Math.ceil(Math.log2(n));
+      total = n - 1;
+      firstRound = n - 2 ** (depth - 1);
+    }
+    needed += total - (earlyFirstRound ? firstRound : 0);
+    rounds = Math.max(rounds, depth - (earlyFirstRound ? 1 : 0));
+  });
+  if (needed === 0) return null;
+
+  const bracketDays = dates.filter(isBracketDay);
+  const daysText = bracketDays.map((d) => formatDateShort(d.date)).join(" y ");
+  if (bracketDays.length === 0) return `No hay ningún día de llaves: marcá en qué día se juegan (Grupos / Llaves / Ambos, en las fechas del torneo).`;
+  // Turnos libres en los días de llaves: los ocupados por partidos de grupos (en un día "Ambos") no cuentan
+  const groupBusy = new Set();
+  (tournament.categories || []).forEach((c) => (c.groups || []).forEach((g) => g.matches.forEach((m) => {
+    if (m.schedule) groupBusy.add(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`);
+  })));
+  let capacity = 0, times = 0;
+  bracketDays.forEach((d) => dayTimeSlots(d, duration).forEach((time) => {
+    times++;
+    for (let c = 1; c <= courts; c++) if (!groupBusy.has(`${d.date}|${time}|${c}`)) capacity++;
+  }));
+
+  const problems = [];
+  if (needed > capacity) problems.push(`las llaves necesitan unos ${needed} partidos y en ${daysText} entran ${capacity}`);
+  if (rounds > times) problems.push(`hay llaves de ${rounds} rondas y ${daysText} tiene${bracketDays.length > 1 ? "n" : ""} ${times} horarios`);
+  if (problems.length === 0 && unscheduled === 0) return null;
+  const head = problems.length > 0 ? `${problems.join("; ")}.` : `${unscheduled === 1 ? "1 partido" : `${unscheduled} partidos`} de la llave quedaron sin horario.`;
+  return `${head.charAt(0).toUpperCase()}${head.slice(1)} Adelantá la primera ronda de alguna categoría con "La llave arranca" (en las fechas del torneo), o sumá horas o canchas a los días de llaves.`;
+}
+
+/* Parejas que en la inscripción dijeron que NO pueden jugar el primer cruce de llave el mismo día
+   que terminan la zona, y cuyo partido de la ronda 1 quedó justo ese día. Mientras no se sabe quién
+   clasifica, cuenta las del grupo que puede llegar a cada lugar ("1° Grupo A"). Devuelve un texto por
+   categoría. */
+function sameDayBracketNotices(tournament) {
+  const out = [];
+  (tournament.categories || []).forEach((c) => {
+    if (!c.bracket || isSuper8(c)) return;
+    const pairsById = Object.fromEntries(c.pairs.map((p) => [p.id, p]));
+    const groupsByName = Object.fromEntries((c.groups || []).map((g) => [g.name, g]));
+    // Último día con partidos de grupos de cada pareja
+    const lastDay = {};
+    (c.groups || []).forEach((g) => g.matches.forEach((m) => {
+      if (!m.schedule) return;
+      (m.pairA && m.pairB ? [m.pairA, m.pairB] : g.pairIds).forEach((pid) => {
+        if (!lastDay[pid] || m.schedule.date > lastDay[pid]) lastDay[pid] = m.schedule.date;
+      });
+    }));
+    const { byes } = walkBracket(c.bracket);
+    const named = new Set(), possible = new Set();
+    // Hasta 5 nombres y "y N más"
+    const list = (ids) => {
+      const names = [...ids].map((id) => pairsById[id].name);
+      return names.length > 5 ? `${names.slice(0, 5).join(", ")} y ${names.length - 5} más` : names.join(", ");
+    };
+    let day = null;
+    c.bracket[0].forEach((m, mi) => {
+      if (!m.schedule || isByeMatch(byes, 0, mi)) return;
+      ["A", "B"].forEach((side) => {
+        const pid = m[`pair${side}`];
+        const said = (id) => pairsById[id]?.sameDayBracket === false && lastDay[id] === m.schedule.date;
+        if (pid) { if (said(pid)) { named.add(pid); day = m.schedule.date; } return; }
+        const group = groupsByName[(m[`placeholder${side}`] || "").split("° ")[1]];
+        (group?.pairIds || []).filter(said).forEach((id) => { possible.add(id); day = m.schedule.date; });
+      });
+    });
+    if (named.size > 0) {
+      out.push(`${c.name}: ${list(named)} contestaron que no pueden jugar la llave el mismo día que terminan los grupos, y su partido de la llave quedó ese día (${formatDateShort(day)}).`);
+    } else if (possible.size > 0) {
+      out.push(`${c.name}: la primera ronda de la llave quedó el ${formatDateShort(day)}, el mismo día que terminan sus grupos, y ${possible.size === 1 ? "1 pareja que puede llegar ahí contestó" : `${possible.size} parejas que pueden llegar ahí contestaron`} que no puede${possible.size === 1 ? "" : "n"} jugarla ese día: ${list(possible)}.`);
+    }
+  });
+  return out;
+}
+
 /* Horarios de arranque de la grilla para un día de juego, según la duración de cada partido */
 function dayTimeSlots(dateInfo, duration) {
   const times = [];
@@ -3934,6 +4038,8 @@ function ScheduleAdminView({ tournament, update }) {
   // Partidos de grupos puestos (a mano) en un horario en que alguna de las parejas no puede
   const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
   const offAvailabilityCount = Object.keys(offAvailability).length;
+  const capacityNotice = bracketCapacityNotice(tournament);
+  const sameDayNotices = sameDayBracketNotices(tournament);
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
 
@@ -4017,6 +4123,18 @@ function ScheduleAdminView({ tournament, update }) {
           {offGrid.length > 0 && (
             <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
               {offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.
+            </div>
+          )}
+
+          {capacityNotice && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
+              ⚠ {capacityNotice}
+            </div>
+          )}
+
+          {sameDayNotices.length > 0 && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border space-y-1" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
+              {sameDayNotices.map((text) => <p key={text}>⚠ {text}</p>)}
             </div>
           )}
 
