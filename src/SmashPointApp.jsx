@@ -1434,6 +1434,17 @@ function pairAvailability(tournament, categoryId, pairId) {
   return (tournament.playDates || []).map((d) => ({ date: d.date, from: d.from, to: d.to }));
 }
 
+/* Parejas de un partido de grupo que no pueden jugar en el horario que tiene asignado (según la
+   disponibilidad que eligieron). El armado automático nunca las pone así, pero el organizador sí
+   puede moverlo a mano (por ejemplo, porque lo habló con ellas): la grilla lo marca con un aviso. */
+function pairsOutsideAvailability(tournament, m) {
+  if (!m.schedule || m.location?.type !== "group" || !m.pairA || !m.pairB) return [];
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
+  const start = timeToMinutes(m.schedule.time);
+  return [m.pairA, m.pairB].filter((pid) => !pairAvailability(tournament, m.categoryId, pid).some((a) =>
+    a.date === m.schedule.date && start >= timeToMinutes(a.from) && start + duration <= timeToMinutes(a.to)));
+}
+
 /* Disponibilidad combinada (intersección) de varias parejas de un mismo grupo: sirve para reservar
    de antemano el horario del cruce de ganadores/perdedores de un grupo de 4, antes de saber qué
    pareja concreta lo va a jugar. Solo devuelve fechas en las que TODAS coinciden. */
@@ -3264,7 +3275,7 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
 
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
-function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, onResult, onMove }) {
+function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove }) {
   const status = m.placeholder ? "pendiente" : matchDisplayStatus(m, format);
   const finished = status === "finalizado";
   const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
@@ -3295,6 +3306,11 @@ function GridMatchCard({ m, format, pairsById, conflict, onDragStart, onClear, o
         <>
           <p className="truncate"><PairName id={m.pairA} pairsById={pairsById} /></p>
           <p className="truncate opacity-60">vs <PairName id={m.pairB} pairsById={pairsById} /></p>
+          {offAvailability.length > 0 && (
+            <p className="text-[10px] font-semibold" style={{ color: "#fbbf24" }} title="Este horario está fuera de la disponibilidad que eligió la pareja al inscribirse">
+              ⚠ Fuera de la disponibilidad de {offAvailability.map((pid) => pairsById[pid]?.name || "una pareja").join(" y ")}
+            </p>
+          )}
           {onResult && (
             <button type="button" onClick={onResult} className="mt-0.5 text-[10px] underline text-teal-300 hover:text-lime-400">
               {finished ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={matchWinnerId(m, format) === m.pairA} /> ✎</span> : "+ Resultado"}
@@ -3602,6 +3618,9 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
         )}
         {matchIsPlayed(m, tournament.matchFormat) && <span className="block font-mono text-teal-300 truncate"><MatchResultLabel match={m} format={tournament.matchFormat} winnerIsA={w == null ? null : w === m.pairA} /></span>}
         {status === "en_curso" && <span className="block font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+        {pairsOutsideAvailability(tournament, m).length > 0 && (
+          <span className="block font-bold truncate" style={{ color: "#fbbf24" }} title={`Fuera de la disponibilidad de ${pairsOutsideAvailability(tournament, m).map(shortName).join(" y ")}`}>⚠ Fuera de disponibilidad</span>
+        )}
       </button>
     );
   };
@@ -3754,6 +3773,9 @@ function ScheduleAdminView({ tournament, update }) {
     });
   });
   const offGrid = scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
+  // Partidos de grupos puestos (a mano) en un horario en que alguna de las parejas no puede
+  const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
+  const offAvailabilityCount = Object.keys(offAvailability).length;
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
 
@@ -3840,6 +3862,12 @@ function ScheduleAdminView({ tournament, update }) {
             </div>
           )}
 
+          {offAvailabilityCount > 0 && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
+              ⚠ {offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (están marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.
+            </div>
+          )}
+
           {draftCategories.length > 0 && (
             <div className="mb-4 flex flex-col gap-2">
               {draftCategories.map((c) => (
@@ -3861,7 +3889,7 @@ function ScheduleAdminView({ tournament, update }) {
           )}
 
           <div className="flex flex-wrap gap-3 mb-4 text-[11px]" style={F.body}>
-            {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false]].map(([color, label, dashed]) => (
+            {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
               <span key={label} className="flex items-center gap-1.5">
                 <span className="w-3 h-3 rounded-sm inline-block" style={{ border: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, backgroundColor: color + "22" }} />
                 {label}
@@ -3926,7 +3954,7 @@ function ScheduleAdminView({ tournament, update }) {
                                     </select>
                                   ) : (
                                     cellMatches.map((m) => (
-                                      <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
+                                      <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
                                     ))
                                   )}
                                 </td>
@@ -3949,7 +3977,7 @@ function ScheduleAdminView({ tournament, update }) {
                             <div key={m.key} className="flex gap-2 items-start">
                               <span className="text-xs font-bold w-11 shrink-0 pt-1.5" style={{ ...F.body, color: dateColor }}>{m.schedule.time}</span>
                               <div className="flex-1 min-w-0">
-                                <GridMatchCard m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
+                                <GridMatchCard m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} offAvailability={offAvailability[m.key]} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
                               </div>
                             </div>
                           ))}
