@@ -192,10 +192,10 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
   // Tabla
   const x0 = 36, tableW = W - x0 * 2;
   const cols = [
-    { title: "CANCHA", w: 130 },
-    { title: "CATEGORÍA", w: 270 },
-    { title: "PARTIDO", w: tableW - 130 - 270 - 170 },
-    { title: "HORA", w: 170 },
+    { title: "CANCHA", w: 104 },
+    { title: "CATEGORÍA", w: 250 },
+    { title: "PARTIDO", w: tableW - 104 - 250 - 146 },
+    { title: "HORA", w: 146 },
   ];
   const top = 360, headH = 64;
   const footerH = 120;
@@ -218,8 +218,7 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
   ctx.fillStyle = "#0a0e12";
   ctx.textAlign = "center";
   cols.forEach((c) => {
-    ctx.font = `23px ${DISPLAY}`;
-    ctx.fillText(c.title, cx + c.w / 2, headY + 43);
+    fitText(ctx, c.title, cx + c.w / 2, headY + 43, c.w - 14, 23, 16, DISPLAY);
     cx += c.w;
   });
 
@@ -246,17 +245,28 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
     x += cols[1].w;
 
     // Pareja VS pareja
-    const pw = cols[2].w - 24, pc = x + cols[2].w / 2;
-    // Tres líneas centradas en la fila: pareja, VS y pareja (líneas de base calculadas con el
-    // tamaño de letra, así no se pisan ni tocan el borde de la fila)
-    const nameSize = fs(20), vsSize = fs(15), gap = nameSize * 0.25;
+    // En un solo renglón: la pareja A termina justo antes del VS y la B empieza justo después, así
+    // los VS quedan alineados en toda la tabla. Las dos parejas van con el mismo tamaño de letra
+    // (el más grande con el que entran las dos, sin bajar de un mínimo legible: un nombre que ni así
+    // entra se corta con "…" en vez de achicar también a la otra pareja)
+    const pc = x + cols[2].w / 2, vsSize = fs(16), vsGap = vsSize * 1.25;
+    const half = cols[2].w / 2 - vsGap - 12;
+    let nameSize = fs(22);
+    const fits = () => {
+      ctx.font = `600 ${nameSize}px ${BODY}`;
+      return ctx.measureText(r.pairA).width <= half && ctx.measureText(r.pairB).width <= half;
+    };
+    while (nameSize > fs(17) && !fits()) nameSize -= 1;
+    const base = mid + nameSize * 0.36;
     ctx.fillStyle = C.ink;
-    fitText(ctx, r.pairA, pc, mid - vsSize / 2 - gap, pw, nameSize, 14, BODY, "600");
+    ctx.textAlign = "right";
+    fitText(ctx, r.pairA, pc - vsGap, base, half, nameSize, nameSize, BODY, "600");
+    ctx.textAlign = "left";
+    fitText(ctx, r.pairB, pc + vsGap, base, half, nameSize, nameSize, BODY, "600");
+    ctx.textAlign = "center";
     ctx.fillStyle = C.lime;
     ctx.font = `${vsSize}px ${DISPLAY}`;
     ctx.fillText("VS", pc, mid + vsSize * 0.36);
-    ctx.fillStyle = C.ink;
-    fitText(ctx, r.pairB, pc, mid + vsSize / 2 + gap + nameSize * 0.72, pw, nameSize, 14, BODY, "600");
     x += cols[2].w;
 
     // Hora
