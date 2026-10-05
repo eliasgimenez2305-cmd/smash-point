@@ -1362,10 +1362,16 @@ function autoScheduleBracket(tournament, category) {
 
   // Cada fecha del torneo ya trae su propio rango horario
   const slots = [];
-  dates.forEach(({ date, from, to }) => {
-    const start = timeToMinutes(from), end = timeToMinutes(to);
-    for (let t = start; t + duration <= end; t += duration) slots.push({ date, minutes: t });
+  dates.forEach((d) => {
+    const start = timeToMinutes(d.from), end = timeToMinutes(d.to);
+    for (let t = start; t + duration <= end; t += duration) slots.push({ date: d.date, minutes: t, bracketDay: isBracketDay(d) });
   });
+  // La llave va en los días de llaves. Con "La llave arranca", la primera ronda de esta categoría
+  // también puede ir ese día (desde esa hora) aunque sea de grupos.
+  // (si después ese día pasó a ser de llaves o se quitó, ya no cuenta)
+  const ownStartDay = dates.find((d) => d.date === category.bracketStart?.date);
+  const ownStart = ownStartDay && !isBracketDay(ownStartDay) ? bracketStartPoint(category) : null;
+  const slotAllowed = (slot, ri) => slot.bracketDay || (ri === 0 && ownStart && slot.date === ownStart.date && slot.minutes >= ownStart.minutes);
 
   const courtBusy = new Set();
   collectAllSchedules(tournament).forEach((s) => courtBusy.add(`${s.date}|${s.time}|${s.court}`));
@@ -1436,6 +1442,7 @@ function autoScheduleBracket(tournament, category) {
     // de cualquier categoría
     let floor = categoryFloor;
     for (let t = 0; t < ri; t++) floor = laterPoint(floor, tierEnd[t]);
+    if (ri === 0) floor = laterPoint(floor, ownStart);
 
     round.forEach((match, mi) => {
       // Un bye no se juega: no ocupa horario ni cancha (ni empuja más tarde la ronda siguiente)
@@ -1445,6 +1452,7 @@ function autoScheduleBracket(tournament, category) {
       const startIdx = floor ? slots.findIndex((s) => s.date > floor.date || (s.date === floor.date && s.minutes >= floor.minutes)) : 0;
       for (let i = Math.max(startIdx, 0); i < slots.length; i++) {
         const slot = slots[i];
+        if (!slotAllowed(slot, ri)) continue;
         const timeStr = minutesToTime(slot.minutes);
         const freeCourts = [];
         for (let c = 1; c <= courts; c++) {
@@ -3241,29 +3249,47 @@ function VenuesField({ tournament, onChange }) {
 function CategoryStartsEditor({ tournament, onChange }) {
   const dates = tournament.playDates || [];
   const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
-  const setStart = (categoryId, patch) => {
+  // field: "start" (inicio de la categoría) o "bracketStart" (La llave arranca)
+  const setStart = (categoryId, patch, field = "start") => {
     onChange({
       ...tournament,
       categories: tournament.categories.map((c) => {
         if (c.id !== categoryId) return c;
-        const start = { ...(c.start || {}), ...patch };
-        return { ...c, start: start.date ? start : null };
+        const start = { ...(c[field] || {}), ...patch };
+        return { ...c, [field]: start.date ? start : null };
       }),
     });
   };
+  // "La llave arranca" solo tiene sentido si hay días que no son de llaves (si no, ya va con las demás)
+  const showBracketStart = dates.some((d) => !isBracketDay(d));
   return (
     <div className="border-t border-teal-800 pt-3 mt-4">
       <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría (opcional)</label>
-      <p className="text-[11px] text-teal-600 mb-2" style={F.body}>Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.</p>
-      <div className="space-y-2">
+      <p className="text-[11px] text-teal-600 mb-2" style={F.body}>
+        Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.
+        {showBracketStart && " \"La llave arranca\": la primera ronda de esa llave se puede jugar ese día desde esa hora, aunque sea un día de grupos; desde la segunda ronda, todas las llaves van a los días de llaves."}
+      </p>
+      <div className="space-y-3">
         {tournament.categories.map((c) => (
-          <div key={c.id} className="flex items-center gap-2 flex-wrap text-sm" style={F.body}>
+          <div key={c.id} className="flex items-center gap-x-4 gap-y-2 flex-wrap text-sm" style={F.body}>
             <span className="flex-1 min-w-[7rem] text-teal-200">{c.name}</span>
-            <select value={c.start?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm" style={input}>
-              <option value="">Sin día fijo</option>
-              {dates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
-            </select>
-            <input type="time" lang="es-AR" value={c.start?.time || ""} disabled={!c.start?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+            <span className="flex items-center gap-2">
+              <select value={c.start?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null })} aria-label={`Inicio de ${c.name}`} className="px-2 py-1.5 rounded border text-sm" style={input}>
+                <option value="">Sin día fijo</option>
+                {dates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+              </select>
+              <input type="time" lang="es-AR" value={c.start?.time || ""} disabled={!c.start?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+            </span>
+            {showBracketStart && (
+              <span className="flex items-center gap-2">
+                <span className="text-xs text-teal-400">La llave arranca</span>
+                <select value={c.bracketStart?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null }, "bracketStart")} aria-label={`La llave de ${c.name} arranca`} className="px-2 py-1.5 rounded border text-sm" style={input}>
+                  <option value="">Con las demás</option>
+                  {dates.filter((d) => !isBracketDay(d)).map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+                </select>
+                <input type="time" lang="es-AR" value={c.bracketStart?.time || ""} disabled={!c.bracketStart?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null }, "bracketStart")} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+              </span>
+            )}
           </div>
         ))}
       </div>
