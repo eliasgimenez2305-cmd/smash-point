@@ -1363,6 +1363,50 @@ function autoScheduleBracket(tournament, category) {
     if (m.schedule) categoryFloor = laterPoint(categoryFloor, scheduleEndPoint(m.schedule, duration));
   }));
 
+  // Sedes: una pareja que juega dos partidos corridos (sin un turno libre en el medio) los juega en
+  // la misma sede, porque si el primero se demora no llega a otra. En la llave todavía no se sabe
+  // quién gana, así que se mira el camino: el partido que alimenta a otro (y el siguiente, si ya
+  // tenía horario). En la ronda 1, los partidos de grupos de quienes pueden llegar a ese lugar.
+  const at = (s) => ({ date: s.date, t: timeToMinutes(s.time), venue: courtVenueIndex(tournament, s.court) });
+  const groupsByName = Object.fromEntries((category.groups || []).map((g) => [g.name, g]));
+  const groupMatchesOf = {}; // pareja -> horarios de sus partidos de grupos
+  (category.groups || []).forEach((g) => g.matches.forEach((m) => {
+    if (!m.schedule) return;
+    // En los cruces de un grupo de 4 sin definir puede jugar cualquiera del grupo
+    const ids = m.pairA && m.pairB ? [m.pairA, m.pairB] : g.pairIds;
+    ids.forEach((pid) => (groupMatchesOf[pid] = groupMatchesOf[pid] || []).push(at(m.schedule)));
+  }));
+  // Quiénes pueden llegar a un partido de ronda 1: la pareja ya definida, o cualquiera del grupo
+  // del lugar ("1° Grupo A")
+  const round1Entrants = (m) => ["A", "B"].flatMap((side) => {
+    if (m[`pair${side}`]) return [m[`pair${side}`]];
+    const groupName = (m[`placeholder${side}`] || "").split("° ")[1];
+    return groupsByName[groupName]?.pairIds || [];
+  });
+  // Horarios vecinos de un partido de la llave en su camino
+  const neighbors = (ri, mi) => {
+    const list = [];
+    const entrantsOf = (m) => round1Entrants(m).flatMap((pid) => groupMatchesOf[pid] || []);
+    if (ri === 0) list.push(...entrantsOf(rounds[0][mi]));
+    else {
+      [2 * mi, 2 * mi + 1].forEach((fi) => {
+        const feeder = rounds[ri - 1][fi];
+        if (!feeder) return;
+        if (feeder.schedule && !isByeMatch(byes, ri - 1, fi)) list.push(at(feeder.schedule));
+        // Pasó directo (bye) en la ronda 1: llega desde sus partidos de grupos
+        else if (ri === 1) list.push(...entrantsOf(feeder));
+      });
+    }
+    const next = rounds[ri + 1]?.[Math.floor(mi / 2)];
+    if (next?.schedule) list.push(at(next.schedule));
+    return list;
+  };
+  const corrido = (e, date, t) => {
+    if (e.date !== date) return false;
+    const gap = e.t < t ? t - (e.t + duration) : e.t - (t + duration);
+    return gap >= 0 && gap < duration;
+  };
+
   rounds.forEach((round, ri) => {
     // El piso de esta ronda: el de la categoría y el final más tardío de CUALQUIER ronda anterior,
     // de cualquier categoría
@@ -1373,14 +1417,18 @@ function autoScheduleBracket(tournament, category) {
       // Un bye no se juega: no ocupa horario ni cancha (ni empuja más tarde la ronda siguiente)
       if (isByeMatch(byes, ri, mi)) { match.schedule = null; return; }
       if (match.schedule) return; // ya tenía horario asignado a mano; no lo tocamos
+      const near = neighbors(ri, mi);
       const startIdx = floor ? slots.findIndex((s) => s.date > floor.date || (s.date === floor.date && s.minutes >= floor.minutes)) : 0;
       for (let i = Math.max(startIdx, 0); i < slots.length; i++) {
         const slot = slots[i];
         const timeStr = minutesToTime(slot.minutes);
-        let freeCourt = null;
+        const freeCourts = [];
         for (let c = 1; c <= courts; c++) {
-          if (!courtBusy.has(`${slot.date}|${timeStr}|${c}`)) { freeCourt = c; break; }
+          const venue = courtVenueIndex(tournament, c);
+          if (!courtBusy.has(`${slot.date}|${timeStr}|${c}`) && near.every((e) => !corrido(e, slot.date, slot.minutes) || e.venue === venue)) freeCourts.push(c);
         }
+        // Entre las posibles, mejor la sede donde se jugó el camino ese día
+        const freeCourt = freeCourts.find((c) => near.some((e) => e.date === slot.date && e.venue === courtVenueIndex(tournament, c))) ?? freeCourts[0] ?? null;
         if (freeCourt != null) {
           match.schedule = { date: slot.date, time: timeStr, court: freeCourt };
           courtBusy.add(`${slot.date}|${timeStr}|${freeCourt}`);
