@@ -5,7 +5,7 @@
 
 export const FIXTURE_WIDTH = 1080;
 export const FIXTURE_HEIGHT = 1920;
-export const ROWS_PER_PAGE = 20;
+export const ROWS_PER_PAGE = 24;
 
 const WEEKDAYS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 
@@ -201,10 +201,11 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
   const footerH = 120;
   const avail = H - (top + headH) - footerH - 20;
   const n = Math.max(page.rows.length, 1);
-  // Con pocos partidos las filas y las letras crecen (hasta el doble) para llenar la historia; si
-  // igual sobra lugar, la tabla queda centrada entre el encabezado y el pie
+  // Con pocos partidos las filas y las letras crecen (hasta el doble) para llenar la historia; con
+  // la página llena (24) se achican un poco para que las tres líneas del partido no se pisen. Si
+  // sobra lugar, la tabla queda centrada entre el encabezado y el pie
   const rowH = Math.min(140, Math.floor(avail / n));
-  const k = Math.min(2, Math.max(1, rowH / 68));
+  const k = Math.min(2, Math.max(0.8, rowH / 68));
   const fs = (size) => Math.round(size * k);
   const headY = top + Math.max(0, Math.floor((avail - rowH * n) / 2));
 
