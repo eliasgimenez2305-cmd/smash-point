@@ -4,6 +4,7 @@ import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
+import { fapRound1 } from "./bracketFap.js";
 import { mergeTournament } from "./merge.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -855,89 +856,36 @@ function withSetScore(sets, setIndex, side, value) {
 
 
 /* Cuántas parejas pasan de un grupo a la llave final: lo elige el organizador en cada grupo por
-   separado (g.qualifiersCount, por defecto 2), nunca más que las parejas que tiene el grupo. */
+   separado (g.qualifiersCount), nunca más que las parejas que tiene el grupo. Por defecto, como en
+   los cuadros FAP: de un grupo de 3 pasan 2 y de uno de 4, 3. */
+const defaultQualifiersCount = (pairCount) => (pairCount >= 4 ? 3 : 2);
 function groupQualifiersCount(group) {
-  return Math.min(group.qualifiersCount || 2, group.pairIds.length);
+  return Math.min(group.qualifiersCount || defaultQualifiersCount(group.pairIds.length), group.pairIds.length);
 }
 
-/* Arma la primera ronda de la llave final a partir de los clasificados de todos los grupos, sea
-   cual sea la cantidad que pase de cada uno (el Grupo A puede clasificar 2, el B 3 y el C 1).
-   Recibe una entrada por clasificado { groupIndex, place, ... } y una función que ordena a los
-   del mismo puesto entre sí (mejor primero). Devuelve la lista de partidos de ronda 1 como pares
-   [entrada, entrada | null] (null = pasa directo, bye), ya en el orden de la llave.
-
-   - Orden general: primero todos los 1°, después todos los 2°, los 3°, etc.; dentro de cada puesto
-     decide la función de orden (el mérito en la tabla, o el orden de los grupos si todavía no se
-     jugó nada).
-   - Si la cantidad no es potencia de dos, los mejor ubicados pasan directo a la ronda siguiente
-     (bye), como es habitual en pádel.
-   - El resto se cruza el mejor con el peor que quede, siempre de un grupo distinto cuando se puede:
-     así un 1° nunca se enfrenta en primera ronda con el 2° de su propio grupo.
-   - Los cruces se ubican en la llave por siembra, para que los dos mejores clasificados recién
-     puedan cruzarse en la final. */
-function seedKnockoutRound1(entries, compareSamePlace) {
-  const ranked = [...entries].sort((a, b) => a.place - b.place || compareSamePlace(a, b));
-  let size = 1;
-  while (size < ranked.length) size *= 2;
-  const byeCount = size - ranked.length;
-
-  const units = ranked.slice(0, byeCount).map((e) => [e, null]);
-  const pool = ranked.slice(byeCount);
-  while (pool.length > 0) {
-    const top = pool.shift();
-    if (pool.length === 0) { units.push([top, null]); break; }
-    let idx = pool.length - 1;
-    while (idx > 0 && pool[idx].groupIndex === top.groupIndex) idx--;
-    if (pool[idx].groupIndex === top.groupIndex) idx = pool.length - 1; // todos del mismo grupo: no queda otra
-    units.push([top, pool.splice(idx, 1)[0]]);
-  }
-
-  // Posiciones de siembra: con 4 cruces queda [1, 4, 2, 3], así el 1 y el 2 van a mitades opuestas
-  let order = [1];
-  while (order.length < units.length) {
-    const n = order.length * 2;
-    order = order.flatMap((s) => [s, n + 1 - s]);
-  }
-  const placed = order.map((s) => units[s - 1]);
-
-  // Segunda ronda: si un cruce puede terminar en dos parejas de la misma zona (por ejemplo el 1° A
-  // con bye contra el ganador de 2° A vs 2° B), se intercambia el de abajo con otro lugar de la
-  // llave que no genere el mismo problema, probando primero los de peor siembra.
-  const groupsOf = (unit) => unit.filter(Boolean).map((e) => e.groupIndex);
-  const clash = (u, v) => groupsOf(u).some((g) => groupsOf(v).includes(g));
-  for (let i = 0; i + 1 < placed.length; i += 2) {
-    if (!clash(placed[i], placed[i + 1])) continue;
-    for (let j = placed.length - 1; j > i + 1; j--) {
-      const partner = j % 2 === 0 ? j + 1 : j - 1;
-      if (clash(placed[i], placed[j]) || clash(placed[i + 1], placed[partner])) continue;
-      [placed[i + 1], placed[j]] = [placed[j], placed[i + 1]];
-      break;
-    }
-  }
-  return placed;
+/* Clasificados de cada grupo para la llave final: los primeros de la tabla, tantos como eligió el
+   organizador (ver groupQualifiersCount). La pareja eliminada por el organizador no clasifica
+   aunque el grupo pase a 3 de 4 (un W.O. solo pierde ese partido: si le dan los números, clasifica). */
+function groupQualifiers(group, pairsById, format) {
+  return computeStandings(group, pairsById, format)
+    .filter((row) => !row.eliminated)
+    .slice(0, groupQualifiersCount(group))
+    .map((row) => row.pairId);
 }
 
-/* Arma el orden de clasificados para la llave final a partir de las tablas de los grupos,
-   tomando de cada grupo la cantidad de clasificados que eligió el organizador. Entre parejas del
-   mismo puesto de distintos grupos manda el mérito: puntos, diferencia de sets, diferencia de games,
-   games a favor y games en contra (el mismo orden que dentro de un grupo, sin el resultado entre
-   sí porque no se enfrentaron). */
+/* Cruces de primera ronda de la llave final con las parejas que clasificaron: el cuadro FAP de esa
+   configuración (ver bracketFap.js), con cada lugar ("1° Grupo A") ocupado por la pareja que quedó
+   ahí. El cuadro no depende de los resultados: es el mismo del esqueleto que se publica antes de
+   que terminen los grupos, así no cambian los byes, los cruces ni los horarios. Devuelve pares
+   [pairId, pairId | null] (null = bye). */
 function buildKnockoutSeeding(groups, pairsById, format) {
-  const entries = groups.flatMap((g, gi) => {
-    const table = computeStandings(g, pairsById, format);
-    // La pareja eliminada por el organizador no clasifica aunque el grupo pase a 3 de 4 (un W.O.
-    // solo pierde ese partido: si le dan los números, clasifica)
-    return table.filter((row) => !row.eliminated).slice(0, groupQualifiersCount(g)).map((row, i) => ({ groupIndex: gi, place: i + 1, row }));
-  });
-  const meritKey = (e) => [e.row.pts, e.row.setsF - e.row.setsC, e.row.gamesF - e.row.gamesC, e.row.gamesF, -e.row.gamesC];
-  const compareMerit = (a, b) => {
-    const ka = meritKey(a), kb = meritKey(b);
-    for (let i = 0; i < ka.length; i++) {
-      if (kb[i] !== ka[i]) return kb[i] - ka[i];
-    }
-    return a.groupIndex - b.groupIndex;
-  };
-  return seedKnockoutRound1(entries, compareMerit).map(([a, b]) => [a.row.pairId, b ? b.row.pairId : null]);
+  const qualifiers = groups.map((g) => groupQualifiers(g, pairsById, format));
+  const slots = fapRound1(qualifiers.map((q) => q.length));
+  if (!slots) return [];
+  const ids = slots.map((s) => (s ? qualifiers[s.group][s.place - 1] : null));
+  const pairs = [];
+  for (let i = 0; i < ids.length; i += 2) pairs.push([ids[i], ids[i + 1]]);
+  return pairs;
 }
 
 /* ¿Cambiaron los clasificados de los grupos desde que se armó la llave? (por ejemplo, porque se
@@ -982,19 +930,18 @@ function buildBracket(pairIds) {
 /* Arma un esqueleto de llave SIN saber todavía qué pareja concreta clasifica a cada lugar:
    solo usa los grupos y cuántos clasificados definió el organizador en cada uno. Cada partido de
    ronda 1 lleva un label textual tipo "1° Grupo A vs 2° Grupo B" (guardado en
-   placeholderA/placeholderB) en vez de pairA/pairB reales. Usa la misma siembra que la llave real
-   (seedKnockoutRound1), así los casilleros coinciden cuando después se completa con las parejas;
-   como todavía no hay tabla, entre los del mismo puesto ordena por grupo. Quiénes pasan directo
-   (bye) puede cambiar en la llave real, porque ahí manda el mérito. */
+   placeholderA/placeholderB) en vez de pairA/pairB reales. Es el mismo cuadro FAP que usa la llave
+   real (fapRound1), así cada casillero, sus byes y sus horarios siguen iguales cuando después se
+   completa con las parejas. */
 function buildPlaceholderBracket(groups) {
   if (!groups || groups.length === 0) return null;
-  const entries = groups.flatMap((g, gi) =>
-    Array.from({ length: groupQualifiersCount(g) }, (_, i) => ({ groupIndex: gi, place: i + 1, label: `${i + 1}° ${g.name}` })));
-  if (entries.length < 2) return null;
-
-  const round1 = seedKnockoutRound1(entries, (a, b) => a.groupIndex - b.groupIndex).map(([a, b]) => (
-    { id: uid(), pairA: null, pairB: null, placeholderA: a.label, placeholderB: b ? b.label : null, sets: [] }
-  ));
+  const slots = fapRound1(groups.map(groupQualifiersCount));
+  if (!slots) return null;
+  const label = (s) => (s ? `${s.place}° ${groups[s.group].name}` : null);
+  const round1 = [];
+  for (let i = 0; i < slots.length; i += 2) {
+    round1.push({ id: uid(), pairA: null, pairB: null, placeholderA: label(slots[i]), placeholderB: label(slots[i + 1]), sets: [] });
+  }
   const rounds = [round1];
   let count = round1.length;
   while (count > 1) {
@@ -7595,14 +7542,14 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const createGroup = () => {
     if (!groupName.trim() || groupSelection.length < 2) return;
     const built = buildGroupMatches(groupSelection);
-    const group = { id: uid(), name: groupName.trim(), pairIds: groupSelection, format: built.format, matches: built.matches, qualifiersCount: 2 };
+    const group = { id: uid(), name: groupName.trim(), pairIds: groupSelection, format: built.format, matches: built.matches, qualifiersCount: defaultQualifiersCount(groupSelection.length) };
     (onGroupsLocked || onUpdateCategory)({ ...category, groups: [...category.groups, group] });
     setGroupName(""); setGroupSelection([]);
   };
 
   const runAutoGroups = () => {
     const { groups, warnings } = autoFormGroups(category.pairs, groupPlayDates(tournament), tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION);
-    (onGroupsLocked || onUpdateCategory)({ ...category, groups: groups.map((g) => ({ ...g, qualifiersCount: 2 })), bracket: null });
+    (onGroupsLocked || onUpdateCategory)({ ...category, groups: groups.map((g) => ({ ...g, qualifiersCount: defaultQualifiersCount(g.pairIds.length) })), bracket: null });
     setGroupWarnings(warnings);
     setConfirmingAutoGroups(false);
   };
