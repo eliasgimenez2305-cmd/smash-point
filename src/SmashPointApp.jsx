@@ -879,6 +879,34 @@ function groupQualifiersCount(group) {
   return Math.min(group.qualifiersCount || defaultQualifiersCount(group.pairIds.length), group.pairIds.length);
 }
 
+/* Número de cada partido de una categoría, como en los cuadros de los circuitos ("Partido 27"):
+   primero los de grupos, grupo por grupo y en su orden, y después los de la llave, ronda por ronda
+   y de arriba hacia abajo (los byes no se juegan y no llevan número). Se calcula, no se guarda: si
+   se rearman los grupos o la llave, se vuelve a numerar. */
+function categoryMatchNumbers(category) {
+  const nums = new Map();
+  let n = 0;
+  (category.groups || []).forEach((g) => g.matches.forEach((m) => nums.set(m.id, ++n)));
+  if (category.bracket) {
+    const { byes } = walkBracket(category.bracket);
+    category.bracket.forEach((round, ri) => round.forEach((m, mi) => { if (!isByeMatch(byes, ri, mi)) nums.set(m.id, ++n); }));
+  }
+  return nums;
+}
+
+/* Nombre corto de un grupo para "1A": "Grupo A" → "A" (si el grupo tiene otro nombre, el nombre) */
+const groupShortName = (g) => (g.name || "").replace(/^grupo\s+/i, "");
+
+/* De dónde viene cada pareja clasificada a la llave: { pairId: "1A" } = 1° del Grupo A */
+function bracketOrigins(category, format) {
+  const pairsById = Object.fromEntries((category.pairs || []).map((p) => [p.id, p]));
+  const out = {};
+  (category.groups || []).forEach((g) => {
+    groupQualifiers(g, pairsById, format).forEach((pid, i) => { out[pid] = `${i + 1}${groupShortName(g)}`; });
+  });
+  return out;
+}
+
 /* Clasificados de cada grupo para la llave final: los primeros de la tabla, tantos como eligió el
    organizador (ver groupQualifiersCount). La pareja eliminada por el organizador no clasifica
    aunque el grupo pase a 3 de 4 (un W.O. solo pierde ese partido: si le dan los números, clasifica). */
@@ -1089,13 +1117,14 @@ function collectScheduleableMatches(tournament) {
   const list = [];
   if (isInfoOnly(tournament)) return list;
   (tournament.categories || []).forEach((c) => {
+    const nums = categoryMatchNumbers(c);
     (c.groups || []).forEach((g) => {
       g.matches.forEach((m) => {
         const isPending4 = g.format === "bracket4" && (m.stage === "ganadores" || m.stage === "perdedores") && !(m.pairA && m.pairB);
         if ((m.pairA && m.pairB) || isPending4) {
           list.push({
             key: `${c.id}:g:${g.id}:${m.id}`, categoryId: c.id, categoryName: c.name,
-            location: { type: "group", groupId: g.id }, matchId: m.id, label: m.round ? `${g.name} · Ronda ${m.round}` : g.name,
+            location: { type: "group", groupId: g.id }, matchId: m.id, number: nums.get(m.id), label: m.round ? `${g.name} · Ronda ${m.round}` : g.name,
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
             walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null,
             stage: m.stage || null, groupFormat: g.format || "roundrobin",
@@ -1127,7 +1156,7 @@ function collectScheduleableMatches(tournament) {
         if ((m.pairA && m.pairB) || isSkeletonSlot) {
           list.push({
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
-            location: { type: "bracket", roundIndex: ri }, matchId: m.id, label: roundStageLabel(c.bracket.length, ri),
+            location: { type: "bracket", roundIndex: ri }, matchId: m.id, number: nums.get(m.id), label: roundStageLabel(c.bracket.length, ri),
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
             walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
             placeholder: placeholderText,
@@ -2357,10 +2386,17 @@ function Badge({ status }) {
 
 /* En la llave, un lugar vacío es "Libre (bye)" solo si nunca va a llegar nadie (bye=false: está
    esperando al ganador de un partido sin jugar, y dice "A definir") */
-function PairName({ id, pairsById, bye = true, placeholder = null }) {
+function PairName({ id, pairsById, bye = true, placeholder = null, origin = null }) {
   if (id === null) return <span className="italic opacity-50">{bye ? "Libre (bye)" : placeholder || "A definir"}</span>;
   if (!id) return <span className="italic opacity-50">A definir</span>;
-  return <span>{pairsById[id]?.name || "—"}</span>;
+  // origin: de dónde viene a la llave ("1A" = 1° del Grupo A), como en los cuadros de los circuitos
+  return <span>{origin && <span className="font-mono text-[10px] font-bold opacity-60 mr-1">{origin}</span>}{pairsById[id]?.name || "—"}</span>;
+}
+
+/* "#27": número del partido dentro de su categoría (ver categoryMatchNumbers) */
+function MatchNumber({ n }) {
+  if (!n) return null;
+  return <span className="font-mono text-[10px] opacity-60">#{n}</span>;
 }
 
 /* Igual que PairName, pero para partidos de GRUPO: ahí "null" nunca es un bye (eso solo existe
@@ -3463,7 +3499,7 @@ function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onC
     >
       <div className="min-w-[200px] max-w-full">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
-          <span className="text-xs text-teal-500">{m.categoryName} · {m.label}</span>
+          <span className="text-xs text-teal-500">{m.number ? `#${m.number} · ` : ""}{m.categoryName} · {m.label}</span>
           {!m.placeholder && <MatchStatusBadge status={matchDisplayStatus(m, format)} />}
           {m.draft && <span className="text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ backgroundColor: "#a78bfa22", color: "#a78bfa" }}>Borrador</span>}
         </div>
@@ -3545,7 +3581,7 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
         title="Quitar horario"
       >✕</button>
       <div className="flex items-center gap-1 flex-wrap pr-3">
-        <span className="text-teal-500 truncate">{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
+        <span className="text-teal-500 truncate">{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
         {conflict && <span className="text-[9px] font-bold" style={{ color: "#f87171" }}>⚠ CHOQUE</span>}
         {m.draft && <span className="text-[9px] font-bold" style={{ color: "#a78bfa" }}>BORRADOR</span>}
         {finished && <span className="text-[9px] font-bold" style={{ color: "#9fe022" }}>✓</span>}
@@ -3605,7 +3641,7 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
 
   return (
     <Modal title="Mover partido" onClose={onClose}>
-      <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
       <p className="text-sm mb-4" style={F.body}>{describe(m)}</p>
       {playDates.length === 0 ? (
         <p className="text-sm text-amber-400" style={F.body}>Primero cargá el día y horario del torneo en Horarios.</p>
@@ -3679,7 +3715,7 @@ function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onReti
   const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
   return (
     <Modal title="Resultado" onClose={onClose}>
-      <p className="text-xs text-teal-500 mb-2" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-xs text-teal-500 mb-2" style={F.body}>{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
       <p className="text-sm mb-4" style={F.body}>{nameA} <span className="text-teal-500">vs</span> {nameB}</p>
       {m.walkover ? (
         <p className="text-sm text-amber-400 mb-3" style={F.body}>WO: no se presentó {m.walkover === m.pairA ? nameA : nameB}.</p>
@@ -3759,7 +3795,7 @@ function OnCourtView({ tournament, update }) {
           {m.schedule
             ? <span className="font-bold" style={{ color: accent }}>{m.schedule.time}hs · {courtName(tournament, m.schedule.court)}</span>
             : <span className="font-bold text-amber-400">Sin horario</span>}
-          <span className="text-teal-500 truncate">{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
+          <span className="text-teal-500 truncate">{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</span>
           {m.schedule && (tournament.playDates || []).length > 1 && <span className="text-teal-600">{formatDateShort(m.schedule.date)}</span>}
         </div>
         {m.placeholder ? (
@@ -3857,7 +3893,7 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
         className="w-full text-left rounded px-1.5 py-1 text-[10px] leading-tight"
         style={{ border: `1.5px ${m.draft ? "dashed" : "solid"} ${color}`, backgroundColor: color + "1a", ...F.body }}
       >
-        <span className="block font-bold truncate" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName} · {m.label}</span>
+        <span className="block font-bold truncate" style={{ color: categoryColor[m.categoryId] }}>{m.number ? `#${m.number} · ` : ""}{m.categoryName} · {m.label}</span>
         {m.placeholder && !(m.pairA && m.pairB) ? (
           <span className="block italic text-teal-400">{m.placeholder}</span>
         ) : (
@@ -4404,7 +4440,7 @@ function SchedulePublicView({ tournament }) {
                             </div>
                           )}
                           <div className="text-[10px] truncate pl-7" style={{ color: categoryColor[m.categoryId] }}>
-                            {m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
+                            {m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
                           </div>
                         </div>
                       );
@@ -5406,6 +5442,7 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
 
 function CategoryGroupsPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
+  const nums = useMemo(() => categoryMatchNumbers(category), [category]);
 
   return (
     <section className="mt-6">
@@ -5428,7 +5465,7 @@ function CategoryGroupsPublicView({ category, format }) {
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="text-sm" style={F.body}>
-                      {groupMatchStageLabel(g, m) && <span className="text-[10px] text-teal-500 block">{g.name} · {groupMatchStageLabel(g, m)}</span>}
+                      <span className="text-[10px] text-teal-500 block"><MatchNumber n={nums.get(m.id)} />{groupMatchStageLabel(g, m) ? ` · ${g.name} · ${groupMatchStageLabel(g, m)}` : ""}</span>
                       {pending ? (
                         <div className="flex justify-between items-baseline gap-3">
                           <span className="italic opacity-70 min-w-0">
@@ -5469,6 +5506,8 @@ function CategoryBracketPublicView({ category, format }) {
   const pairsById = useMemo(() => Object.fromEntries(category.pairs.map((p) => [p.id, p])), [category.pairs]);
   // Recalculada desde la primera ronda (corrige parejas que hayan avanzado de más en datos viejos)
   const walked = useMemo(() => (category.bracket ? walkBracket(category.bracket, format) : null), [category.bracket, format]);
+  const nums = useMemo(() => categoryMatchNumbers(category), [category]);
+  const origins = useMemo(() => bracketOrigins(category, format), [category, format]);
 
   return (
     <section className="mt-6">
@@ -5492,13 +5531,13 @@ function CategoryBracketPublicView({ category, format }) {
                   const winnerIsA = w == null ? null : w === m.pairA;
                   return (
                     <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                      {!isByeMatch(walked.byes, ri, mi) && <ScheduleLabel schedule={m.schedule} />}
+                      {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} /></div>}
                       <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
                       </div>
                       <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} /></span>
+                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
                         <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
                       </div>
                       {matchIsPlayed(m, format) && (
@@ -7535,6 +7574,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   const [confirmingAutoGroups, setConfirmingAutoGroups] = useState(false);
   const [groupWarnings, setGroupWarnings] = useState([]);
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
+  const matchNums = useMemo(() => categoryMatchNumbers(category), [category]);
   const assignedPairIds = useMemo(() => new Set(category.groups.flatMap((g) => g.pairIds)), [category.groups]);
   const super8 = isSuper8(category);
   const individual = category.format === "super8_individual";
@@ -7942,7 +7982,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                   <label className="flex items-center gap-1 text-[11px] text-teal-500" style={F.body}>
                     Clasifican:
                     <select
-                      value={g.qualifiersCount || 2}
+                      value={groupQualifiersCount(g)}
                       onChange={(e) => setGroupQualifiers(g.id, parseInt(e.target.value, 10))}
                       className="px-1.5 py-0.5 rounded border outline-none text-[11px]"
                       style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
@@ -7964,7 +8004,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                     return (
                       <div key={m.id} className="flex items-start justify-between gap-3 text-sm flex-wrap">
                         <div className="min-w-0">
-                          {stageLabel && <span className="text-[10px] text-teal-500 block mb-1">{stageLabel}</span>}
+                          <span className="text-[10px] text-teal-500 block mb-1"><MatchNumber n={matchNums.get(m.id)} />{stageLabel ? ` · ${stageLabel}` : ""}</span>
                           <div className="flex items-center gap-1 flex-wrap" style={F.body}>
                             {w && w === m.pairA && <WinnerCheck />}
                             <GroupPairName id={m.pairA} pairsById={pairsById} />
@@ -8143,7 +8183,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               )}
             </div>
           )}
-          {category.bracket && (() => { const walked = walkBracket(category.bracket, format); return (
+          {category.bracket && (() => { const walked = walkBracket(category.bracket, format); const nums = categoryMatchNumbers(category); const origins = bracketOrigins(category, format); return (
             <div className="flex gap-8 overflow-x-auto pb-4">
               {walked.rounds.map((round, ri) => {
                 const isFinal = ri === category.bracket.length - 1;
@@ -8161,7 +8201,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                       const w = walked.winners[ri][mi];
                       return (
                         <div key={m.id} className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                          {!isByeMatch(walked.byes, ri, mi) && <ScheduleLabel schedule={m.schedule} />}
+                          {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} /></div>}
                           {m.walkover ? (
                             <p className="text-amber-400 font-semibold text-xs">WO</p>
                           ) : (() => {
@@ -8169,11 +8209,11 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             return (
                               <>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
                                   {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
                                 </div>
                                 <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} /></span>
+                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
                                   {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
                                 </div>
                                 {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
