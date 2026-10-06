@@ -2527,13 +2527,38 @@ function StandingsLegend() {
 }
 
 /* Muestra día, hora y cancha de un partido si ya tiene horario asignado */
-function ScheduleLabel({ schedule }) {
+function ScheduleLabel({ schedule, wrap = false }) {
   const courtLabel = useCourtName();
   if (!schedule) return null;
   return (
-    <span className="text-[11px] text-teal-500 whitespace-nowrap" style={F.body}>
+    <span className={`text-[11px] text-teal-500 ${wrap ? "" : "whitespace-nowrap"}`} style={F.body}>
       {formatDateShort(schedule.date)} · {schedule.time}hs · {courtLabel(schedule.court)}
     </span>
+  );
+}
+
+/* Llave dibujada como cuadro: una columna por ronda y cada partido centrado entre los dos que lo
+   alimentan. Es una grilla con una fila por partido de la primera ronda, todas de la misma altura
+   (la del partido más alto), y cada partido de la ronda r ocupa 2^r filas. */
+function BracketGrid({ rounds, header, renderMatch, colWidth = 236 }) {
+  const rows = rounds[0]?.length || 1;
+  return (
+    <div className="overflow-x-auto pb-4">
+      <div
+        className="grid gap-x-6 gap-y-3"
+        style={{ gridTemplateColumns: `repeat(${rounds.length}, ${colWidth}px)`, gridTemplateRows: `auto repeat(${rows}, 1fr)` }}
+      >
+        {rounds.map((_, ri) => <div key={`h${ri}`} style={{ gridColumn: ri + 1, gridRow: 1 }}>{header(ri)}</div>)}
+        {rounds.map((round, ri) => round.map((m, mi) => {
+          const span = 2 ** ri;
+          return (
+            <div key={m.id} className="self-center min-w-0" style={{ gridColumn: ri + 1, gridRow: `${mi * span + 2} / span ${span}` }}>
+              {renderMatch(m, ri, mi)}
+            </div>
+          );
+        }))}
+      </div>
+    </div>
   );
 }
 
@@ -5512,45 +5537,42 @@ function CategoryBracketPublicView({ category, format }) {
   return (
     <section className="mt-6">
       {!category.bracket && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se generó.</p>}
-      {category.bracket && (
-        <div className="flex gap-8 overflow-x-auto pb-4">
-          {walked.rounds.map((round, ri) => {
-            const isFinal = ri === category.bracket.length - 1;
-            const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
-            return (
-              <div key={ri} className="flex flex-col justify-around gap-4 min-w-[220px]">
-                <span
-                  className="self-start px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide"
-                  style={{ backgroundColor: color, color: "#14181f" }}
-                >
-                  {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
-                </span>
-                {round.map((m, mi) => {
-                  const w = walked.winners[ri][mi];
-                  const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
-                  const winnerIsA = w == null ? null : w === m.pairA;
-                  return (
-                    <div key={m.id} className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                      {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} /></div>}
-                      <div className={`flex justify-between mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                        <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
-                      </div>
-                      <div className={`flex justify-between mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                        <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                        <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
-                      </div>
-                      {matchIsPlayed(m, format) && (
-                        <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {category.bracket && (() => {
+        const total = category.bracket.length;
+        const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
+        return (
+          <BracketGrid
+            rounds={walked.rounds}
+            header={(ri) => (
+              <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
+                {ri === total - 1 ? "🏆 " : ""}{roundStageLabel(total, ri)}
+              </span>
+            )}
+            renderMatch={(m, ri, mi) => {
+              const color = colorOf(ri);
+              const w = walked.winners[ri][mi];
+              const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+              const winnerIsA = w == null ? null : w === m.pairA;
+              return (
+                <div className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
+                  {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} wrap /></div>}
+                  <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
+                    <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
+                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
+                  </div>
+                  <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
+                    <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
+                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
+                  </div>
+                  {matchIsPlayed(m, format) && (
+                    <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
+                  )}
+                </div>
+              );
+            }}
+          />
+        );
+      })()}
     </section>
   );
 }
@@ -8183,72 +8205,75 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               )}
             </div>
           )}
-          {category.bracket && (() => { const walked = walkBracket(category.bracket, format); const nums = categoryMatchNumbers(category); const origins = bracketOrigins(category, format); return (
-            <div className="flex gap-8 overflow-x-auto pb-4">
-              {walked.rounds.map((round, ri) => {
-                const isFinal = ri === category.bracket.length - 1;
-                const color = GROUP_COLORS[(category.bracket.length - 1 - ri) % GROUP_COLORS.length];
-                return (
-                  <div key={ri} className="flex flex-col justify-around gap-4 min-w-[240px]">
-                    <span
-                      className="self-start px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide"
-                      style={{ backgroundColor: color, color: "#14181f" }}
-                    >
-                      {isFinal ? "🏆 " : ""}{roundStageLabel(category.bracket.length, ri)}
+          {category.bracket && (() => {
+            const walked = walkBracket(category.bracket, format);
+            const nums = categoryMatchNumbers(category);
+            const origins = bracketOrigins(category, format);
+            const total = category.bracket.length;
+            const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
+            return (
+              <>
+                <BracketGrid
+                  rounds={walked.rounds}
+                  colWidth={250}
+                  header={(ri) => (
+                    <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
+                      {ri === total - 1 ? "🏆 " : ""}{roundStageLabel(total, ri)}
                     </span>
-                    {round.map((m, mi) => {
-                      const editable = m.pairA && m.pairB;
-                      const w = walked.winners[ri][mi];
-                      return (
-                        <div key={m.id} className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
-                          {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} /></div>}
-                          {m.walkover ? (
-                            <p className="text-amber-400 font-semibold text-xs">WO</p>
-                          ) : (() => {
-                            const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
-                            return (
-                              <>
-                                <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                                  {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
-                                </div>
-                                <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
-                                  <span className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                                  {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
-                                </div>
-                                {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
-                              </>
-                            );
-                          })()}
-                          {editable && (
+                  )}
+                  renderMatch={(m, ri, mi) => {
+                    const color = colorOf(ri);
+                    const editable = m.pairA && m.pairB;
+                    const w = walked.winners[ri][mi];
+                    return (
+                      <div className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
+                        {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} wrap /></div>}
+                        {m.walkover ? (
+                          <p className="text-amber-400 font-semibold text-xs">WO</p>
+                        ) : (() => {
+                          const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+                          return (
                             <>
-                              {!m.walkover && (
-                                <MatchSetsEditor
-                                  sets={m.sets}
-                                  format={format}
-                                  partial={!!m.retired}
-                                  onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
-                                />
-                              )}
-                              <MatchOutcomeButtons
-                                m={m}
-                                nameA={pairsById[m.pairA]?.name || "pareja 1"}
-                                nameB={pairsById[m.pairB]?.name || "pareja 2"}
-                                onWalkover={(pairId) => setBracketWalkover(m.id, pairId)}
-                                onRetired={(pairId) => setBracketRetired(m.id, pairId)}
-                                className="text-[10px]"
-                              />
+                              <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
+                                <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
+                                {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
+                              </div>
+                              <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
+                                <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
+                                {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
+                              </div>
+                              {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                             </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-              <button onClick={() => onUpdateCategory({ ...category, bracket: null })} className="text-xs text-red-400 self-start" style={F.body}>Reiniciar llave</button>
-            </div>
-          ); })()}
+                          );
+                        })()}
+                        {editable && (
+                          <>
+                            {!m.walkover && (
+                              <MatchSetsEditor
+                                sets={m.sets}
+                                format={format}
+                                partial={!!m.retired}
+                                onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
+                              />
+                            )}
+                            <MatchOutcomeButtons
+                              m={m}
+                              nameA={pairsById[m.pairA]?.name || "pareja 1"}
+                              nameB={pairsById[m.pairB]?.name || "pareja 2"}
+                              onWalkover={(pairId) => setBracketWalkover(m.id, pairId)}
+                              onRetired={(pairId) => setBracketRetired(m.id, pairId)}
+                              className="text-[10px]"
+                            />
+                          </>
+                        )}
+                      </div>
+                    );
+                  }}
+                />
+                <button onClick={() => onUpdateCategory({ ...category, bracket: null })} className="text-xs text-red-400" style={F.body}>Reiniciar llave</button>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>
