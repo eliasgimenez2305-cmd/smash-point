@@ -2538,26 +2538,63 @@ function ScheduleLabel({ schedule, wrap = false }) {
 }
 
 /* Llave dibujada como cuadro: una columna por ronda y cada partido centrado entre los dos que lo
-   alimentan. Es una grilla con una fila por partido de la primera ronda, todas de la misma altura
-   (la del partido más alto), y cada partido de la ronda r ocupa 2^r filas. */
-function BracketGrid({ rounds, header, renderMatch, colWidth = 236 }) {
+   alimentan, unidos con las líneas de los cruces. Es una grilla con una fila por partido de la
+   primera ronda, todas de la misma altura (la del partido más alto), y cada partido de la ronda r
+   ocupa 2^r filas. */
+const BRACKET_GAP_X = 28; // espacio entre rondas, donde van las líneas
+const BRACKET_GAP_Y = 12;
+const BRACKET_LINE = "rgba(148,163,184,0.55)";
+function BracketGrid({ rounds, header, renderMatch, champion = null, colWidth = 236 }) {
   const rows = rounds[0]?.length || 1;
+  const half = BRACKET_GAP_X / 2;
+  const columns = rounds.length + (champion ? 1 : 0);
   return (
     <div className="overflow-x-auto pb-4">
       <div
-        className="grid gap-x-6 gap-y-3"
-        style={{ gridTemplateColumns: `repeat(${rounds.length}, ${colWidth}px)`, gridTemplateRows: `auto repeat(${rows}, 1fr)` }}
+        className="grid"
+        style={{ columnGap: BRACKET_GAP_X, rowGap: BRACKET_GAP_Y, gridTemplateColumns: `repeat(${columns}, ${colWidth}px)`, gridTemplateRows: `auto repeat(${rows}, 1fr)` }}
       >
-        {rounds.map((_, ri) => <div key={`h${ri}`} style={{ gridColumn: ri + 1, gridRow: 1 }}>{header(ri)}</div>)}
+        {/* Campeón: después de la final, unido con su línea */}
+        {champion && (
+          <div className="relative flex items-center min-w-0" style={{ gridColumn: rounds.length + 1, gridRow: `2 / span ${rows}` }}>
+            <span aria-hidden="true" className="absolute" style={{ left: -BRACKET_GAP_X, width: BRACKET_GAP_X, top: "50%", borderTop: `1.5px solid ${BRACKET_LINE}` }} />
+            <div className="w-full min-w-0">{champion}</div>
+          </div>
+        )}
+        {rounds.map((_, ri) => <div key={`h${ri}`} className="mb-1" style={{ gridColumn: ri + 1, gridRow: 1 }}>{header(ri)}</div>)}
         {rounds.map((round, ri) => round.map((m, mi) => {
           const span = 2 ** ri;
           return (
-            <div key={m.id} className="self-center min-w-0" style={{ gridColumn: ri + 1, gridRow: `${mi * span + 2} / span ${span}` }}>
-              {renderMatch(m, ri, mi)}
+            <div key={m.id} className="relative flex items-center min-w-0" style={{ gridColumn: ri + 1, gridRow: `${mi * span + 2} / span ${span}` }}>
+              {ri > 0 && (
+                <>
+                  {/* Las dos líneas que llegan de los partidos anteriores (a la altura del centro de
+                      cada uno: un cuarto y tres cuartos de este lugar, descontando el espacio entre
+                      filas) y la que baja de una a otra */}
+                  <span
+                    aria-hidden="true"
+                    className="absolute"
+                    style={{ left: -BRACKET_GAP_X, width: half, top: `calc(25% - ${BRACKET_GAP_Y / 4}px)`, bottom: `calc(25% - ${BRACKET_GAP_Y / 4}px)`, borderTop: `1.5px solid ${BRACKET_LINE}`, borderRight: `1.5px solid ${BRACKET_LINE}`, borderBottom: `1.5px solid ${BRACKET_LINE}` }}
+                  />
+                  {/* Y la que entra a este partido */}
+                  <span aria-hidden="true" className="absolute" style={{ left: -half, width: half, top: "50%", borderTop: `1.5px solid ${BRACKET_LINE}` }} />
+                </>
+              )}
+              <div className="w-full min-w-0">{renderMatch(m, ri, mi)}</div>
             </div>
           );
         }))}
       </div>
+    </div>
+  );
+}
+
+/* Recuadro del campeón al final de la llave (el ganador de la final, o "A definir") */
+function BracketChampion({ name }) {
+  return (
+    <div className="rounded-lg p-3 text-sm text-center" style={{ ...F.body, backgroundColor: BRAND.lime + "14", border: `1.5px solid ${BRAND.lime}` }}>
+      <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: BRAND.lime }}>🏆 Campeón</p>
+      <p className={`mt-1 ${name ? "font-semibold" : "italic opacity-50"}`}>{name || "A definir"}</p>
     </div>
   );
 }
@@ -5543,6 +5580,7 @@ function CategoryBracketPublicView({ category, format }) {
         return (
           <BracketGrid
             rounds={walked.rounds}
+            champion={<BracketChampion name={pairsById[walked.winners[total - 1]?.[0]]?.name} />}
             header={(ri) => (
               <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
                 {ri === total - 1 ? "🏆 " : ""}{roundStageLabel(total, ri)}
@@ -8216,6 +8254,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                 <BracketGrid
                   rounds={walked.rounds}
                   colWidth={250}
+                  champion={<BracketChampion name={pairsById[walked.winners[total - 1]?.[0]]?.name} />}
                   header={(ri) => (
                     <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
                       {ri === total - 1 ? "🏆 " : ""}{roundStageLabel(total, ri)}
