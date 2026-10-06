@@ -5,6 +5,7 @@ import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage
 import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
 import { findNameDuplicates, splitPair } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
+import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament } from "./merge.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -1193,12 +1194,7 @@ function rescheduleTournament(tournament) {
     })),
   };
   next = autoSchedule(next);
-  next.categories.forEach((c) => {
-    if (!c.bracket) return;
-    const scheduled = autoScheduleBracket(next, c);
-    next = { ...next, categories: next.categories.map((x) => (x.id === c.id ? scheduled : x)) };
-  });
-  return next;
+  return autoScheduleAllBrackets(next);
 }
 
 /* Marca/quita el estado "en curso" a mano en un partido puntual (se usa mientras no tenga resultado cargado) */
@@ -1234,20 +1230,6 @@ function collectAllSchedules(tournament) {
     (c.bracket || []).forEach((round, ri) => round.forEach((m, mi) => { if (m.schedule && !isByeMatch(byes, ri, mi)) list.push(m.schedule); }));
   });
   return list;
-}
-
-/* Todos los horarios de la llave ya reservados en el torneo, agrupados por ronda (índice 0 = Ronda 1,
-   1 = Ronda 2, etc.), de CUALQUIER categoría. Sirve para saber hasta qué hora llega cada ronda en
-   general, sin importar en qué categoría se jugó ese partido puntual. */
-function collectBracketScheduleTiers(tournament) {
-  const tiers = {};
-  (tournament.categories || []).forEach((c) => {
-    const byes = c.bracket ? walkBracket(c.bracket).byes : [];
-    (c.bracket || []).forEach((round, ri) => {
-      round.forEach((m, mi) => { if (m.schedule && !isByeMatch(byes, ri, mi)) (tiers[ri] = tiers[ri] || []).push(m.schedule); });
-    });
-  });
-  return tiers;
 }
 
 function scheduleEndPoint(schedule, duration) {
@@ -1300,130 +1282,90 @@ function laterPoint(a, b) {
   return a.minutes > b.minutes ? a : b;
 }
 
-/* Reserva de antemano cancha y horario para TODOS los partidos de una llave recién generada
-   (aunque todavía no se sepa qué pareja llega a semifinales o a la final), sin pisar ningún
-   horario ya ocupado por otra categoría del mismo torneo. Las llaves se juegan "por ronda": primero
-   la Ronda 1 de TODAS las categorías, después la Ronda 2 de todas, y así — por eso el piso de cada
-   ronda se calcula mirando lo que ya se jugó en rondas anteriores de cualquier categoría, no solo la propia. */
-function autoScheduleBracket(tournament, category) {
-  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
-  const courts = tournament.courtsCount || 4;
-  const dates = tournament.playDates || [];
-  if (!tournamentUsesSchedule(tournament) || dates.length === 0 || !category.bracket) return category;
+/* Descanso por defecto entre el inicio de un partido de llave de una pareja y el del siguiente */
+const DEFAULT_BRACKET_REST = 120;
+const BRACKET_REST_OPTIONS = [60, 90, 120, 150, 180];
+/* "2 h", "1 h 30" */
+const formatRest = (min) => `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60}` : ""}`;
 
-  // Cada fecha del torneo ya trae su propio rango horario
-  const slots = [];
-  dates.forEach((d) => {
-    const start = timeToMinutes(d.from), end = timeToMinutes(d.to);
-    for (let t = start; t + duration <= end; t += duration) slots.push({ date: d.date, minutes: t, bracketDay: isBracketDay(d) });
-  });
-  // La llave va en los días de llaves. Con "La llave arranca", la primera ronda de esta categoría
-  // también puede ir ese día (desde esa hora) aunque sea de grupos.
-  // (si después ese día pasó a ser de llaves o se quitó, ya no cuenta)
+/* Lo que comparten todas las llaves de un torneo para armar sus horarios (ver bracketSchedule.js):
+   días, canchas y sedes, lo que ya está ocupado, el descanso y la franja de cierre (las últimas 3
+   horas del último día de llaves) */
+function bracketScheduleShared(tournament, excludeCategoryIds = []) {
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
+  const days = (tournament.playDates || []).map((d) => ({ date: d.date, from: d.from, to: d.to, bracket: isBracketDay(d) }));
+  const bracketDays = [...days].filter((d) => d.bracket).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const lastDay = bracketDays[bracketDays.length - 1];
+  const busy = new Set();
+  collectAllSchedules(tournament).forEach((s) => busy.add(`${s.date}|${s.time}|${s.court}`));
+  // Finales ya ubicadas de las demás categorías, para repartir la franja de cierre
+  const otherFinals = (tournament.categories || [])
+    .filter((c) => c.bracket && !excludeCategoryIds.includes(c.id))
+    .map((c) => c.bracket[c.bracket.length - 1]?.[0]?.schedule)
+    .filter(Boolean)
+    .map((s) => ({ date: s.date, time: s.time, venue: courtVenueIndex(tournament, s.court) }));
+  return {
+    days, duration, courts: tournament.courtsCount || 4, busy, otherFinals,
+    venueOf: (court) => courtVenueIndex(tournament, court),
+    rest: tournament.bracketRestMinutes || DEFAULT_BRACKET_REST,
+    closingFrom: lastDay ? timeToMinutes(lastDay.to) - 180 : 0,
+  };
+}
+
+/* Lo propio de la llave de una categoría: sus partidos (con los byes marcados y lo que ya tiene
+   horario), la hora y sede de la final que eligió el organizador, su inicio, "La llave arranca" y
+   los partidos de grupos de quienes pueden llegar a cada lugar de la primera ronda */
+function bracketScheduleCategory(tournament, category) {
+  const { byes } = walkBracket(category.bracket);
+  const rounds = category.bracket.map((round, ri) => round.map((m, mi) => ({ schedule: m.schedule || null, bye: isByeMatch(byes, ri, mi) })));
+  const dates = tournament.playDates || [];
+  // "La llave arranca" solo cuenta si ese día sigue siendo de grupos
   const ownStartDay = dates.find((d) => d.date === category.bracketStart?.date);
   const ownStart = ownStartDay && !isBracketDay(ownStartDay) ? bracketStartPoint(category) : null;
-  const slotAllowed = (slot, ri) => slot.bracketDay || (ri === 0 && ownStart && slot.date === ownStart.date && slot.minutes >= ownStart.minutes);
-
-  const courtBusy = new Set();
-  collectAllSchedules(tournament).forEach((s) => courtBusy.add(`${s.date}|${s.time}|${s.court}`));
-
-  // Final más tardío conocido de cada ronda (tier), agregando lo que ya jugaron todas las categorías
-  const tierEnd = {};
-  Object.entries(collectBracketScheduleTiers(tournament)).forEach(([ri, schedules]) => {
-    schedules.forEach((s) => { tierEnd[ri] = laterPoint(tierEnd[ri], scheduleEndPoint(s, duration)); });
-  });
-
-  const rounds = category.bracket.map((round) => round.map((m) => ({ ...m })));
-  const { byes } = walkBracket(rounds);
-
-  // La llave de una categoría no arranca antes de su día y hora de inicio ni antes de que termine
-  // su último partido de grupos (por ejemplo, si la 6ta juega los grupos el domingo, sus octavos
-  // no pueden quedar el sábado)
-  let categoryFloor = categoryStartPoint(category);
-  (category.groups || []).forEach((g) => g.matches.forEach((m) => {
-    if (m.schedule) categoryFloor = laterPoint(categoryFloor, scheduleEndPoint(m.schedule, duration));
-  }));
-
-  // Sedes: una pareja que juega dos partidos corridos (sin un turno libre en el medio) los juega en
-  // la misma sede, porque si el primero se demora no llega a otra. En la llave todavía no se sabe
-  // quién gana, así que se mira el camino: el partido que alimenta a otro (y el siguiente, si ya
-  // tenía horario). En la ronda 1, los partidos de grupos de quienes pueden llegar a ese lugar.
-  const at = (s) => ({ date: s.date, t: timeToMinutes(s.time), venue: courtVenueIndex(tournament, s.court) });
+  const venueIndex = (tournament.venues || []).findIndex((v) => v.id === category.bracketFinal?.venueId);
+  const finalPref = category.bracketFinal ? { time: category.bracketFinal.time || null, venue: venueIndex >= 0 ? venueIndex : null } : null;
+  // Quiénes pueden llegar a un lugar de la primera ronda: la pareja ya definida, o cualquiera del
+  // grupo del lugar ("1° Grupo A"); y los horarios de sus partidos de grupos
   const groupsByName = Object.fromEntries((category.groups || []).map((g) => [g.name, g]));
-  const groupMatchesOf = {}; // pareja -> horarios de sus partidos de grupos
+  const groupMatchesOf = {};
   (category.groups || []).forEach((g) => g.matches.forEach((m) => {
     if (!m.schedule) return;
     // En los cruces de un grupo de 4 sin definir puede jugar cualquiera del grupo
-    const ids = m.pairA && m.pairB ? [m.pairA, m.pairB] : g.pairIds;
-    ids.forEach((pid) => (groupMatchesOf[pid] = groupMatchesOf[pid] || []).push(at(m.schedule)));
+    (m.pairA && m.pairB ? [m.pairA, m.pairB] : g.pairIds).forEach((pid) => (groupMatchesOf[pid] = groupMatchesOf[pid] || []).push(m.schedule));
   }));
-  // Quiénes pueden llegar a un partido de ronda 1: la pareja ya definida, o cualquiera del grupo
-  // del lugar ("1° Grupo A")
-  const round1Entrants = (m) => ["A", "B"].flatMap((side) => {
-    if (m[`pair${side}`]) return [m[`pair${side}`]];
-    const groupName = (m[`placeholder${side}`] || "").split("° ")[1];
-    return groupsByName[groupName]?.pairIds || [];
-  });
-  // Horarios vecinos de un partido de la llave en su camino
-  const neighbors = (ri, mi) => {
-    const list = [];
-    const entrantsOf = (m) => round1Entrants(m).flatMap((pid) => groupMatchesOf[pid] || []);
-    if (ri === 0) list.push(...entrantsOf(rounds[0][mi]));
-    else {
-      [2 * mi, 2 * mi + 1].forEach((fi) => {
-        const feeder = rounds[ri - 1][fi];
-        if (!feeder) return;
-        if (feeder.schedule && !isByeMatch(byes, ri - 1, fi)) list.push(at(feeder.schedule));
-        // Pasó directo (bye) en la ronda 1: llega desde sus partidos de grupos
-        else if (ri === 1) list.push(...entrantsOf(feeder));
-      });
-    }
-    const next = rounds[ri + 1]?.[Math.floor(mi / 2)];
-    if (next?.schedule) list.push(at(next.schedule));
-    return list;
+  const entrants = (mi) => {
+    const m = category.bracket[0][mi];
+    return ["A", "B"].flatMap((side) => {
+      if (m[`pair${side}`]) return [m[`pair${side}`]];
+      return groupsByName[(m[`placeholder${side}`] || "").split("° ")[1]]?.pairIds || [];
+    }).flatMap((pid) => groupMatchesOf[pid] || []);
   };
-  const corrido = (e, date, t) => {
-    if (e.date !== date) return false;
-    const gap = e.t < t ? t - (e.t + duration) : e.t - (t + duration);
-    return gap >= 0 && gap < duration;
-  };
+  return { rounds, finalPref, categoryStart: categoryStartPoint(category), ownStart, entrants };
+}
 
-  rounds.forEach((round, ri) => {
-    // El piso de esta ronda: el de la categoría y el final más tardío de CUALQUIER ronda anterior,
-    // de cualquier categoría
-    let floor = categoryFloor;
-    for (let t = 0; t < ri; t++) floor = laterPoint(floor, tierEnd[t]);
-    if (ri === 0) floor = laterPoint(floor, ownStart);
+/* Pone en la llave los horarios que armó scheduleKnockout(s). Los byes quedan sin horario. */
+function withBracketSchedules(category, schedules) {
+  return { ...category, bracket: category.bracket.map((round, ri) => round.map((m, mi) => ({ ...m, schedule: schedules[ri][mi] || null }))) };
+}
 
-    round.forEach((match, mi) => {
-      // Un bye no se juega: no ocupa horario ni cancha (ni empuja más tarde la ronda siguiente)
-      if (isByeMatch(byes, ri, mi)) { match.schedule = null; return; }
-      if (match.schedule) return; // ya tenía horario asignado a mano; no lo tocamos
-      const near = neighbors(ri, mi);
-      const startIdx = floor ? slots.findIndex((s) => s.date > floor.date || (s.date === floor.date && s.minutes >= floor.minutes)) : 0;
-      for (let i = Math.max(startIdx, 0); i < slots.length; i++) {
-        const slot = slots[i];
-        if (!slotAllowed(slot, ri)) continue;
-        const timeStr = minutesToTime(slot.minutes);
-        const freeCourts = [];
-        for (let c = 1; c <= courts; c++) {
-          const venue = courtVenueIndex(tournament, c);
-          if (!courtBusy.has(`${slot.date}|${timeStr}|${c}`) && near.every((e) => !corrido(e, slot.date, slot.minutes) || e.venue === venue)) freeCourts.push(c);
-        }
-        // Entre las posibles, mejor la sede donde se jugó el camino ese día
-        const freeCourt = freeCourts.find((c) => near.some((e) => e.date === slot.date && e.venue === courtVenueIndex(tournament, c))) ?? freeCourts[0] ?? null;
-        if (freeCourt != null) {
-          match.schedule = { date: slot.date, time: timeStr, court: freeCourt };
-          courtBusy.add(`${slot.date}|${timeStr}|${freeCourt}`);
-          const end = { date: slot.date, minutes: slot.minutes + duration };
-          tierEnd[ri] = laterPoint(tierEnd[ri], end);
-          break;
-        }
-      }
-    });
-  });
+/* Horarios de la llave de una categoría (al armarla, rearmarla o completarla con los clasificados),
+   alrededor de lo que ya está ocupado en el torneo: ver bracketSchedule.js */
+function autoScheduleBracket(tournament, category) {
+  if (!tournamentUsesSchedule(tournament) || (tournament.playDates || []).length === 0 || !category.bracket) return category;
+  const shared = bracketScheduleShared(tournament, [category.id]);
+  return withBracketSchedules(category, scheduleKnockout({ ...shared, ...bracketScheduleCategory(tournament, category) }));
+}
 
-  return { ...category, bracket: rounds };
+/* Horarios de las llaves de todas las categorías juntas, por etapas desde la final (ver
+   scheduleKnockouts): la usa "Rearmar horarios" */
+function autoScheduleAllBrackets(tournament) {
+  if (!tournamentUsesSchedule(tournament) || (tournament.playDates || []).length === 0) return tournament;
+  const withBracket = (tournament.categories || []).filter((c) => c.bracket && !isSuper8(c));
+  if (withBracket.length === 0) return tournament;
+  const shared = bracketScheduleShared(tournament, withBracket.map((c) => c.id));
+  const outs = scheduleKnockouts({ ...shared, categories: withBracket.map((c) => bracketScheduleCategory(tournament, c)) });
+  const byId = Object.fromEntries(withBracket.map((c, i) => [c.id, withBracketSchedules(c, outs[i])]));
+  return { ...tournament, categories: tournament.categories.map((c) => byId[c.id] || c) };
 }
 
 /* Aviso de lugar para las llaves de un Clásico (texto, o null si entran): cuántos partidos de llave
@@ -1479,7 +1421,10 @@ function bracketCapacityNotice(tournament) {
 
   const problems = [];
   if (needed > capacity) problems.push(`las llaves necesitan unos ${needed} partidos y en ${daysText} entran ${capacity}`);
-  if (rounds > times) problems.push(`hay llaves de ${rounds} rondas y ${daysText} tiene${bracketDays.length > 1 ? "n" : ""} ${times} horarios`);
+  // Las rondas van una después de otra con el descanso entre partidos de una pareja en el medio
+  const rest = Math.max(tournament.bracketRestMinutes || DEFAULT_BRACKET_REST, duration);
+  const timesNeeded = rounds > 0 ? (rounds - 1) * Math.ceil(rest / duration) + 1 : 0;
+  if (timesNeeded > times) problems.push(`hay llaves de ${rounds} rondas: con ${formatRest(rest)} entre ronda y ronda necesitan ${timesNeeded} horarios y ${daysText} tiene${bracketDays.length > 1 ? "n" : ""} ${times}`);
   if (problems.length === 0 && unscheduled === 0) return null;
   const head = problems.length > 0 ? `${problems.join("; ")}.` : `${unscheduled === 1 ? "1 partido" : `${unscheduled} partidos`} de la llave quedaron sin horario.`;
   return `${head.charAt(0).toUpperCase()}${head.slice(1)} Adelantá la primera ronda de alguna categoría con "La llave arranca" (en las fechas del torneo), o sumá horas o canchas a los días de llaves.`;
@@ -3180,6 +3125,19 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
             className="w-24 px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
           />
         </div>
+        {classic && (
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Llave: entre partidos de una pareja</label>
+            <select
+              value={tournament.bracketRestMinutes || DEFAULT_BRACKET_REST}
+              onChange={(e) => onChange({ ...tournament, bracketRestMinutes: Number(e.target.value) })}
+              title="Tiempo mínimo entre que empieza un partido de llave de una pareja y empieza el siguiente (también desde su último partido de grupos)"
+              className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+            >
+              {BRACKET_REST_OPTIONS.map((min) => <option key={min} value={min}>{formatRest(min)}{min === DEFAULT_BRACKET_REST ? " (recomendado)" : ""}</option>)}
+            </select>
+          </div>
+        )}
       </div>
       {classic && <VenuesField tournament={tournament} onChange={onChange} />}
       <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Día y horario en que se juega" : "Fechas y horario en que se juega cada una"}</label>
@@ -3317,12 +3275,28 @@ function CategoryStartsEditor({ tournament, onChange }) {
   };
   // "La llave arranca" solo tiene sentido si hay días que no son de llaves (si no, ya va con las demás)
   const showBracketStart = dates.some((d) => !isBracketDay(d));
+  // Final: en el último día de llaves, a una hora de la grilla y en una sede (o automática)
+  const bracketDays = dates.filter(isBracketDay).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const lastBracketDay = bracketDays[bracketDays.length - 1];
+  const finalTimes = lastBracketDay ? dayTimeSlots(lastBracketDay, tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION) : [];
+  const venues = tournament.venues || [];
+  const setFinal = (categoryId, patch) => {
+    onChange({
+      ...tournament,
+      categories: tournament.categories.map((c) => {
+        if (c.id !== categoryId) return c;
+        const final = { ...(c.bracketFinal || {}), ...patch };
+        return { ...c, bracketFinal: final.time || final.venueId ? final : null };
+      }),
+    });
+  };
   return (
     <div className="border-t border-teal-800 pt-3 mt-4">
-      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría (opcional)</label>
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría y su final (opcional)</label>
       <p className="text-[11px] text-teal-600 mb-2" style={F.body}>
         Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.
         {showBracketStart && " \"La llave arranca\": la primera ronda de esa llave se puede jugar ese día desde esa hora, aunque sea un día de grupos; desde la segunda ronda, todas las llaves van a los días de llaves."}
+        {lastBracketDay && ` Final: hora${venues.length > 0 ? " y sede" : ""} de la final (${formatDateShort(lastBracketDay.date)}); las semis van en la misma sede, antes. En automática, las finales se reparten en las últimas 3 horas del día.`}
       </p>
       <div className="space-y-3">
         {tournament.categories.map((c) => (
@@ -3343,6 +3317,21 @@ function CategoryStartsEditor({ tournament, onChange }) {
                   {dates.filter((d) => !isBracketDay(d)).map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
                 </select>
                 <input type="time" lang="es-AR" value={c.bracketStart?.time || ""} disabled={!c.bracketStart?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null }, "bracketStart")} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+              </span>
+            )}
+            {lastBracketDay && !isSuper8(c) && (
+              <span className="flex items-center gap-2">
+                <span className="text-xs text-teal-400">Final</span>
+                <select value={c.bracketFinal?.time || ""} onChange={(e) => setFinal(c.id, { time: e.target.value || null })} aria-label={`Hora de la final de ${c.name}`} className="px-2 py-1.5 rounded border text-sm" style={input}>
+                  <option value="">Automática</option>
+                  {finalTimes.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                {venues.length > 0 && (
+                  <select value={c.bracketFinal?.venueId || ""} onChange={(e) => setFinal(c.id, { venueId: e.target.value || null })} aria-label={`Sede de la final de ${c.name}`} className="px-2 py-1.5 rounded border text-sm" style={input}>
+                    <option value="">Sede automática</option>
+                    {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  </select>
+                )}
               </span>
             )}
           </div>
