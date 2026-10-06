@@ -510,6 +510,21 @@ function courtName(t, court, short = false) {
   return `${label}${court}`;
 }
 
+/* "Cada grupo en una sola sede": solo tiene sentido con dos sedes o más. Viene activada (como se
+   juega en los circuitos grandes) y el organizador la puede apagar en Horarios. */
+function groupsInOneVenue(t) {
+  return (t?.venues || []).length >= 2 && t.groupsOneVenue !== false;
+}
+
+/* Grupos que quedaron repartidos en más de una sede (con "cada grupo en una sola sede" activada no
+   entraban en una sola): "6TA Grupo B" */
+function groupsSplitAcrossVenues(t) {
+  if (!groupsInOneVenue(t)) return [];
+  return (t.categories || []).flatMap((c) => (c.groups || [])
+    .filter((g) => new Set(g.matches.filter((m) => m.schedule).map((m) => courtVenueIndex(t, m.schedule.court))).size > 1)
+    .map((g) => `${c.name} ${g.name}`));
+}
+
 /* Sede de una cancha (su posición en la lista de sedes del torneo); sin sedes, todas son la misma */
 function courtVenueIndex(t, court) {
   let offset = 0;
@@ -1818,6 +1833,18 @@ function autoSchedule(tournament) {
   // Entre las canchas posibles, mejor una sede donde esas parejas ya juegan ese día
   const playsAtVenue = (ids, date, venue) => ids.some((pid) => (pairDay[`${date}|${pid}`] || []).some((e) => e.venue === venue));
 
+  // "Cada grupo en una sola sede": el primer partido que se ubica de un grupo define su sede (y su
+  // cancha, que se prefiere para los demás). Los grupos nuevos van a la sede con menos grupos.
+  const oneVenue = groupsInOneVenue(tournament);
+  const groupVenue = {}, groupCourt = {}, venueGroups = {};
+  const setGroupPlace = (key, court) => {
+    if (groupVenue[key] != null) return;
+    groupVenue[key] = courtVenueIndex(tournament, court);
+    groupCourt[key] = court;
+    venueGroups[groupVenue[key]] = (venueGroups[groupVenue[key]] || 0) + 1;
+  };
+  all.filter((m) => m.schedule && m.location.type === "group").forEach((m) => setGroupPlace(`${m.categoryId}:${m.location.groupId}`, m.schedule.court));
+
   let updated = tournament;
 
   // En un grupo de 4, el cruce de ganadores y el de perdedores no pueden arrancar hasta que
@@ -1875,33 +1902,45 @@ function autoSchedule(tournament) {
 
     const isPlaceholder = !m.pairA || !m.pairB;
     const [availA, availB] = sidesAvailability(m);
-    let placed = null;
-    for (const date of dates) {
-      if (floor && date < floor.date) continue;
-      const aSlot = availA.find((a) => a.date === date);
-      const bSlot = availB.find((a) => a.date === date);
-      if (!aSlot || !bSlot) continue;
-      const start = Math.max(timeToMinutes(aSlot.from), timeToMinutes(bSlot.from));
-      const end = Math.min(timeToMinutes(aSlot.to), timeToMinutes(bSlot.to));
-      for (let t = start; t + duration <= end; t += duration) {
-        if (floor && date === floor.date && t < floor.minutes) continue;
-        const time = minutesToTime(t);
-        // Para el cruce de ganadores/perdedores todavía no sabemos qué pareja concreta juega,
-        // así que solo evitamos pisar otra cancha (no hay pareja puntual que chequear todavía).
-        if (!isPlaceholder && participants(m).some((pid) => pairBusy.has(`${date}|${time}|${pid}`))) continue;
-        const ids = venueParticipants(m);
-        const freeCourts = [];
-        for (let c = 1; c <= courts; c++) {
-          if (!courtBusy.has(`${date}|${time}|${c}`) && venueAllowed(ids, date, t, courtVenueIndex(tournament, c))) freeCourts.push(c);
+    // Con "cada grupo en una sola sede", primero se busca solo en la sede del grupo; si ahí no entra,
+    // en cualquiera (y el grupo queda repartido: la pestaña Horarios lo avisa)
+    const ownVenue = oneVenue ? groupVenue[groupKey] : null;
+    const findSlot = (onlyVenue) => {
+      for (const date of dates) {
+        if (floor && date < floor.date) continue;
+        const aSlot = availA.find((a) => a.date === date);
+        const bSlot = availB.find((a) => a.date === date);
+        if (!aSlot || !bSlot) continue;
+        const start = Math.max(timeToMinutes(aSlot.from), timeToMinutes(bSlot.from));
+        const end = Math.min(timeToMinutes(aSlot.to), timeToMinutes(bSlot.to));
+        for (let t = start; t + duration <= end; t += duration) {
+          if (floor && date === floor.date && t < floor.minutes) continue;
+          const time = minutesToTime(t);
+          // Para el cruce de ganadores/perdedores todavía no sabemos qué pareja concreta juega,
+          // así que solo evitamos pisar otra cancha (no hay pareja puntual que chequear todavía).
+          if (!isPlaceholder && participants(m).some((pid) => pairBusy.has(`${date}|${time}|${pid}`))) continue;
+          const ids = venueParticipants(m);
+          const freeCourts = [];
+          for (let c = 1; c <= courts; c++) {
+            const venue = courtVenueIndex(tournament, c);
+            if (onlyVenue != null && venue !== onlyVenue) continue;
+            if (!courtBusy.has(`${date}|${time}|${c}`) && venueAllowed(ids, date, t, venue)) freeCourts.push(c);
+          }
+          if (freeCourts.length === 0) continue;
+          const sameCourt = oneVenue ? freeCourts.find((c) => c === groupCourt[groupKey]) : undefined;
+          // Grupo sin sede todavía: la sede con menos grupos entre las que tienen lugar
+          const leastUsed = oneVenue && ownVenue == null
+            ? [...freeCourts].sort((a, b) => (venueGroups[courtVenueIndex(tournament, a)] || 0) - (venueGroups[courtVenueIndex(tournament, b)] || 0))[0]
+            : undefined;
+          const freeCourt = sameCourt ?? freeCourts.find((c) => playsAtVenue(ids, date, courtVenueIndex(tournament, c))) ?? leastUsed ?? freeCourts[0];
+          return { date, time, court: freeCourt };
         }
-        if (freeCourts.length === 0) continue;
-        const freeCourt = freeCourts.find((c) => playsAtVenue(ids, date, courtVenueIndex(tournament, c))) ?? freeCourts[0];
-        placed = { date, time, court: freeCourt };
-        break;
       }
-      if (placed) break;
-    }
+      return null;
+    };
+    const placed = (ownVenue != null ? findSlot(ownVenue) : null) || findSlot(null);
     if (placed) {
+      if (oneVenue) setGroupPlace(groupKey, placed.court);
       courtBusy.add(`${placed.date}|${placed.time}|${placed.court}`);
       if (!isPlaceholder) participants(m).forEach((pid) => pairBusy.add(`${placed.date}|${placed.time}|${pid}`));
       addPairDay(placed.date, placed.time, placed.court, venueParticipants(m));
@@ -3140,6 +3179,15 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
         )}
       </div>
       {classic && <VenuesField tournament={tournament} onChange={onChange} />}
+      {classic && venues.length >= 2 && (
+        <label className="flex items-start gap-2 text-sm mb-4 cursor-pointer" style={F.body}>
+          <input type="checkbox" className="mt-1" checked={groupsInOneVenue(tournament)} onChange={(e) => onChange({ ...tournament, groupsOneVenue: e.target.checked })} />
+          <span>
+            Cada grupo juega en una sola sede
+            <span className="block text-[11px] text-teal-600">Todos los partidos de un grupo en la misma sede (y si se puede, en la misma cancha). Si alguno no entra ahí, va a otra sede y te avisamos. Se aplica al generar o rearmar los horarios.</span>
+          </span>
+        </label>
+      )}
       <label className="block text-xs text-teal-400 mb-1" style={F.body}>{singleDay ? "Día y horario en que se juega" : "Fechas y horario en que se juega cada una"}</label>
       {classic && dates.length > 0 && (
         <p className="text-[11px] text-teal-600 mb-2" style={F.body}>Grupos: ahí se arman los horarios de los grupos y la inscripción pide disponibilidad. Llaves: ahí se juega la llave. Ambos: las dos cosas.</p>
@@ -3979,6 +4027,7 @@ function ScheduleAdminView({ tournament, update }) {
   const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
   const offAvailabilityCount = Object.keys(offAvailability).length;
   const capacityNotice = bracketCapacityNotice(tournament);
+  const splitGroups = groupsSplitAcrossVenues(tournament);
   const sameDayNotices = sameDayBracketNotices(tournament);
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
@@ -4069,6 +4118,12 @@ function ScheduleAdminView({ tournament, update }) {
           {capacityNotice && (
             <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
               ⚠ {capacityNotice}
+            </div>
+          )}
+
+          {splitGroups.length > 0 && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
+              ⚠ {splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba{splitGroups.length === 1 ? "" : "n"} en una sola: {splitGroups.join(", ")}. Podés moverlos a mano en la planilla.
             </div>
           )}
 
