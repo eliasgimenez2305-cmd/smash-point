@@ -3523,6 +3523,54 @@ function VenueDaysField({ venue, dates, onChange, onWidenDay }) {
   );
 }
 
+/* Pestaña Llaves, arriba de todo: el estado de la llave de cada categoría (se toca para verla) y
+   "Publicar todas" para las que siguen en borrador */
+function BracketsOverview({ tournament, activeId, onSelect, onUpdateTournament }) {
+  const format = tournament.matchFormat;
+  const cats = tournament.categories.filter((c) => !isSuper8(c));
+  const status = (c) => {
+    if (!c.bracket) return { text: "Sin armar", color: "#64748b" };
+    const pending = c.groups.filter((g) => !(g.matches.length > 0 && g.matches.every((m) => matchIsPlayed(m, format)))).length;
+    const wait = c.bracketIsSkeleton ? ` · faltan ${pending} grupo${pending === 1 ? "" : "s"}` : "";
+    if (!c.bracketPublished) return { text: `Borrador${wait}`, color: "#a78bfa" };
+    const { rounds, winners, byes } = walkBracket(c.bracket, format);
+    const champion = winners[rounds.length - 1]?.[0];
+    if (champion) return { text: `🏆 ${categoryEntitiesById(c)[champion]?.name || "Campeón"}`, color: "#9fe022" };
+    const played = rounds.flatMap((r, ri) => r.filter((m, mi) => !isByeMatch(byes, ri, mi)));
+    const done = played.filter((m) => matchIsPlayed(m, format)).length;
+    return { text: done > 0 ? `En juego · ${done}/${played.length} partidos` : `Publicada${wait}`, color: done > 0 ? "#fb923c" : "#38bdf8" };
+  };
+  const drafts = cats.filter((c) => c.bracket && !c.bracketPublished);
+  const publishAll = () => onUpdateTournament({ ...tournament, categories: tournament.categories.map((c) => (drafts.includes(c) ? { ...c, bracketPublished: true } : c)) });
+  return (
+    <div className="mb-5" style={F.body}>
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+        <p className="text-sm uppercase tracking-wide text-teal-400">Llaves del torneo</p>
+        {drafts.length > 0 && (
+          <button type="button" onClick={publishAll} className="px-3 py-1.5 rounded font-semibold text-xs" style={{ backgroundColor: "#a78bfa", color: "#14181f" }}>
+            Publicar todas ({drafts.length})
+          </button>
+        )}
+      </div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(11rem, 1fr))" }}>
+        {cats.map((c) => {
+          const ci = tournament.categories.indexOf(c);
+          const color = GROUP_COLORS[ci % GROUP_COLORS.length];
+          const st = status(c);
+          const on = c.id === activeId;
+          return (
+            <button key={c.id} type="button" onClick={() => onSelect(c.id)} className="text-left rounded-lg px-3 py-2 border transition"
+              style={{ borderColor: on ? color : color + "40", backgroundColor: on ? color + "1f" : "transparent" }}>
+              <span className="block text-sm font-semibold" style={{ color }}>{c.name}</span>
+              <span className="block text-[11px] truncate" style={{ color: st.color }}>{st.text}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* Pestaña Llaves, arriba de cada categoría: "La llave arranca", hora y sede de la final y publicar.
    Si la llave todavía no tiene resultados, al cambiar el arranque o la final sus horarios se
    vuelven a armar solos; si ya tiene, se guarda el cambio y se avisa que hay que rearmar. */
@@ -8023,6 +8071,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   );
 
   const [editingCrosses, setEditingCrosses] = useState(false);
+  // Partido de la llave con la ventanita de resultado abierta (se busca por id para verlo al día)
+  const [resultMatchInfo, setResultMatch] = useState(null);
   // "Reiniciar llave" borra la llave entera, con sus resultados y horarios: siempre se confirma
   const [confirmingBracketReset, setConfirmingBracketReset] = useState(false);
   const bracketResultsCount = (category.bracket || []).flat().filter(matchHasScore).length;
@@ -8433,6 +8483,18 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
               )}
             </div>
           )}
+          {category.bracket && resultMatchInfo && (() => {
+            const live = walkBracket(category.bracket, format).rounds.flat().find((x) => x.id === resultMatchInfo.id);
+            return live && live.pairA && live.pairB && (
+              <MatchResultModal
+                m={{ ...resultMatchInfo, ...live }} pairsById={pairsById} format={format}
+                onSetScore={(setIndex, side, value) => setBracketSetScore(live.id, setIndex, side, value)}
+                onWalkover={(pairId) => setBracketWalkover(live.id, pairId)}
+                onRetired={(pairId) => setBracketRetired(live.id, pairId)}
+                onClose={() => setResultMatch(null)}
+              />
+            );
+          })()}
           {category.bracket && (() => {
             const walked = walkBracket(category.bracket, format);
             const nums = categoryMatchNumbers(category);
@@ -8475,25 +8537,13 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                             </>
                           );
                         })()}
+                        {/* El resultado se carga en la misma ventanita que en Horarios y En cancha */}
                         {editable && (
-                          <>
-                            {!m.walkover && (
-                              <MatchSetsEditor
-                                sets={m.sets}
-                                format={format}
-                                partial={!!m.retired}
-                                onSetScore={(setIndex, side, value) => setBracketSetScore(m.id, setIndex, side, value)}
-                              />
-                            )}
-                            <MatchOutcomeButtons
-                              m={m}
-                              nameA={pairsById[m.pairA]?.name || "pareja 1"}
-                              nameB={pairsById[m.pairB]?.name || "pareja 2"}
-                              onWalkover={(pairId) => setBracketWalkover(m.id, pairId)}
-                              onRetired={(pairId) => setBracketRetired(m.id, pairId)}
-                              className="text-[10px]"
-                            />
-                          </>
+                          <button type="button" onClick={() => setResultMatch({ ...m, number: nums.get(m.id), categoryName: category.name, label: roundStageLabel(total, ri) })} className="text-xs underline text-teal-300 hover:text-lime-400">
+                            {matchHasScore(m)
+                              ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
+                              : "+ Resultado"}
+                          </button>
                         )}
                       </div>
                     );
@@ -8859,7 +8909,9 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
             </p>
           ) : (
             <>
-              {tournament.categories.length > 1 && <CategoryTabs categories={tournament.categories} activeId={category?.id} onSelect={setCategoryId} />}
+              {view === "llaves"
+                ? <BracketsOverview tournament={tournament} activeId={category?.id} onSelect={setCategoryId} onUpdateTournament={update} />
+                : tournament.categories.length > 1 && <CategoryTabs categories={tournament.categories} activeId={category?.id} onSelect={setCategoryId} />}
               {category && (
                 <CategoryAdminView
                   key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament}
