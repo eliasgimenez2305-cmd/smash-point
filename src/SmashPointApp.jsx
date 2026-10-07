@@ -4090,6 +4090,50 @@ function FixtureImagesModal({ tournament, matches, pairsById, onClose }) {
   );
 }
 
+/* Avisos de la pestaña Horarios (y de la tira de resumen del torneo): [{ key, text, day?, categoryId? }],
+   donde day / categoryId dicen a dónde lleva "Ver". También devuelve los partidos de grupos puestos en
+   un horario en que alguna de sus parejas dijo que no puede: { [key]: [pairId] }. */
+function scheduleAlerts(tournament, matches) {
+  const scheduled = matches.filter((m) => m.schedule);
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
+  const courtsCount = tournament.courtsCount || 4;
+  const playDates = tournament.playDates || [];
+  // Partidos con un horario que ya no entra en la grilla (por ejemplo porque cambió el horario de
+  // arranque, la duración o la cantidad de canchas): no se ven en ninguna celda
+  const gridSlots = new Set();
+  playDates.forEach((d) => {
+    dayTimeSlots(d, duration).forEach((time) => {
+      for (let c = 1; c <= courtsCount; c++) gridSlots.add(`${d.date}|${time}|${c}`);
+    });
+  });
+  const offGrid = scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
+  // Partidos en una sede que ese día (o a esa hora) no se usa
+  const atClosed = matchesAtClosedCourts(tournament, scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso"));
+  // Partidos de grupos puestos (a mano) en un horario en que alguna de las parejas no puede
+  const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
+  const offAvailabilityCount = Object.keys(offAvailability).length;
+  const capacityNotice = bracketCapacityNotice(tournament);
+  const splitGroups = groupsSplitAcrossVenues(tournament);
+  const sameDayNotices = sameDayBracketNotices(tournament);
+
+  const firstOf = (list) => list.slice().sort(compareBySchedule)[0];
+  const alerts = [];
+  if (offGrid.length > 0) alerts.push({ key: "offgrid", text: `${offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.` });
+  if (atClosed.length > 0) alerts.push({ key: "closed", day: firstOf(atClosed).schedule.date, text: `${atClosed.length === 1 ? "Hay 1 partido" : `Hay ${atClosed.length} partidos`} en una sede que ese día o a esa hora no se usa (${[...new Set(atClosed.map((m) => (tournament.venues || [])[courtVenueIndex(tournament, m.schedule.court)]?.name))].join(", ")}). Movelos a mano o tocá "Rearmar horarios".` });
+  if (capacityNotice) alerts.push({ key: "capacity", text: capacityNotice });
+  // "6TA FEM Grupo B": la categoría es la de nombre más largo que coincide (no "6TA")
+  const splitCategory = splitGroups.length > 0
+    ? tournament.categories.filter((c) => splitGroups[0].startsWith(`${c.name} `)).sort((a, b) => b.name.length - a.name.length)[0]
+    : null;
+  if (splitGroups.length > 0) alerts.push({ key: "split", categoryId: splitCategory?.id, text: `${splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba${splitGroups.length === 1 ? "" : "n"} en una sola: ${splitGroups.join(", ")}. Podés moverlos a mano en la planilla.` });
+  sameDayNotices.forEach((text) => alerts.push({ key: `sameday-${text}`, text }));
+  if (offAvailabilityCount > 0) {
+    const first = firstOf(scheduled.filter((m) => offAvailability[m.key]));
+    alerts.push({ key: "avail", day: first.schedule.date, categoryId: first.categoryId, text: `${offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.` });
+  }
+  return { alerts, offAvailability };
+}
+
 function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [notice, setNotice] = useState(null);
   const [gridOpen, setGridOpen] = useState(false);
@@ -4108,24 +4152,10 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [confirmingReschedule, setConfirmingReschedule] = useState(false);
   const reschedule = () => { update(rescheduleTournament(tournament)); setConfirmingReschedule(false); setNotice(null); };
 
-  // Partidos con un horario que ya no entra en la grilla (por ejemplo porque cambió el horario de
-  // arranque, la duración o la cantidad de canchas): no se ven en ninguna celda
-  const gridSlots = new Set();
-  playDates.forEach((d) => {
-    dayTimeSlots(d, duration).forEach((time) => {
-      for (let c = 1; c <= courtsCount; c++) gridSlots.add(`${d.date}|${time}|${c}`);
-    });
-  });
-  const offGrid = scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
-  // Partidos en una sede que ese día (o a esa hora) no se usa
-  const atClosed = matchesAtClosedCourts(tournament, scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso"));
   const closed = closedCourtSlots(tournament);
-  // Partidos de grupos puestos (a mano) en un horario en que alguna de las parejas no puede
-  const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
+  // Avisos (ver scheduleAlerts) y partidos de grupos fuera de la disponibilidad de una pareja
+  const { alerts, offAvailability } = useMemo(() => scheduleAlerts(tournament, matches), [tournament, matches]);
   const offAvailabilityCount = Object.keys(offAvailability).length;
-  const capacityNotice = bracketCapacityNotice(tournament);
-  const splitGroups = groupsSplitAcrossVenues(tournament);
-  const sameDayNotices = sameDayBracketNotices(tournament);
 
   const draftCategories = tournament.categories.filter((c) => c.bracket && !c.bracketPublished && (c.bracket || []).some((round) => round.some((m) => m.pairA && m.pairB && m.schedule)));
 
@@ -4159,22 +4189,6 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
     if (m) clearSchedule(m);
   };
 
-  // Avisos, todos juntos en un recuadro plegable. day/categoryId: a dónde lleva "Ver"
-  const firstOf = (list) => list.slice().sort(compareBySchedule)[0];
-  const alerts = [];
-  if (offGrid.length > 0) alerts.push({ key: "offgrid", text: `${offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.` });
-  if (atClosed.length > 0) alerts.push({ key: "closed", day: firstOf(atClosed).schedule.date, text: `${atClosed.length === 1 ? "Hay 1 partido" : `Hay ${atClosed.length} partidos`} en una sede que ese día o a esa hora no se usa (${[...new Set(atClosed.map((m) => (tournament.venues || [])[courtVenueIndex(tournament, m.schedule.court)]?.name))].join(", ")}). Movelos a mano o tocá "Rearmar horarios".` });
-  if (capacityNotice) alerts.push({ key: "capacity", text: capacityNotice });
-  // "6TA FEM Grupo B": la categoría es la de nombre más largo que coincide (no "6TA")
-  const splitCategory = splitGroups.length > 0
-    ? tournament.categories.filter((c) => splitGroups[0].startsWith(`${c.name} `)).sort((a, b) => b.name.length - a.name.length)[0]
-    : null;
-  if (splitGroups.length > 0) alerts.push({ key: "split", categoryId: splitCategory?.id, text: `${splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba${splitGroups.length === 1 ? "" : "n"} en una sola: ${splitGroups.join(", ")}. Podés moverlos a mano en la planilla.` });
-  sameDayNotices.forEach((text) => alerts.push({ key: `sameday-${text}`, text }));
-  if (offAvailabilityCount > 0) {
-    const first = firstOf(scheduled.filter((m) => offAvailability[m.key]));
-    alerts.push({ key: "avail", day: first.schedule.date, categoryId: first.categoryId, text: `${offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.` });
-  }
   const [alertsOpen, setAlertsOpen] = useState(false);
 
   // Un día a la vez (arranca hoy si es un día del torneo) y filtros por sede y por categoría
@@ -8530,6 +8544,43 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
   );
 }
 
+/* Avance del torneo para la tira de resumen y las marcas de las pestañas. Cada parte:
+   { tab, label, value, state } con state "ok" (listo), "warn" (hay algo para mirar), "partial"
+   (a medias) o "empty" (falta). El Súper 8 no tiene grupos, horarios ni llave: solo sus partidos. */
+function organizerProgress(tournament, pendingCount, alertsCount) {
+  const cats = tournament.categories || [];
+  const pairs = cats.reduce((sum, c) => sum + c.pairs.length, 0);
+  const cupos = cats.map(categoryCupo);
+  const cupoTotal = cupos.every((x) => x != null) ? cupos.reduce((a, b) => a + b, 0) : null;
+  const of = (done, total) => (total > 0 && done >= total ? "ok" : done > 0 ? "partial" : "empty");
+  const parts = [{
+    tab: "inscripciones", label: "Inscripciones",
+    value: `${pairs}${cupoTotal != null ? `/${cupoTotal}` : ""}${pendingCount > 0 ? ` · ${pendingCount} nueva${pendingCount === 1 ? "" : "s"}` : ""}`,
+    state: pendingCount > 0 ? "warn" : cupoTotal != null ? of(pairs, cupoTotal) : pairs > 0 ? "ok" : "empty",
+  }];
+  if (!tournamentUsesSchedule(tournament)) {
+    const generated = cats.filter((c) => c.groups.length > 0).length;
+    parts.push({ tab: "partidos", label: "Partidos", value: `${generated}/${cats.length}`, state: of(generated, cats.length) });
+    return parts;
+  }
+  const withGroups = cats.filter((c) => c.groups.length > 0).length;
+  const matches = collectScheduleableMatches(tournament);
+  const scheduled = matches.filter((m) => m.schedule).length;
+  const withBracket = cats.filter((c) => c.bracket && !c.bracketIsSkeleton).length;
+  parts.push(
+    { tab: "grupos", label: "Grupos", value: `${withGroups}/${cats.length}`, state: of(withGroups, cats.length) },
+    { tab: "horarios", label: "Horarios", value: `${scheduled}/${matches.length}`, state: alertsCount > 0 ? "warn" : of(scheduled, matches.length) },
+    { tab: "llaves", label: "Llaves", value: `${withBracket}/${cats.length}`, state: of(withBracket, cats.length) },
+  );
+  return parts;
+}
+
+/* Marca del estado de una parte del torneo: ✓ listo, ⚠ para mirar, ◐ a medias, ○ falta */
+function ProgressMark({ state }) {
+  const [mark, color] = { ok: ["✓", "#9fe022"], warn: ["⚠", "#fbbf24"], partial: ["◐", "#38bdf8"], empty: ["○", "#64748b"] }[state] || ["", ""];
+  return <span aria-hidden="true" className="font-bold" style={{ color }}>{mark}</span>;
+}
+
 /* Configuración: las categorías del torneo con su nombre y su cupo (vacío = sin límite; el Súper 8
    es siempre de 8), para agregar, renombrar y borrar en un solo lugar */
 function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
@@ -8610,6 +8661,11 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
     return usesSchedule ? "horarios" : "inscripciones";
   });
   const view = tabs.some(([key]) => key === chosenView) ? chosenView : "config";
+  // Avance y avisos para la tira de resumen y las marcas ✓ / ⚠ de las pestañas
+  const alertsCount = useMemo(() => (usesSchedule ? scheduleAlerts(tournament, collectScheduleableMatches(tournament)).alerts.length : 0), [tournament, usesSchedule]);
+  const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
+  const configReady = tournament.categories.length > 0 && (!usesSchedule || (tournament.playDates || []).length > 0);
+  const tabState = { config: configReady ? "ok" : "empty", ...Object.fromEntries(progress.map((p) => [p.tab, p.state])) };
   const nextTab = tabs[tabs.findIndex(([key]) => key === view) + 1];
   const goTo = (key) => { setView(key); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
@@ -8660,23 +8716,20 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
             {Object.values(STATUS).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
-        {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
-        {tournamentType(tournament) !== "super8" && tournament.categories.length > 0 && (
-          <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={F.body}>
-            <span className="shrink-0 self-center text-xs text-teal-400">Inscriptas:</span>
-            {tournament.categories.map((c) => {
-              const cupo = categoryCupo(c);
-              const full = cupo != null && c.pairs.length >= cupo;
-              return (
-                <span key={c.id} className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${full ? "#fb923c" : BRAND.cyan}55`, color: full ? "#fdba74" : BRAND.ink }}>
-                  {c.name} · <span className="font-semibold">{c.pairs.length}{cupo != null ? `/${cupo}` : ""}</span> pareja{c.pairs.length !== 1 ? "s" : ""}
-                </span>
-              );
-            })}
-            {tournament.categories.length > 1 && (
-              <span className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime + "22", color: BRAND.lime }}>
-                Total · {tournament.categories.reduce((sum, c) => sum + c.pairs.length, 0)}
-              </span>
+        {/* Resumen del avance: cada parte lleva a su pestaña (las anotadas por categoría están en Configuración) */}
+        {tournament.categories.length > 0 && (
+          <div className="flex gap-2 mb-4 flex-wrap" style={F.body}>
+            {progress.map((p) => (
+              <button key={p.tab} type="button" onClick={() => goTo(p.tab)} className="px-3 py-1.5 rounded-lg text-xs border flex items-center gap-1.5 hover:border-teal-400"
+                style={{ borderColor: p.state === "warn" ? "#fbbf2466" : "#134e4a", color: "#cbd5e1" }}>
+                <ProgressMark state={p.state} />
+                {p.label} <span className="font-semibold">{p.value}</span>
+              </button>
+            ))}
+            {alertsCount > 0 && (
+              <button type="button" onClick={() => goTo("horarios")} className="px-3 py-1.5 rounded-lg text-xs border font-semibold" style={{ borderColor: "#fbbf2466", color: "#fbbf24" }}>
+                ⚠ {alertsCount === 1 ? "1 aviso" : `${alertsCount} avisos`}
+              </button>
             )}
           </div>
         )}
@@ -8690,6 +8743,7 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
               style={F.body}
             >
               {label}
+              {(tabState[key] === "ok" || tabState[key] === "warn") && <ProgressMark state={tabState[key]} />}
               {key === "inscripciones" && pendingCount > 0 && (
                 <span className="px-1.5 rounded-full text-[10px] font-bold" style={{ backgroundColor: "#fb923c", color: "#14181f" }}>{pendingCount}</span>
               )}
