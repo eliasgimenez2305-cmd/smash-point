@@ -7,6 +7,7 @@ import { findNameDuplicates, splitPair } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament } from "./merge.js";
+import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -525,16 +526,7 @@ function groupsSplitAcrossVenues(t) {
     .map((g) => `${c.name} ${g.name}`));
 }
 
-/* Sede de una cancha (su posición en la lista de sedes del torneo); sin sedes, todas son la misma */
-function courtVenueIndex(t, court) {
-  let offset = 0;
-  const venues = t?.venues || [];
-  for (let i = 0; i < venues.length; i++) {
-    if (court <= offset + venues[i].courts) return i;
-    offset += venues[i].courts;
-  }
-  return 0;
-}
+/* Sede de cada cancha y días y horarios en que se usa cada sede: ver venueDays.js */
 
 /* Lista de Complejos (la que carga el administrador), para elegir las sedes de un torneo y tomar
    su logo en la imagen del fixture sin pasarla de componente en componente */
@@ -1340,7 +1332,8 @@ function bracketScheduleShared(tournament, excludeCategoryIds = []) {
   const days = (tournament.playDates || []).map((d) => ({ date: d.date, from: d.from, to: d.to, bracket: isBracketDay(d) }));
   const bracketDays = [...days].filter((d) => d.bracket).sort((a, b) => (a.date < b.date ? -1 : 1));
   const lastDay = bracketDays[bracketDays.length - 1];
-  const busy = new Set();
+  // Ocupado: lo que ya tiene horario y las canchas de sedes que no juegan ese día o a esa hora
+  const busy = closedCourtSlots(tournament);
   collectAllSchedules(tournament).forEach((s) => busy.add(`${s.date}|${s.time}|${s.court}`));
   // Finales ya ubicadas de las demás categorías, para repartir la franja de cierre
   const otherFinals = (tournament.categories || [])
@@ -1452,8 +1445,9 @@ function bracketCapacityNotice(tournament) {
   const bracketDays = dates.filter(isBracketDay);
   const daysText = bracketDays.map((d) => formatDateShort(d.date)).join(" y ");
   if (bracketDays.length === 0) return `No hay ningún día de llaves: marcá en qué día se juegan (Grupos / Llaves / Ambos, en las fechas del torneo).`;
-  // Turnos libres en los días de llaves: los ocupados por partidos de grupos (en un día "Ambos") no cuentan
-  const groupBusy = new Set();
+  // Turnos libres en los días de llaves: los ocupados por partidos de grupos (en un día "Ambos") y
+  // las canchas de sedes que no juegan ese día o a esa hora no cuentan
+  const groupBusy = closedCourtSlots(tournament);
   (tournament.categories || []).forEach((c) => (c.groups || []).forEach((g) => g.matches.forEach((m) => {
     if (m.schedule) groupBusy.add(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`);
   })));
@@ -1545,12 +1539,14 @@ function matchesAtSlot(scheduledMatches, date, time, court, excludeKey) {
 }
 
 /* Busca el próximo horario libre en la MISMA cancha y fecha, a partir de un horario dado (inclusive),
-   respetando el rango horario de esa fecha. Devuelve null si no queda ningún hueco libre ese día. */
-function findNextFreeSlotOnCourt(scheduledMatches, dateInfo, court, fromTime, duration, excludeKey) {
+   respetando el rango horario de esa fecha (y, con closed, salteando los turnos en que su sede no se
+   usa). Devuelve null si no queda ningún hueco libre ese día. */
+function findNextFreeSlotOnCourt(scheduledMatches, dateInfo, court, fromTime, duration, excludeKey, closed = new Set()) {
   if (!dateInfo) return null;
   const end = timeToMinutes(dateInfo.to);
   for (let t = timeToMinutes(fromTime); t + duration <= end; t += duration) {
     const timeStr = minutesToTime(t);
+    if (closed.has(`${dateInfo.date}|${timeStr}|${court}`)) continue;
     if (matchesAtSlot(scheduledMatches, dateInfo.date, timeStr, court, excludeKey).length === 0) {
       return { date: dateInfo.date, time: timeStr, court };
     }
@@ -1840,7 +1836,8 @@ function autoSchedule(tournament) {
     return categoriesById[m.categoryId]?.groups.find((g) => g.id === m.location.groupId)?.pairIds || [];
   };
 
-  const courtBusy = new Set();
+  // Las canchas de sedes que no juegan ese día o a esa hora arrancan ocupadas
+  const courtBusy = closedCourtSlots(tournament);
   const pairBusy = new Set();
   // Partidos de cada pareja por día, con su sede: `${fecha}|${pareja}` -> [{ t: minutos, venue }]
   const pairDay = {};
@@ -3356,6 +3353,7 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
    fixture) o, con "Otra sede…", se escribe a mano. */
 function VenuesField({ tournament, onChange }) {
   const venues = tournament.venues || [];
+  const dates = tournament.playDates || [];
   const complexes = React.useContext(ComplexesContext);
   const sortedComplexes = [...complexes].sort((a, b) => a.name.localeCompare(b.name, "es"));
   const chooseComplex = (v, complexId) => {
@@ -3394,11 +3392,64 @@ function VenuesField({ tournament, onChange }) {
               <input type="number" min="1" inputMode="numeric" value={v.courts} onChange={(e) => update(v.id, { courts: e.target.value })} className="w-16 px-2 py-1.5 rounded border text-sm" style={input} />
             </label>
             <button type="button" onClick={() => save(venues.filter((x) => x.id !== v.id))} className="text-red-400 text-xs">Quitar ✕</button>
+            {dates.length > 0 && <VenueDaysField venue={v} dates={dates} onChange={(days) => update(v.id, { days })} />}
           </div>
         ))}
       </div>
       <button type="button" onClick={() => save([...venues, { id: uid(), name: `Sede ${venues.length + 1}`, courts: 1 }])} className="mt-2 text-xs font-semibold text-lime-400">+ Agregar sede</button>
       {scheduled && <p className="text-[11px] text-amber-400 mt-1" style={F.body}>Si cambiás sedes o canchas con horarios ya armados, tocá "Rearmar horarios" para reubicar los partidos.</p>}
+    </div>
+  );
+}
+
+/* Qué días y en qué horario se usa una sede (venue.days, ver courtIsOpen). "Todos los días" = sin
+   days: la sede sigue los días y horarios del torneo, también los que se agreguen después. */
+function VenueDaysField({ venue, dates, onChange }) {
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const all = !venue.days;
+  const dayOf = (date) => (venue.days || []).find((d) => d.date === date);
+  const setDay = (date, patch) => {
+    const base = dates.find((d) => d.date === date);
+    const current = dayOf(date) || { date, from: base.from, to: base.to };
+    const next = (venue.days || []).filter((d) => d.date !== date);
+    if (patch) next.push({ ...current, ...patch });
+    onChange(next.sort((a, b) => (a.date < b.date ? -1 : 1)));
+  };
+  return (
+    <div className="w-full pl-1 pb-2 text-xs" style={F.body}>
+      <label className="inline-flex items-center gap-1.5 text-teal-400 cursor-pointer">
+        <input
+          type="checkbox" checked={all}
+          onChange={(e) => onChange(e.target.checked ? null : dates.map((d) => ({ date: d.date, from: d.from, to: d.to })))}
+        />
+        Todos los días, en el horario del torneo
+      </label>
+      {!all && (
+        <div className="mt-1.5 space-y-1.5">
+          {dates.map((d) => {
+            const own = dayOf(d.date);
+            return (
+              <div key={d.date} className="flex items-center gap-2 flex-wrap">
+                <label className="inline-flex items-center gap-1.5 w-24 cursor-pointer text-teal-200">
+                  <input type="checkbox" checked={!!own} onChange={(e) => setDay(d.date, e.target.checked ? {} : null)} />
+                  {formatDateShort(d.date)}
+                </label>
+                {own ? (
+                  <>
+                    <input type="time" lang="es-AR" value={own.from} onChange={(e) => setDay(d.date, { from: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
+                    <span className="text-teal-500">a</span>
+                    <input type="time" lang="es-AR" value={own.to} onChange={(e) => setDay(d.date, { to: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
+                    {(own.from < d.from || own.to > d.to) && <span className="text-amber-400">El torneo ese día va de {d.from} a {d.to}: fuera de eso no se usa.</span>}
+                  </>
+                ) : (
+                  <span className="text-teal-600">No se usa</span>
+                )}
+              </div>
+            );
+          })}
+          {venue.days.length === 0 && <p className="text-amber-400">Así esta sede no se usa ningún día.</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -3678,7 +3729,6 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
 function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) {
   const playDates = tournament.playDates || [];
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
-  const courtsCount = tournament.courtsCount || 4;
   const [date, setDate] = useState(m.schedule?.date || playDates[0]?.date || "");
   const dateInfo = playDates.find((d) => d.date === date);
   const times = dateInfo ? dayTimeSlots(dateInfo, duration) : [];
@@ -3686,12 +3736,14 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
   const [court, setCourt] = useState(m.schedule?.court || 1);
   const occupantAt = (c) => matches.find((x) => x.key !== m.key && x.schedule && x.schedule.date === date && x.schedule.time === time && x.schedule.court === c);
   const occupant = occupantAt(court);
+  // Cancha cuya sede no se usa en ese día y horario: se ve, pero no se puede elegir
+  const isClosed = (c) => !!time && !courtIsOpen(tournament, c, date, timeToMinutes(time), duration);
   const same = m.schedule && m.schedule.date === date && m.schedule.time === time && m.schedule.court === court;
   const describe = (x) => (x.placeholder ? x.placeholder : `${pairsById[x.pairA]?.name || "—"} vs ${pairsById[x.pairB]?.name || "—"}`);
   const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
 
   const move = () => {
-    if (!date || !time || same) return;
+    if (!date || !time || same || isClosed(court)) return;
     const target = { date, time, court };
     let next = tournament;
     if (occupant) next = withMatchSchedule(next, occupant.categoryId, occupant.location, occupant.matchId, m.schedule || null);
@@ -3726,18 +3778,21 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
           <div>
             <label className="block text-xs text-teal-400 mb-1" style={F.body}>Cancha</label>
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-              {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => (
-                <ChoiceCard key={c} compact selected={court === c} onClick={() => setCourt(c)} title={courtName(tournament, c)} description={occupantAt(c) ? "Ocupada" : "Libre"} />
+              {courtsOfDay(tournament, date).map((c) => (
+                <ChoiceCard key={c} compact selected={court === c} onClick={() => setCourt(c)} title={courtName(tournament, c)} description={isClosed(c) ? "Sede cerrada a esa hora" : occupantAt(c) ? "Ocupada" : "Libre"} />
               ))}
             </div>
           </div>
-          {occupant && !same && (
+          {isClosed(court) && (
+            <p className="text-xs text-amber-400" style={F.body}>{(tournament.venues || [])[courtVenueIndex(tournament, court)]?.name || "Esa sede"} no se usa ese día a esa hora: elegí otra cancha u otro horario.</p>
+          )}
+          {occupant && !same && !isClosed(court) && (
             <p className="text-xs text-amber-400" style={F.body}>
               Ahí está {describe(occupant)}: {m.schedule ? `se intercambian de lugar (ese pasa a las ${m.schedule.time}hs, ${courtName(tournament, m.schedule.court)}).` : "queda sin horario."}
             </p>
           )}
           <div className="flex gap-2 flex-wrap pt-1">
-            <button type="button" disabled={!time || same} onClick={move} className="flex-1 px-4 py-2.5 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+            <button type="button" disabled={!time || same || isClosed(court)} onClick={move} className="flex-1 px-4 py-2.5 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
               {occupant && !same ? "Intercambiar" : "Mover acá"}
             </button>
             {m.schedule && (
@@ -3938,8 +3993,8 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
-  const courts = Array.from({ length: tournament.courtsCount || 4 }, (_, i) => i + 1);
   const scheduled = matches.filter((m) => m.schedule);
+  const closed = closedCourtSlots(tournament);
   const categoryColor = Object.fromEntries(tournament.categories.map((c, i) => [c.id, GROUP_COLORS[i % GROUP_COLORS.length]]));
   const shortName = (id) => pairsById[id]?.name || "A definir";
 
@@ -3987,6 +4042,8 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
           // Partidos de ese día con un horario que no cae en la grilla (cambió el arranque o la duración)
           const extraTimes = [...new Set(scheduled.filter((m) => m.schedule.date === dateInfo.date && !times.includes(m.schedule.time)).map((m) => m.schedule.time))];
           const allTimes = [...times, ...extraTimes].sort();
+          // Solo las canchas de las sedes que se usan ese día
+          const courts = courtsOfDay(tournament, dateInfo.date, scheduled);
           return (
             <section key={dateInfo.date} className="mb-6">
               <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(dateInfo.date)}</SkewPill></div>
@@ -4007,7 +4064,7 @@ function ScheduleGridOverlay({ tournament, matches, pairsById, onOpenResult, onC
                         {courts.map((court) => {
                           const here = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
                           return (
-                            <td key={court} className="align-top p-1" style={{ width: 140, borderLeft: `1px solid ${dateColor}14`, ...(here.length > 1 ? { backgroundColor: "#f8717122" } : {}) }}>
+                            <td key={court} className="align-top p-1" style={{ width: 140, borderLeft: `1px solid ${dateColor}14`, ...(here.length > 1 ? { backgroundColor: "#f8717122" } : closed.has(`${dateInfo.date}|${time}|${court}`) ? { backgroundColor: "#0f172a99" } : {}) }}>
                               <div className="space-y-1">{here.map(cell)}</div>
                             </td>
                           );
@@ -4121,6 +4178,9 @@ function ScheduleAdminView({ tournament, update }) {
     });
   });
   const offGrid = scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso" && !gridSlots.has(`${m.schedule.date}|${m.schedule.time}|${m.schedule.court}`));
+  // Partidos en una sede que ese día (o a esa hora) no se usa
+  const atClosed = matchesAtClosedCourts(tournament, scheduled.filter((m) => !matchIsPlayed(m, tournament.matchFormat) && m.liveStatus !== "en_curso"));
+  const closed = closedCourtSlots(tournament);
   // Partidos de grupos puestos (a mano) en un horario en que alguna de las parejas no puede
   const offAvailability = Object.fromEntries(scheduled.map((m) => [m.key, pairsOutsideAvailability(tournament, m)]).filter(([, ids]) => ids.length > 0));
   const offAvailabilityCount = Object.keys(offAvailability).length;
@@ -4140,7 +4200,7 @@ function ScheduleAdminView({ tournament, update }) {
     const occupants = matchesAtSlot(scheduled, dateInfo.date, time, court, key);
     if (occupants.length > 0) {
       const nextTime = minutesToTime(timeToMinutes(time) + duration);
-      const free = findNextFreeSlotOnCourt(scheduled, dateInfo, court, nextTime, duration, key);
+      const free = findNextFreeSlotOnCourt(scheduled, dateInfo, court, nextTime, duration, key, closed);
       if (free) {
         editSchedule(m, free);
         setNotice(`Ese horario ya estaba ocupado en ${courtName(tournament, court)}. Ubiqué el partido en ${formatDateShort(free.date)} · ${free.time}hs · ${courtName(tournament, free.court)}.`);
@@ -4212,6 +4272,11 @@ function ScheduleAdminView({ tournament, update }) {
               {offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.
             </div>
           )}
+          {atClosed.length > 0 && (
+            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
+              {atClosed.length === 1 ? "Hay 1 partido" : `Hay ${atClosed.length} partidos`} en una sede que ese día o a esa hora no se usa ({[...new Set(atClosed.map((m) => (tournament.venues || [])[courtVenueIndex(tournament, m.schedule.court)]?.name))].join(", ")}). Movelos a mano o tocá "Rearmar horarios".
+            </div>
+          )}
 
           {capacityNotice && (
             <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
@@ -4278,7 +4343,8 @@ function ScheduleAdminView({ tournament, update }) {
             playDates.map((dateInfo, di) => {
               const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
               const times = dayTimeSlots(dateInfo, duration);
-              const courts = Array.from({ length: courtsCount }, (_, i) => i + 1);
+              // Solo las canchas de las sedes que se usan ese día
+              const courts = courtsOfDay(tournament, dateInfo.date, scheduled);
               return (
                 <div key={dateInfo.date} className="mb-8">
                   <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -4303,13 +4369,21 @@ function ScheduleAdminView({ tournament, update }) {
                             {courts.map((court) => {
                               const cellMatches = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
                               const conflict = cellMatches.length > 1;
+                              // Su sede no se usa a esa hora: sin "+ Asignar" ni soltar partidos
+                              if (cellMatches.length === 0 && closed.has(`${dateInfo.date}|${time}|${court}`)) {
+                                return (
+                                  <td key={court} className="align-middle p-1 border text-center text-[10px] text-slate-500" style={{ ...F.body, borderColor: dateColor + "22", minWidth: 130, backgroundColor: "#0f172a66" }} title="Esta sede no se usa a esa hora">
+                                    Sede cerrada
+                                  </td>
+                                );
+                              }
                               return (
                                 <td
                                   key={court}
                                   onDragOver={(e) => e.preventDefault()}
                                   onDrop={onDropOnCell(dateInfo, time, court)}
                                   className="align-top p-1 border"
-                                  style={{ borderColor: dateColor + "22", minWidth: 130 }}
+                                  style={{ borderColor: dateColor + "22", minWidth: 130, ...(closed.has(`${dateInfo.date}|${time}|${court}`) ? { backgroundColor: "#0f172a66" } : {}) }}
                                 >
                                   {cellMatches.length === 0 ? (
                                     <select
@@ -4355,7 +4429,7 @@ function ScheduleAdminView({ tournament, update }) {
                               value=""
                               onChange={(e) => {
                                 const m = unscheduled.find((u) => u.key === e.target.value);
-                                const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null);
+                                const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null, closed);
                                 if (free) editSchedule(m, free);
                                 else if (m) setNotice(`${courtName(tournament, court)} no tiene horarios libres ese día.`);
                               }}
