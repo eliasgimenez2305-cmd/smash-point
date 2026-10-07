@@ -987,6 +987,57 @@ function buildPlaceholderBracket(groups) {
   return rounds;
 }
 
+/* La llave de una categoría con grupos se arma sola, en borrador:
+   - Apenas hay grupos, el esqueleto con "1° Grupo A"... y sus horarios (si cambian los grupos y la
+     llave todavía no tiene resultados, se vuelve a armar).
+   - Cuando termina un grupo, sus lugares se completan con las parejas que clasificaron (y se
+     corrigen si cambia un resultado, mientras ese cruce no se haya jugado).
+   - Con todos los lugares completos deja de ser esqueleto: desde ahí, si cambian los clasificados,
+     avisa y ofrece rearmarla (ver bracketQualifiersChange).
+   tournament: el torneo con el que se arman los horarios (con los grupos ya ubicados). */
+function withAutoBracket(tournament, category) {
+  if (isSuper8(category) || !(category.groups || []).length) return category;
+  const format = tournament.matchFormat;
+  const hasResults = (category.bracket || []).flat().some(matchHasScore);
+  let c = category;
+  const skeleton = buildPlaceholderBracket(c.groups);
+  if (!skeleton) return c;
+  const labels = (rounds) => JSON.stringify(rounds[0].map((m) => [m.placeholderA || null, m.placeholderB || null]));
+  const outdated = c.bracket && c.bracketIsSkeleton && !hasResults && labels(c.bracket) !== labels(skeleton);
+  if (!c.bracket || outdated) {
+    c = autoScheduleBracket(tournament, { ...c, bracket: skeleton, bracketIsSkeleton: true, bracketSeeding: null, bracketPublished: !!c.bracket && !!c.bracketPublished });
+  }
+  return c.bracketIsSkeleton ? fillSkeletonBracket(c, format) : c;
+}
+
+/* Completa los lugares de la primera ronda de un esqueleto con los clasificados de los grupos que
+   ya terminaron (ver withAutoBracket) */
+function fillSkeletonBracket(category, format) {
+  const pairsById = categoryEntitiesById(category);
+  const finished = Object.fromEntries(category.groups
+    .filter((g) => g.matches.length > 0 && g.matches.every((m) => matchIsPlayed(m, format)))
+    .map((g) => [g.name, groupQualifiers(g, pairsById, format)]));
+  const place = (label) => {
+    const [, n, name] = /^(\d+)° (.+)$/.exec(label || "") || [];
+    return n && finished[name] ? finished[name][Number(n) - 1] || null : null;
+  };
+  let changed = false;
+  const round1 = category.bracket[0].map((m) => {
+    if (matchHasScore(m)) return m;
+    const pairA = m.placeholderA ? place(m.placeholderA) : m.pairA;
+    const pairB = m.placeholderB ? place(m.placeholderB) : m.pairB;
+    if (pairA === m.pairA && pairB === m.pairB) return m;
+    changed = true;
+    return { ...m, pairA, pairB };
+  });
+  const rounds = changed ? propagateBracket([round1, ...category.bracket.slice(1)], format) : category.bracket;
+  const complete = rounds[0].every((m) => (!m.placeholderA || m.pairA) && (!m.placeholderB || m.pairB));
+  if (!changed && !complete) return category;
+  return complete
+    ? { ...category, bracket: rounds, bracketIsSkeleton: false, bracketSeeding: buildKnockoutSeeding(category.groups, pairsById, format) }
+    : { ...category, bracket: rounds };
+}
+
 /* Como buildBracket, pero a partir de los cruces de ronda 1 que arma buildKnockoutSeeding (las
    parejas con bye van contra un lugar vacío y pasan solas a la ronda siguiente). */
 function buildSeededBracket(round1Pairs) {
@@ -1160,12 +1211,12 @@ function collectScheduleableMatches(tournament) {
   return list;
 }
 
-/* Marca como públicos (visibles para jugadores) los horarios de la llave de una categoría puntual,
-   que hasta ahora estaban precargados en modo borrador (ver autoScheduleBracket) */
-function publishBracketSchedule(tournament, categoryId) {
+/* Publica la llave de una categoría (los jugadores la ven, con sus horarios) o, con
+   published = false, la vuelve a borrador */
+function publishBracketSchedule(tournament, categoryId, published = true) {
   return {
     ...tournament,
-    categories: tournament.categories.map((c) => (c.id === categoryId ? { ...c, bracketPublished: true } : c)),
+    categories: tournament.categories.map((c) => (c.id === categoryId ? { ...c, bracketPublished: published } : c)),
   };
 }
 
@@ -3472,46 +3523,105 @@ function VenueDaysField({ venue, dates, onChange, onWidenDay }) {
   );
 }
 
+/* Pestaña Llaves, arriba de cada categoría: "La llave arranca", hora y sede de la final y publicar.
+   Si la llave todavía no tiene resultados, al cambiar el arranque o la final sus horarios se
+   vuelven a armar solos; si ya tiene, se guarda el cambio y se avisa que hay que rearmar. */
+function BracketSettingsBar({ tournament, category, onUpdateTournament }) {
+  const dates = tournament.playDates || [];
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const venues = tournament.venues || [];
+  const groupDays = dates.filter((d) => !isBracketDay(d));
+  const bracketDays = dates.filter(isBracketDay).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const lastBracketDay = bracketDays[bracketDays.length - 1];
+  const finalTimes = lastBracketDay ? dayTimeSlots(lastBracketDay, tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION) : [];
+  const hasResults = (category.bracket || []).flat().some(matchHasScore);
+
+  const change = (patch) => {
+    let c = { ...category, ...patch };
+    let t = { ...tournament, categories: tournament.categories.map((x) => (x.id === c.id ? c : x)) };
+    if (c.bracket && !hasResults && tournamentUsesSchedule(tournament)) {
+      // Sin los horarios viejos de esta llave (si no, se toman como ocupados) y armados de nuevo
+      c = { ...c, bracket: c.bracket.map((round) => round.map((m) => ({ ...m, schedule: null }))) };
+      t = { ...t, categories: t.categories.map((x) => (x.id === c.id ? c : x)) };
+      c = autoScheduleBracket(t, c);
+      t = { ...t, categories: t.categories.map((x) => (x.id === c.id ? c : x)) };
+    }
+    onUpdateTournament(t);
+  };
+  const setStart = (p) => { const s = { ...(category.bracketStart || {}), ...p }; change({ bracketStart: s.date ? s : null }); };
+  const setFinal = (p) => { const f = { ...(category.bracketFinal || {}), ...p }; change({ bracketFinal: f.time || f.venueId ? f : null }); };
+  const published = !!category.bracketPublished;
+
+  return (
+    <div className="rounded-lg border border-teal-800 p-3 mb-4 text-sm space-y-3" style={F.body}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span>
+          Llave de <strong>{category.name}</strong>:{" "}
+          {!category.bracket ? <span className="text-teal-500">todavía sin armar</span>
+            : published ? <span className="text-lime-400 font-semibold">publicada</span>
+            : <span className="font-semibold" style={{ color: "#a78bfa" }}>borrador (los jugadores todavía no la ven)</span>}
+        </span>
+        {category.bracket && (published ? (
+          <button type="button" onClick={() => onUpdateTournament(publishBracketSchedule(tournament, category.id, false))} className="text-xs text-teal-400 hover:text-lime-400">Volver a borrador</button>
+        ) : (
+          <button type="button" onClick={() => onUpdateTournament(publishBracketSchedule(tournament, category.id))} className="px-3 py-1.5 rounded font-semibold text-xs" style={{ backgroundColor: "#a78bfa", color: "#14181f" }}>Publicar llave</button>
+        ))}
+      </div>
+      {tournamentUsesSchedule(tournament) && dates.length > 0 && (
+        <div className="flex items-center gap-x-5 gap-y-2 flex-wrap">
+          {groupDays.length > 0 && (
+            <span className="flex items-center gap-2" title="La primera ronda de esta llave se puede jugar ese día desde esa hora, aunque sea un día de grupos; desde la segunda ronda, todas las llaves van a los días de llaves">
+              <span className="text-xs text-teal-400">La llave arranca</span>
+              <select value={category.bracketStart?.date || ""} onChange={(e) => setStart({ date: e.target.value || null })} aria-label="Día en que arranca la llave" className="px-2 py-1.5 rounded border text-sm" style={input}>
+                <option value="">Con las demás</option>
+                {groupDays.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
+              </select>
+              <input type="time" lang="es-AR" value={category.bracketStart?.time || ""} disabled={!category.bracketStart?.date} onChange={(e) => setStart({ time: e.target.value || null })} aria-label="Hora en que arranca la llave" className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
+            </span>
+          )}
+          {lastBracketDay && (
+            <span className="flex items-center gap-2" title={`La final va el ${formatDateShort(lastBracketDay.date)}; las semis, antes y en la misma sede. En automática, las finales se reparten en las últimas 3 horas del día.`}>
+              <span className="text-xs text-teal-400">Final ({formatDateShort(lastBracketDay.date)})</span>
+              <select value={category.bracketFinal?.time || ""} onChange={(e) => setFinal({ time: e.target.value || null })} aria-label="Hora de la final" className="px-2 py-1.5 rounded border text-sm" style={input}>
+                <option value="">Hora automática</option>
+                {finalTimes.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              {venues.length > 0 && (
+                <select value={category.bracketFinal?.venueId || ""} onChange={(e) => setFinal({ venueId: e.target.value || null })} aria-label="Sede de la final" className="px-2 py-1.5 rounded border text-sm" style={input}>
+                  <option value="">Sede automática</option>
+                  {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              )}
+            </span>
+          )}
+        </div>
+      )}
+      {hasResults && <p className="text-[11px] text-amber-400">La llave ya tiene resultados: si cambiás el arranque o la final, tocá "Rearmar horarios" en Horarios para reubicar lo que falta jugar.</p>}
+    </div>
+  );
+}
+
 /* Clásico: día y hora de inicio de cada categoría. Se ven en la inscripción y en la página del
    torneo, y "Generar horarios" no le asigna partidos a una categoría antes de ese momento. */
 function CategoryStartsEditor({ tournament, onChange }) {
   const dates = tournament.playDates || [];
   const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
-  // field: "start" (inicio de la categoría) o "bracketStart" (La llave arranca)
-  const setStart = (categoryId, patch, field = "start") => {
+  const setStart = (categoryId, patch) => {
     onChange({
       ...tournament,
       categories: tournament.categories.map((c) => {
         if (c.id !== categoryId) return c;
-        const start = { ...(c[field] || {}), ...patch };
-        return { ...c, [field]: start.date ? start : null };
-      }),
-    });
-  };
-  // "La llave arranca" solo tiene sentido si hay días que no son de llaves (si no, ya va con las demás)
-  const showBracketStart = dates.some((d) => !isBracketDay(d));
-  // Final: en el último día de llaves, a una hora de la grilla y en una sede (o automática)
-  const bracketDays = dates.filter(isBracketDay).sort((a, b) => (a.date < b.date ? -1 : 1));
-  const lastBracketDay = bracketDays[bracketDays.length - 1];
-  const finalTimes = lastBracketDay ? dayTimeSlots(lastBracketDay, tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION) : [];
-  const venues = tournament.venues || [];
-  const setFinal = (categoryId, patch) => {
-    onChange({
-      ...tournament,
-      categories: tournament.categories.map((c) => {
-        if (c.id !== categoryId) return c;
-        const final = { ...(c.bracketFinal || {}), ...patch };
-        return { ...c, bracketFinal: final.time || final.venueId ? final : null };
+        const start = { ...(c.start || {}), ...patch };
+        return { ...c, start: start.date ? start : null };
       }),
     });
   };
   return (
     <div className="border-t border-teal-800 pt-3 mt-4">
-      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría y su final (opcional)</label>
+      <label className="block text-xs text-teal-400 mb-1" style={F.body}>Inicio de cada categoría (opcional)</label>
       <p className="text-[11px] text-teal-600 mb-2" style={F.body}>
         Se muestra en la inscripción y en la página del torneo. Al generar horarios, la categoría no juega antes de ese día y hora.
-        {showBracketStart && " \"La llave arranca\": la primera ronda de esa llave se puede jugar ese día desde esa hora, aunque sea un día de grupos; desde la segunda ronda, todas las llaves van a los días de llaves."}
-        {lastBracketDay && ` Final: hora${venues.length > 0 ? " y sede" : ""} de la final (${formatDateShort(lastBracketDay.date)}); las semis van en la misma sede, antes. En automática, las finales se reparten en las últimas 3 horas del día.`}
+        {" "}Cuándo arranca la llave y la hora y sede de cada final se eligen en la pestaña Llaves.
       </p>
       <div className="space-y-3">
         {tournament.categories.map((c) => (
@@ -3524,31 +3634,6 @@ function CategoryStartsEditor({ tournament, onChange }) {
               </select>
               <input type="time" lang="es-AR" value={c.start?.time || ""} disabled={!c.start?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null })} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
             </span>
-            {showBracketStart && (
-              <span className="flex items-center gap-2">
-                <span className="text-xs text-teal-400">La llave arranca</span>
-                <select value={c.bracketStart?.date || ""} onChange={(e) => setStart(c.id, { date: e.target.value || null }, "bracketStart")} aria-label={`La llave de ${c.name} arranca`} className="px-2 py-1.5 rounded border text-sm" style={input}>
-                  <option value="">Con las demás</option>
-                  {dates.filter((d) => !isBracketDay(d)).map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
-                </select>
-                <input type="time" lang="es-AR" value={c.bracketStart?.time || ""} disabled={!c.bracketStart?.date} onChange={(e) => setStart(c.id, { time: e.target.value || null }, "bracketStart")} className="px-2 py-1.5 rounded border text-sm disabled:opacity-40" style={input} />
-              </span>
-            )}
-            {lastBracketDay && !isSuper8(c) && (
-              <span className="flex items-center gap-2">
-                <span className="text-xs text-teal-400">Final</span>
-                <select value={c.bracketFinal?.time || ""} onChange={(e) => setFinal(c.id, { time: e.target.value || null })} aria-label={`Hora de la final de ${c.name}`} className="px-2 py-1.5 rounded border text-sm" style={input}>
-                  <option value="">Automática</option>
-                  {finalTimes.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-                {venues.length > 0 && (
-                  <select value={c.bracketFinal?.venueId || ""} onChange={(e) => setFinal(c.id, { venueId: e.target.value || null })} aria-label={`Sede de la final de ${c.name}`} className="px-2 py-1.5 rounded border text-sm" style={input}>
-                    <option value="">Sede automática</option>
-                    {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                  </select>
-                )}
-              </span>
-            )}
           </div>
         ))}
       </div>
@@ -5679,8 +5764,8 @@ function CategoryBracketPublicView({ category, format }) {
 
   return (
     <section className="mt-6">
-      {!category.bracket && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se generó.</p>}
-      {category.bracket && (() => {
+      {!(category.bracket && category.bracketPublished) && <p className="opacity-60 text-sm" style={F.body}>La llave todavía no se publicó.</p>}
+      {category.bracket && category.bracketPublished && (() => {
         const total = category.bracket.length;
         const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
         return (
@@ -7937,17 +8022,6 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     </div>
   );
 
-  // Precarga SOLO la estructura de la llave (fechas/horas/canchas) apenas se cierran los grupos,
-  // sin esperar a saber qué pareja concreta clasifica a cada lugar. Usa placeholders tipo
-  // "1° Grupo A vs 2° Grupo B". Cuando después se genera la llave real (generateBracketFromGroups),
-  // los horarios ya cargados en este esqueleto se conservan.
-  const generatePlaceholderBracket = () => {
-    const skeleton = buildPlaceholderBracket(category.groups);
-    if (!skeleton) return;
-    const withBracket = { ...category, bracket: skeleton, bracketIsSkeleton: true, bracketPublished: false };
-    onUpdateCategory(autoScheduleBracket(tournament, withBracket));
-  };
-
   const [editingCrosses, setEditingCrosses] = useState(false);
   // "Reiniciar llave" borra la llave entera, con sus resultados y horarios: siempre se confirma
   const [confirmingBracketReset, setConfirmingBracketReset] = useState(false);
@@ -8284,25 +8358,15 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
       {tab === "llave" && (
         <div>
+          {onUpdateTournament && <BracketSettingsBar tournament={tournament} category={category} onUpdateTournament={onUpdateTournament} />}
           {qualifiersNotice}
-          {usesSchedule && !category.bracket && category.groups.length > 0 && (
-            <div className="border border-purple-800 rounded-lg p-4 mb-4">
-              <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
-                Todavía no terminaron los grupos, pero ya podés precargar la estructura de la llave (fechas, horarios y canchas de octavos, cuartos, semis y final) usando "1°, 2°..." de cada grupo. Cuando se sepan las parejas clasificadas, se completan solas en los horarios que ya hayas cargado.
-              </p>
-              <button
-                onClick={generatePlaceholderBracket}
-                className="px-4 py-2 rounded font-semibold text-sm"
-                style={{ backgroundColor: "#a78bfa", color: "#14181f" }}
-              >
-                Precargar estructura de la llave
-              </button>
-            </div>
-          )}
+          {/* Con grupos la llave se arma sola (ver withAutoBracket); sin grupos, con todas las parejas */}
           {!category.bracket && (
             <div className="border border-teal-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-teal-300 mb-3" style={F.body}>
-                Generá la llave final con los clasificados de cada grupo: pasan tantas parejas como elegiste en "Clasifican" de cada grupo (si no hay grupos, se usan todas las parejas). Los cruces se arman entre grupos distintos, para que un 1° nunca se enfrente con el 2° de su propio grupo en la primera ronda, y si la cantidad no cierra, los mejor ubicados pasan directo a la ronda siguiente.
+                {category.groups.length > 0
+                  ? "La llave se arma sola apenas hay grupos. Si no apareció, armala acá."
+                  : "Sin grupos, la llave se arma con todas las parejas de la categoría."}
               </p>
               <button
                 onClick={() => {
@@ -8315,27 +8379,21 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                 className="px-4 py-2 rounded font-semibold text-sm"
                 style={{ backgroundColor: "#9fe022", color: "#14181f" }}
               >
-                Generar llave final
+                Armar llave
               </button>
             </div>
           )}
-          {category.bracketIsSkeleton && category.bracket && (
-            <div className="border border-purple-800 rounded-lg p-4 mb-6">
-              <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
-                Esta es la estructura precargada de la llave, todavía sin parejas confirmadas. Podés seguir ajustando los horarios en la grilla. Cuando los grupos terminen, generá la llave final desde la pestaña Llaves para completar las parejas.
-              </p>
-              {category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m, format))) && (
-                <button
-                  onClick={generateBracketFromGroups}
-                  className="px-4 py-2 rounded font-semibold text-sm"
-                  style={{ backgroundColor: "#9fe022", color: "#14181f" }}
-                >
-                  Completar llave con las parejas clasificadas
-                </button>
-              )}
-            </div>
-          )}
-          {category.bracket && !round1HasResults && (
+          {category.bracketIsSkeleton && category.bracket && (() => {
+            const pending = category.groups.filter((g) => !(g.matches.length > 0 && g.matches.every((m) => matchIsPlayed(m, format)))).map((g) => g.name);
+            return (
+              <div className="border border-purple-800 rounded-lg p-3 mb-6 text-sm" style={{ ...F.body, color: "#c4b5fd" }}>
+                La llave ya está armada con los lugares de cada grupo ("1° Grupo A"). Cada lugar se completa solo cuando termina su grupo.
+                {pending.length > 0 && <span className="block text-xs mt-1" style={{ color: "#a78bfa" }}>Faltan terminar: {pending.join(", ")}.</span>}
+              </div>
+            );
+          })()}
+          {/* Mientras la llave espera a los grupos no hay parejas para cruzar */}
+          {category.bracket && !category.bracketIsSkeleton && !round1HasResults && (
             <div className="border border-teal-800 rounded-lg p-4 mb-6">
               <button
                 type="button"
@@ -8445,7 +8503,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                   <div className="rounded-lg p-3 text-xs border border-red-400/50" style={{ ...F.body, backgroundColor: "rgba(248,113,113,0.08)" }}>
                     <p className="text-red-300 mb-2">
                       Se borra la llave de {category.name} con sus horarios
-                      {bracketResultsCount > 0 ? <> y <strong>{bracketResultsCount === 1 ? "1 resultado cargado" : `${bracketResultsCount} resultados cargados`}</strong></> : ""}. No se puede deshacer.
+                      {bracketResultsCount > 0 ? <> y <strong>{bracketResultsCount === 1 ? "1 resultado cargado" : `${bracketResultsCount} resultados cargados`}</strong></> : ""}. No se puede deshacer.{category.groups.length > 0 ? " Se vuelve a armar sola en borrador, con los lugares de cada grupo." : ""}
                     </p>
                     <button type="button" onClick={() => { onUpdateCategory({ ...category, bracket: null, bracketSeeding: null, bracketIsSkeleton: false, bracketPublished: false }); setConfirmingBracketReset(false); }} className="px-3 py-1.5 rounded font-semibold mr-2" style={{ backgroundColor: "#f87171", color: "#14181f" }}>Sí, reiniciar la llave</button>
                     <button type="button" onClick={() => setConfirmingBracketReset(false)} className="text-teal-300">Cancelar</button>
@@ -8580,11 +8638,11 @@ function organizerProgress(tournament, pendingCount, alertsCount) {
   const withGroups = cats.filter((c) => c.groups.length > 0).length;
   const matches = collectScheduleableMatches(tournament);
   const scheduled = matches.filter((m) => m.schedule).length;
-  const withBracket = cats.filter((c) => c.bracket && !c.bracketIsSkeleton).length;
+  const withBracket = cats.filter((c) => c.bracket && c.bracketPublished).length;
   parts.push(
     { tab: "grupos", label: "Grupos", value: `${withGroups}/${cats.length}`, state: of(withGroups, cats.length) },
     { tab: "horarios", label: "Horarios", value: `${scheduled}/${matches.length}`, state: alertsCount > 0 ? "warn" : of(scheduled, matches.length) },
-    { tab: "llaves", label: "Llaves", value: `${withBracket}/${cats.length}`, state: of(withBracket, cats.length) },
+    { tab: "llaves", label: "Llaves publicadas", value: `${withBracket}/${cats.length}`, state: of(withBracket, cats.length) },
   );
   return parts;
 }
@@ -8658,7 +8716,10 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
   );
 }
 
-function AdminTournament({ tournament, update, onBack, inscripciones = [], onResolveInscripcion }) {
+function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion }) {
+  // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
+  // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
+  const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
   const usesSchedule = tournamentUsesSchedule(tournament);
   const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
   // Pestañas en el orden en que se organiza un torneo. El Súper 8 no tiene grupos, llave ni grilla
@@ -8712,6 +8773,7 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
      organizador solo tenga que revisar/ajustar excepciones en vez de armar todo desde cero. */
   const updateCategoryAndAutoSchedule = (updated) => {
     const merged = { ...tournament, categories: tournament.categories.map((c) => (c.id === updated.id ? updated : c)) };
+    // Primero los horarios de los grupos; update arma después la llave alrededor de ellos
     update(merged.playDates && merged.playDates.length > 0 ? autoSchedule(merged) : merged);
   };
 
