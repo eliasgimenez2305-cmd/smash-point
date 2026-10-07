@@ -3123,7 +3123,7 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
                   <input type="number" min="10" step="5" inputMode="numeric" value={intervalText} onChange={(e) => setIntervalText(e.target.value)} className="w-24 px-3 py-2 rounded border outline-none focus:border-lime-400" style={input} />
                 </div>
               </div>
-              <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Cada cancha arranca un partido nuevo cada {interval >= 10 ? interval : "…"} minutos. Se puede ajustar después en Horarios.</p>
+              <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Cada cancha arranca un partido nuevo cada {interval >= 10 ? interval : "…"} minutos. Se puede ajustar después en Configuración.</p>
             </div>
           )}
           <div className="flex justify-between items-center mt-5">
@@ -3574,7 +3574,7 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
   };
 
   if (playDates.length === 0) {
-    return <p className="text-xs opacity-50 mt-1" style={F.body}>Cargá fechas del torneo (pestaña Horarios) para definir disponibilidad.</p>;
+    return <p className="text-xs opacity-50 mt-1" style={F.body}>Cargá fechas del torneo (en Configuración) para definir disponibilidad.</p>;
   }
 
   return (
@@ -3698,7 +3698,7 @@ function MoveMatchModal({ m, tournament, matches, pairsById, update, onClose }) 
       <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
       <p className="text-sm mb-4" style={F.body}>{describe(m)}</p>
       {playDates.length === 0 ? (
-        <p className="text-sm text-amber-400" style={F.body}>Primero cargá el día y horario del torneo en Horarios.</p>
+        <p className="text-sm text-amber-400" style={F.body}>Primero cargá el día y horario del torneo en Configuración.</p>
       ) : (
         <div className="space-y-3">
           {playDates.length > 1 && (
@@ -4090,7 +4090,7 @@ function FixtureImagesModal({ tournament, matches, pairsById, onClose }) {
   );
 }
 
-function ScheduleAdminView({ tournament, update }) {
+function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [notice, setNotice] = useState(null);
   const [gridOpen, setGridOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
@@ -4188,8 +4188,7 @@ function ScheduleAdminView({ tournament, update }) {
   const trayMatches = unscheduled.filter(inCategory);
   const goTo = (a) => { if (a.day) setDay(a.day); if (a.categoryId) setCategoryFilter(a.categoryId); };
 
-  // Configuración de canchas y fechas: plegada en una línea (abierta si todavía no hay fechas)
-  const [configOpen, setConfigOpen] = useState(playDates.length === 0);
+  // Canchas, sedes y fechas se cargan en Configuración: acá, en una línea
   const configSummary = [
     venues.length > 0 ? `${venues.length} sede${venues.length === 1 ? "" : "s"}` : null,
     `${courtsCount} cancha${courtsCount === 1 ? "" : "s"}`,
@@ -4206,21 +4205,10 @@ function ScheduleAdminView({ tournament, update }) {
       {fixtureOpen && <FixtureImagesModal tournament={tournament} matches={matches} pairsById={pairsById} onClose={() => setFixtureOpen(false)} />}
       {modals}
 
-      {configOpen ? (
-        <div>
-          {playDates.length > 0 && (
-            <div className="flex justify-end mb-1">
-              <button type="button" onClick={() => setConfigOpen(false)} className="text-xs text-teal-400 hover:text-lime-400" style={F.body}>Listo, cerrar ▴</button>
-            </div>
-          )}
-          <CourtsAndDatesEditor tournament={tournament} onChange={update} />
-        </div>
-      ) : (
-        <button type="button" onClick={() => setConfigOpen(true)} className="w-full flex items-center justify-between gap-3 flex-wrap px-4 py-2.5 mb-4 rounded-lg border border-teal-800 hover:border-teal-500 text-left" style={F.body}>
-          <span className="text-xs text-teal-300">🏟 {configSummary}</span>
-          <span className="text-xs text-lime-400 font-semibold">✎ Canchas, sedes y fechas</span>
-        </button>
-      )}
+      <button type="button" onClick={onGoConfig} className="w-full flex items-center justify-between gap-3 flex-wrap px-4 py-2.5 mb-4 rounded-lg border border-teal-800 hover:border-teal-500 text-left" style={F.body}>
+        <span className="text-xs text-teal-300">🏟 {configSummary}</span>
+        <span className="text-xs text-lime-400 font-semibold">Cambiar en Configuración →</span>
+      </button>
 
       {matches.length === 0 ? (
         <p className="opacity-60 text-sm" style={F.body}>Todavía no hay partidos con ambas parejas definidas (cargá grupos o llave en alguna categoría).</p>
@@ -4305,7 +4293,7 @@ function ScheduleAdminView({ tournament, update }) {
           )}
 
           {!dateInfo ? (
-            <p className="opacity-60 text-sm mb-6" style={F.body}>Cargá al menos una fecha en "Canchas, sedes y fechas" para poder armar la planilla.</p>
+            <p className="opacity-60 text-sm mb-6" style={F.body}>Cargá al menos una fecha en <button type="button" onClick={onGoConfig} className="underline text-lime-400">Configuración</button> para poder armar la planilla.</p>
           ) : (
             <>
               <div className="flex items-center gap-2 flex-wrap mb-3" style={F.body}>
@@ -7552,7 +7540,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
           label="Inscripciones abiertas"
           description={tournament.inscripcionesAbiertas ? "El torneo aparece en la página pública con el botón \"Inscribirme\"." : "Nadie puede inscribirse desde la página pública."}
         />
-        <p className="text-xs text-teal-500 mt-2">El cupo de cada categoría se cambia en "Editar datos e inscripciones", desde la lista de torneos.</p>
+        <p className="text-xs text-teal-500 mt-2">El cupo de cada categoría se cambia en Configuración.</p>
       </div>
 
       <h3 className="text-xs uppercase tracking-wide font-bold mb-2" style={{ color: "#fb923c" }}>Pendientes ({pending.length})</h3>
@@ -7699,7 +7687,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
         </p>
         {!ready && (
           <p className="text-xs text-amber-400 mb-3" style={F.body}>
-            Faltan {entryWord}: hay {category.pairs.length} de {SUPER8_SIZE}. Cargalos en la pestaña anterior.
+            Faltan {entryWord}: hay {category.pairs.length} de {SUPER8_SIZE}. Cargalos en {individual ? "Jugadores" : "Inscripciones"}.
           </p>
         )}
         <div className="flex gap-2 flex-wrap">
@@ -7745,8 +7733,11 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   );
 }
 
-function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament }) {
-  const [tab, setTab] = useState("parejas");
+/* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
+   pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
+function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
+  const [ownTab, setTab] = useState("parejas");
+  const tab = section || ownTab;
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
@@ -7998,13 +7989,13 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.
         </p>
       )}
-      <div className="flex gap-2 mb-6 border-b border-teal-800">
+      {!section && <div className="flex gap-2 mb-6 border-b border-teal-800">
         {categoryTabs.map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-lime-400 text-lime-400" : "text-teal-400"}`} style={F.body}>
             {label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {tab === "parejas" && (
         <div>
@@ -8314,7 +8305,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
           {category.bracketIsSkeleton && category.bracket && (
             <div className="border border-purple-800 rounded-lg p-4 mb-6">
               <p className="text-sm mb-3" style={{ ...F.body, color: "#a78bfa" }}>
-                Esta es la estructura precargada de la llave, todavía sin parejas confirmadas. Podés seguir ajustando los horarios en la grilla. Cuando los grupos terminen, generá la llave final desde la pestaña de grupos para completar las parejas.
+                Esta es la estructura precargada de la llave, todavía sin parejas confirmadas. Podés seguir ajustando los horarios en la grilla. Cuando los grupos terminen, generá la llave final desde la pestaña Llaves para completar las parejas.
               </p>
               {category.groups.length > 0 && category.groups.every((g) => g.matches.every((m) => matchIsPlayed(m, format))) && (
                 <button
@@ -8443,7 +8434,10 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   );
 }
 
+/* Botones de categoría. Sin onAdd / onRename / onDelete sirven solo para elegir una (en
+   Inscripciones, Grupos y Llaves); las categorías se crean y editan en Configuración. */
 function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelete }) {
+  const editable = !!(onRename && onDelete);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState(null);
@@ -8476,7 +8470,7 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
               <button
                 type="button"
                 onClick={() => onSelect(c.id)}
-                onDoubleClick={() => { setEditingId(c.id); setEditName(c.name); }}
+                onDoubleClick={editable ? () => { setEditingId(c.id); setEditName(c.name); } : undefined}
                 className="whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
                 style={
                   c.id === activeId
@@ -8487,7 +8481,7 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
                 {c.name}
               </button>
             )}
-            {c.id === activeId && editingId !== c.id && (
+            {editable && c.id === activeId && editingId !== c.id && (
               confirmingDeleteId === c.id ? (
                 <span className="ml-1 text-xs">
                   <button type="button" onClick={() => { onDelete(c.id); setConfirmingDeleteId(null); }} className="text-red-400 font-semibold mr-1">Confirmar</button>
@@ -8504,7 +8498,7 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
           );
         })}
 
-        {adding ? (
+        {!onAdd ? null : adding ? (
           <span className="flex items-center gap-1 shrink-0">
             <input
               value={newName}
@@ -8529,9 +8523,72 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
           </button>
         )}
       </div>
-      {categories.length > 0 && (
+      {editable && categories.length > 0 && (
         <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Tip: doble clic en una categoría para renombrarla.</p>
       )}
+    </div>
+  );
+}
+
+/* Configuración: las categorías del torneo con su nombre y su cupo (vacío = sin límite; el Súper 8
+   es siempre de 8), para agregar, renombrar y borrar en un solo lugar */
+function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
+  const [newName, setNewName] = useState("");
+  const [names, setNames] = useState({}); // nombres en edición, se guardan al salir del campo
+  const [cupos, setCupos] = useState({});
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
+  const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  const add = () => { if (newName.trim()) { onAdd(newName.trim()); setNewName(""); } };
+  return (
+    <div className="border border-teal-800 rounded-lg p-4 mb-6" style={F.body}>
+      <p className="text-sm font-semibold mb-1">Categorías y cupos</p>
+      <p className="text-[11px] text-teal-600 mb-3">Cada categoría tiene sus parejas, grupos y llave. El cupo cuenta todas las parejas anotadas (vacío = sin límite).</p>
+      <div className="space-y-2">
+        {tournament.categories.map((c, ci) => {
+          const color = GROUP_COLORS[ci % GROUP_COLORS.length];
+          const played = c.pairs.length > 0 || (c.groups || []).length > 0;
+          return (
+            <div key={c.id} className="flex items-center gap-2 flex-wrap">
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+              <input
+                value={names[c.id] ?? c.name}
+                onChange={(e) => setNames({ ...names, [c.id]: e.target.value })}
+                onBlur={() => { const n = (names[c.id] ?? c.name).trim(); if (n && n !== c.name) onRename(c.id, n); setNames(({ [c.id]: _, ...rest }) => rest); }}
+                aria-label="Nombre de la categoría"
+                className="flex-1 min-w-[8rem] px-2 py-1.5 rounded border text-sm" style={input}
+              />
+              {isSuper8(c) ? (
+                <span className="text-xs text-teal-500 w-28">{SUPER8_SIZE} {c.format === "super8_individual" ? "jugadores" : "parejas"}</span>
+              ) : (
+                <input
+                  type="number" min="1" inputMode="numeric"
+                  value={cupos[c.id] ?? (c.cupo || "")}
+                  onChange={(e) => setCupos({ ...cupos, [c.id]: e.target.value })}
+                  onBlur={() => { if (cupos[c.id] !== undefined) { onCupo(c.id, parseCupo(cupos[c.id])); setCupos(({ [c.id]: _, ...rest }) => rest); } }}
+                  placeholder="Sin límite" aria-label={`Cupo de ${c.name}`}
+                  className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
+                />
+              )}
+              <span className="text-xs text-teal-500 w-20">{c.pairs.length} anotada{c.pairs.length === 1 ? "" : "s"}</span>
+              {confirmingDeleteId === c.id ? (
+                <span className="text-xs">
+                  <button type="button" onClick={() => { onDelete(c.id); setConfirmingDeleteId(null); }} className="text-red-400 font-semibold mr-2">{played ? "Borrar con sus parejas" : "Borrar"}</button>
+                  <button type="button" onClick={() => setConfirmingDeleteId(null)} className="text-teal-400">Cancelar</button>
+                </span>
+              ) : (
+                <button type="button" onClick={() => setConfirmingDeleteId(c.id)} className="text-xs text-red-400" title="Borrar categoría">🗑</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-2 mt-3">
+        <input
+          value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+          placeholder="Ej: 4ta Caballeros" className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={input}
+        />
+        <button type="button" onClick={add} disabled={!newName.trim()} className="px-3 py-1.5 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>+ Agregar categoría</button>
+      </div>
     </div>
   );
 }
@@ -8539,20 +8596,24 @@ function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelet
 function AdminTournament({ tournament, update, onBack, inscripciones = [], onResolveInscripcion }) {
   const usesSchedule = tournamentUsesSchedule(tournament);
   const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
-  // Con el torneo en curso arranca en "En cancha", que es lo que se usa desde el celular en el club;
-  // si hay inscripciones nuevas y todavía no empezó, arranca ahí
-  const [chosenView, setView] = useState(
-    tournament.status === STATUS.EN_CURSO ? "encancha" : pendingCount > 0 ? "inscripciones" : "horarios"
-  ); // encancha | horarios | categorias | inscripciones
-  // El Súper 8 no tiene grilla de horarios: los partidos se juegan uno atrás del otro
-  const view = usesSchedule || chosenView === "inscripciones" ? chosenView : "categorias";
-  const tabs = [
-    ...(usesSchedule ? [["encancha", "En cancha"], ["horarios", "Horarios"]] : []),
-    ["categorias", "Categorías"],
-    ["inscripciones", "Inscripciones"],
-  ];
+  // Pestañas en el orden en que se organiza un torneo. El Súper 8 no tiene grupos, llave ni grilla
+  // de horarios: sus partidos van en "Partidos".
+  const tabs = usesSchedule
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"]]
+    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"]];
+  // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
+  // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
+  const [chosenView, setView] = useState(() => {
+    if (tournament.status === STATUS.EN_CURSO) return usesSchedule ? "encancha" : "partidos";
+    if (pendingCount > 0) return "inscripciones";
+    if (tournament.categories.length === 0 || (usesSchedule && (tournament.playDates || []).length === 0)) return "config";
+    return usesSchedule ? "horarios" : "inscripciones";
+  });
+  const view = tabs.some(([key]) => key === chosenView) ? chosenView : "config";
+  const nextTab = tabs[tabs.findIndex(([key]) => key === view) + 1];
+  const goTo = (key) => { setView(key); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
-  const category = tournament.categories.find((c) => c.id === categoryId) || null;
+  const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;
 
   const setCategories = (categories) => update({ ...tournament, categories });
 
@@ -8599,12 +8660,6 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
             {Object.values(STATUS).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
-        <p className="text-sm text-teal-400 mb-4" style={F.body}>
-          {usesSchedule
-            ? "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta). Cada una tiene sus propias parejas, grupos y llave. El formato de partido y la grilla de horarios aplican a todas por igual."
-            : "Este torneo puede tener varias categorías (ej: 4ta Caballeros, 5ta Damas, Mixta), cada una con sus 8 inscriptos. El tipo de torneo y el formato de partido aplican a todas por igual. No hay grilla de horarios: los partidos se juegan por turnos en las canchas del torneo (se eligen en \"Partidos y posiciones\")."}
-        </p>
-
         {/* Contador de parejas inscriptas por categoría (Clásico y Americano), contra el cupo si hay */}
         {tournamentType(tournament) !== "super8" && tournament.categories.length > 0 && (
           <div className="flex gap-2 mb-5 overflow-x-auto pb-1" style={F.body}>
@@ -8630,7 +8685,7 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
           {tabs.map(([key, label]) => (
             <button
               key={key}
-              onClick={() => setView(key)}
+              onClick={() => goTo(key)}
               className={`shrink-0 whitespace-nowrap px-4 py-2 rounded text-sm border flex items-center gap-1.5 ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
               style={F.body}
             >
@@ -8642,32 +8697,59 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
           ))}
         </div>
 
-        {view === "inscripciones" ? (
-          <InscripcionesPanel tournament={tournament} update={update} inscripciones={inscripciones} onResolve={onResolveInscripcion} />
-        ) : view === "encancha" ? (
-          <OnCourtView tournament={tournament} update={update} />
-        ) : view === "horarios" ? (
-          <ScheduleAdminView tournament={tournament} update={update} />
-        ) : (
+        {view === "config" && (
           <>
             <TournamentTypeEditor tournament={tournament} update={update} />
-
-            <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Categorías</h2>
-            <CategoryTabs
-              categories={tournament.categories}
-              activeId={categoryId}
-              onSelect={setCategoryId}
-              onAdd={addCategory}
-              onRename={renameCategory}
-              onDelete={deleteCategory}
+            <CategoriesSettings
+              tournament={tournament} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory}
+              onCupo={(id, cupo) => setCategories(tournament.categories.map((c) => {
+                if (c.id !== id) return c;
+                const { cupo: _, ...rest } = c;
+                return cupo ? { ...rest, cupo } : rest;
+              }))}
             />
+            {usesSchedule && <CourtsAndDatesEditor tournament={tournament} onChange={update} />}
+          </>
+        )}
 
-            {category ? (
-              <CategoryAdminView key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament} onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update} />
-            ) : (
-              <p className="opacity-60 text-sm" style={F.body}>Agregá al menos una categoría para empezar a cargar parejas.</p>
+        {view === "inscripciones" && (
+          <>
+            <InscripcionesPanel tournament={tournament} update={update} inscripciones={inscripciones} onResolve={onResolveInscripcion} />
+            {tournament.categories.length > 0 && (
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Anotadas por categoría</h2>
             )}
           </>
+        )}
+
+        {/* Lo de cada categoría (parejas, grupos, llave, partidos del Súper 8), una a la vez */}
+        {["inscripciones", "grupos", "llaves", "partidos"].includes(view) && (
+          tournament.categories.length === 0 ? (
+            <p className="opacity-60 text-sm" style={F.body}>
+              Todavía no hay categorías. <button type="button" onClick={() => goTo("config")} className="underline text-lime-400">Agregalas en Configuración</button>.
+            </p>
+          ) : (
+            <>
+              {tournament.categories.length > 1 && <CategoryTabs categories={tournament.categories} activeId={category?.id} onSelect={setCategoryId} />}
+              {category && (
+                <CategoryAdminView
+                  key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament}
+                  onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update}
+                  section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]}
+                />
+              )}
+            </>
+          )
+        )}
+
+        {view === "horarios" && <ScheduleAdminView tournament={tournament} update={update} onGoConfig={() => goTo("config")} />}
+        {view === "encancha" && <OnCourtView tournament={tournament} update={update} />}
+
+        {nextTab && (
+          <div className="mt-10 pt-4 border-t border-teal-900 flex justify-end">
+            <button type="button" onClick={() => goTo(nextTab[0])} className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400 hover:bg-lime-400 hover:text-slate-900 transition" style={F.body}>
+              Siguiente: {nextTab[1]} →
+            </button>
+          </div>
         )}
       </div>
     </CourtNamesContext.Provider>
