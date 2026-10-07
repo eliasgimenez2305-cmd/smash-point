@@ -3366,6 +3366,16 @@ function VenuesField({ tournament, onChange }) {
     onChange({ ...tournament, venues: clean.length > 0 ? clean : null, courtsCount: clean.length > 0 ? clean.reduce((s, v) => s + v.courts, 0) : tournament.courtsCount });
   };
   const update = (id, patch) => save(venues.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+  // Una sede arranca antes (o termina después) que el horario del torneo ese día: se amplía el día y
+  // las sedes que seguían el horario del torneo pasan a tener sus días con el horario de antes, así
+  // no se corren solas
+  const widenDay = (date, from, to) => {
+    const day = dates.find((d) => d.date === date);
+    if (!day) return;
+    const nextDates = dates.map((d) => (d.date === date ? { ...d, from: from < d.from ? from : d.from, to: to > d.to ? to : d.to } : d));
+    const nextVenues = venues.map((v) => (v.days ? v : { ...v, days: dates.map((d) => ({ date: d.date, from: d.from, to: d.to })) }));
+    onChange({ ...tournament, playDates: nextDates, venues: nextVenues });
+  };
   const start = () => save([{ id: uid(), name: "Sede 1", courts: tournament.courtsCount || 1 }, { id: uid(), name: "Sede 2", courts: 2 }]);
   const scheduled = (tournament.categories || []).some((c) => (c.groups || []).some((g) => g.matches.some((m) => m.schedule)) || (c.bracket || []).some((r) => r.some((m) => m.schedule)));
 
@@ -3392,7 +3402,7 @@ function VenuesField({ tournament, onChange }) {
               <input type="number" min="1" inputMode="numeric" value={v.courts} onChange={(e) => update(v.id, { courts: e.target.value })} className="w-16 px-2 py-1.5 rounded border text-sm" style={input} />
             </label>
             <button type="button" onClick={() => save(venues.filter((x) => x.id !== v.id))} className="text-red-400 text-xs">Quitar ✕</button>
-            {dates.length > 0 && <VenueDaysField venue={v} dates={dates} onChange={(days) => update(v.id, { days })} />}
+            {dates.length > 0 && <VenueDaysField venue={v} dates={dates} onChange={(days) => update(v.id, { days })} onWidenDay={widenDay} />}
           </div>
         ))}
       </div>
@@ -3404,7 +3414,7 @@ function VenuesField({ tournament, onChange }) {
 
 /* Qué días y en qué horario se usa una sede (venue.days, ver courtIsOpen). "Todos los días" = sin
    days: la sede sigue los días y horarios del torneo, también los que se agreguen después. */
-function VenueDaysField({ venue, dates, onChange }) {
+function VenueDaysField({ venue, dates, onChange, onWidenDay }) {
   const input = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
   const all = !venue.days;
   const dayOf = (date) => (venue.days || []).find((d) => d.date === date);
@@ -3439,7 +3449,15 @@ function VenueDaysField({ venue, dates, onChange }) {
                     <input type="time" lang="es-AR" value={own.from} onChange={(e) => setDay(d.date, { from: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
                     <span className="text-teal-500">a</span>
                     <input type="time" lang="es-AR" value={own.to} onChange={(e) => setDay(d.date, { to: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
-                    {(own.from < d.from || own.to > d.to) && <span className="text-amber-400">El torneo ese día va de {d.from} a {d.to}: fuera de eso no se usa.</span>}
+                    {(own.from < d.from || own.to > d.to) && own.from < own.to && (
+                      <span className="text-amber-400">
+                        El torneo ese día va de {d.from} a {d.to}.{" "}
+                        <button type="button" onClick={() => onWidenDay(d.date, own.from, own.to)} className="underline font-semibold text-lime-400">
+                          Ampliar el {formatDateShort(d.date)} a {own.from < d.from ? own.from : d.from}–{own.to > d.to ? own.to : d.to}
+                        </button>
+                        <span className="block text-teal-600">Las demás sedes quedan en su horario de ahora.</span>
+                      </span>
+                    )}
                   </>
                 ) : (
                   <span className="text-teal-600">No se usa</span>
