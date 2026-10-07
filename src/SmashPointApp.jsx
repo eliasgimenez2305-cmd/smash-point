@@ -6,7 +6,7 @@ import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScor
 import { findNameDuplicates, splitPair } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
-import { mergeTournament } from "./merge.js";
+import { mergeTournament, isStaleRemote } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -9012,13 +9012,15 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
   const busy = (id) => !!(saving.current[id] || pending.current[id]);
 
   /* La lista recién leída de la base: se anotan las versiones y se reemplazan los torneos que no
-     tienen cambios propios sin guardar */
+     tienen cambios propios sin guardar. Una versión más vieja que la última guardada (la lectura
+     salió antes de ese guardado) no se aplica: borraría ese cambio. */
   const applyRemote = useCallback((remoteList) => {
-    remoteList.forEach((t) => { if (!busy(t.id)) serverCopy.current[t.id] = t; });
+    const keep = new Set(remoteList.filter((t) => busy(t.id) || isStaleRemote(serverCopy.current[t.id], t)).map((t) => t.id));
+    remoteList.forEach((t) => { if (!keep.has(t.id)) serverCopy.current[t.id] = t; });
     setList((prev) => {
       const remoteIds = new Set(remoteList.map((t) => t.id));
       const kept = prev.filter((t) => remoteIds.has(t.id) || busy(t.id));
-      const merged = kept.map((t) => (busy(t.id) ? t : remoteList.find((r) => r.id === t.id)));
+      const merged = kept.map((t) => (busy(t.id) || keep.has(t.id) ? t : remoteList.find((r) => r.id === t.id)));
       remoteList.forEach((r) => { if (!kept.some((t) => t.id === r.id)) merged.push(r); });
       return merged;
     });

@@ -1,7 +1,7 @@
 /* Tests de la mezcla de cambios simultáneos sobre un torneo (merge.js). Se corren con `npm test`. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeTournament } from "./merge.js";
+import { mergeTournament, isStaleRemote } from "./merge.js";
 
 const cat = (id, extra = {}) => ({ id, name: id.toUpperCase(), pairs: [], groups: [], ...extra });
 const base = { id: "t", name: "Torneo", courtsCount: 4, rev: 3, categories: [cat("4ta"), cat("5ta")] };
@@ -50,4 +50,12 @@ test("datos generales que chocan: queda lo guardado y se avisa", () => {
   const { merged, conflicts } = mergeTournament(base, { ...base, courtsCount: 5 }, { ...base, rev: 4, courtsCount: 6 });
   assert.deepEqual(conflicts, ["datos del torneo"]);
   assert.equal(merged.courtsCount, 6);
+});
+
+test("recarga automática: una versión más vieja que la guardada no se aplica", () => {
+  assert.equal(isStaleRemote({ rev: 8 }, { rev: 7 }), true, "la lectura salió antes del último guardado");
+  assert.equal(isStaleRemote({ rev: 8 }, { rev: 8 }), false);
+  assert.equal(isStaleRemote({ rev: 8 }, { rev: 9 }), false, "otra persona guardó después: se aplica");
+  assert.equal(isStaleRemote(undefined, { rev: 3 }), false, "torneo nuevo para este navegador");
+  assert.equal(isStaleRemote({ rev: 2 }, {}), true, "sin versión cuenta como la 0");
 });

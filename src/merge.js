@@ -32,6 +32,14 @@ function mergeCategories(base, mine, remote, conflicts) {
   return out;
 }
 
+/* ¿La versión que trajo la recarga automática es más vieja que la última que sabemos guardada?
+   Pasa cuando la lectura salió antes de un guardado y llegó después: aplicarla borraría ese
+   cambio de la pantalla (y el próximo guardado lo borraría de la base). known: la última versión
+   conocida de ese torneo (o undefined). */
+export function isStaleRemote(known, remote) {
+  return (known?.rev ?? -1) > (remote?.rev ?? 0);
+}
+
 /* Devuelve { merged, conflicts }: el torneo para volver a guardar y los nombres de las categorías
    (o "datos del torneo") donde los dos cambios chocaron y quedó lo que ya estaba guardado. */
 export function mergeTournament(base, mine, remote) {
