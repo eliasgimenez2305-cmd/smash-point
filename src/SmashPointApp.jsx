@@ -7949,6 +7949,9 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   const [editingCrosses, setEditingCrosses] = useState(false);
+  // "Reiniciar llave" borra la llave entera, con sus resultados y horarios: siempre se confirma
+  const [confirmingBracketReset, setConfirmingBracketReset] = useState(false);
+  const bracketResultsCount = (category.bracket || []).flat().filter(matchHasScore).length;
   const [swapA, setSwapA] = useState("");
   const [swapB, setSwapB] = useState("");
 
@@ -8438,7 +8441,18 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                     );
                   }}
                 />
-                <button onClick={() => onUpdateCategory({ ...category, bracket: null })} className="text-xs text-red-400" style={F.body}>Reiniciar llave</button>
+                {confirmingBracketReset ? (
+                  <div className="rounded-lg p-3 text-xs border border-red-400/50" style={{ ...F.body, backgroundColor: "rgba(248,113,113,0.08)" }}>
+                    <p className="text-red-300 mb-2">
+                      Se borra la llave de {category.name} con sus horarios
+                      {bracketResultsCount > 0 ? <> y <strong>{bracketResultsCount === 1 ? "1 resultado cargado" : `${bracketResultsCount} resultados cargados`}</strong></> : ""}. No se puede deshacer.
+                    </p>
+                    <button type="button" onClick={() => { onUpdateCategory({ ...category, bracket: null, bracketSeeding: null, bracketIsSkeleton: false, bracketPublished: false }); setConfirmingBracketReset(false); }} className="px-3 py-1.5 rounded font-semibold mr-2" style={{ backgroundColor: "#f87171", color: "#14181f" }}>Sí, reiniciar la llave</button>
+                    <button type="button" onClick={() => setConfirmingBracketReset(false)} className="text-teal-300">Cancelar</button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => setConfirmingBracketReset(true)} className="text-xs text-red-400" style={F.body}>Reiniciar llave</button>
+                )}
               </>
             );
           })()}
