@@ -3612,84 +3612,6 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
   );
 }
 
-/* Una fila editable (se usa solo para los partidos SIN horario todavía, en la bandeja de abajo de
-   la planilla): permite asignar fecha, hora y cancha a mano, y también se puede arrastrar directo
-   a una celda libre de la planilla. */
-function ScheduleRow({ m, format, pairsById, playDates, courtsCount, onEdit, onClear, onToggleLive, draggable, onDragStart }) {
-  const s = m.schedule;
-  const courtLabel = useCourtName();
-  const hasResult = matchIsPlayed(m, format);
-  const w = hasResult ? matchWinnerId(m, format) : null;
-  const winnerIsA = w == null ? null : w === m.pairA;
-  return (
-    <div
-      draggable={draggable}
-      onDragStart={onDragStart}
-      className="flex items-center justify-between gap-3 flex-wrap border border-teal-800 rounded px-3 py-2 text-sm"
-      style={{ ...F.body, cursor: draggable ? "grab" : "default" }}
-    >
-      <div className="min-w-[200px] max-w-full">
-        <div className="flex items-center gap-2 mb-1 flex-wrap">
-          <span className="text-xs text-teal-500">{m.number ? `#${m.number} · ` : ""}{m.categoryName} · {m.label}</span>
-          {!m.placeholder && <MatchStatusBadge status={matchDisplayStatus(m, format)} />}
-          {m.draft && <span className="text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full" style={{ backgroundColor: "#a78bfa22", color: "#a78bfa" }}>Borrador</span>}
-        </div>
-        {m.placeholder ? (
-          <span className="italic opacity-70">{m.placeholder}</span>
-        ) : (
-          <div className="leading-snug">
-            <div className="flex items-center gap-1">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} /></div>
-            <div className="text-[11px] opacity-50 flex items-center gap-2">
-              <span>vs</span>
-              {hasResult && (
-                <span className="font-mono not-italic opacity-100 text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></span>
-              )}
-            </div>
-            <div className="flex items-center gap-1">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} /></div>
-          </div>
-        )}
-      </div>
-      <div className="flex items-center gap-2 flex-wrap">
-        {!m.placeholder && !hasResult && (
-          <button
-            type="button"
-            onClick={() => onToggleLive(m.liveStatus === "en_curso" ? null : "en_curso")}
-            className="text-xs px-2 py-1 rounded border"
-            style={m.liveStatus === "en_curso" ? { borderColor: "#fb923c", color: "#fb923c" } : { borderColor: "#94a3b8", color: "#94a3b8" }}
-          >
-            {m.liveStatus === "en_curso" ? "Quitar \"en curso\"" : "Marcar en curso"}
-          </button>
-        )}
-        <select
-          value={s?.date || ""}
-          onChange={(e) => onEdit({ date: e.target.value, time: s?.time || "09:00", court: s?.court || 1 })}
-          className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-        >
-          <option value="">Sin asignar</option>
-          {playDates.map((d) => <option key={d.date} value={d.date}>{formatDateShort(d.date)}</option>)}
-        </select>
-        {s?.date && (
-          <>
-            <input
-              type="time" lang="es-AR" value={s.time}
-              onChange={(e) => onEdit({ ...s, time: e.target.value })}
-              className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-            <select
-              value={s.court}
-              onChange={(e) => onEdit({ ...s, court: Number(e.target.value) })}
-              className="px-2 py-1 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            >
-              {Array.from({ length: courtsCount }, (_, i) => i + 1).map((c) => <option key={c} value={c}>{courtLabel(c)}</option>)}
-            </select>
-            <button type="button" onClick={onClear} className="text-xs text-red-400">Quitar</button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
 function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove }) {
@@ -4182,7 +4104,6 @@ function ScheduleAdminView({ tournament, update }) {
 
   const editSchedule = (m, schedule) => { update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, schedule)); };
   const clearSchedule = (m) => { update(withMatchSchedule(tournament, m.categoryId, m.location, m.matchId, null)); setNotice(null); };
-  const toggleLiveStatus = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
 
   const [confirmingReschedule, setConfirmingReschedule] = useState(false);
   const reschedule = () => { update(rescheduleTournament(tournament)); setConfirmingReschedule(false); setNotice(null); };
@@ -4238,34 +4159,79 @@ function ScheduleAdminView({ tournament, update }) {
     if (m) clearSchedule(m);
   };
 
+  // Avisos, todos juntos en un recuadro plegable. day/categoryId: a dónde lleva "Ver"
+  const firstOf = (list) => list.slice().sort(compareBySchedule)[0];
+  const alerts = [];
+  if (offGrid.length > 0) alerts.push({ key: "offgrid", text: `${offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.` });
+  if (atClosed.length > 0) alerts.push({ key: "closed", day: firstOf(atClosed).schedule.date, text: `${atClosed.length === 1 ? "Hay 1 partido" : `Hay ${atClosed.length} partidos`} en una sede que ese día o a esa hora no se usa (${[...new Set(atClosed.map((m) => (tournament.venues || [])[courtVenueIndex(tournament, m.schedule.court)]?.name))].join(", ")}). Movelos a mano o tocá "Rearmar horarios".` });
+  if (capacityNotice) alerts.push({ key: "capacity", text: capacityNotice });
+  // "6TA FEM Grupo B": la categoría es la de nombre más largo que coincide (no "6TA")
+  const splitCategory = splitGroups.length > 0
+    ? tournament.categories.filter((c) => splitGroups[0].startsWith(`${c.name} `)).sort((a, b) => b.name.length - a.name.length)[0]
+    : null;
+  if (splitGroups.length > 0) alerts.push({ key: "split", categoryId: splitCategory?.id, text: `${splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba${splitGroups.length === 1 ? "" : "n"} en una sola: ${splitGroups.join(", ")}. Podés moverlos a mano en la planilla.` });
+  sameDayNotices.forEach((text) => alerts.push({ key: `sameday-${text}`, text }));
+  if (offAvailabilityCount > 0) {
+    const first = firstOf(scheduled.filter((m) => offAvailability[m.key]));
+    alerts.push({ key: "avail", day: first.schedule.date, categoryId: first.categoryId, text: `${offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.` });
+  }
+  const [alertsOpen, setAlertsOpen] = useState(false);
+
+  // Un día a la vez (arranca hoy si es un día del torneo) y filtros por sede y por categoría
+  const [chosenDay, setDay] = useState(() => (playDates.some((d) => d.date === todayISO()) ? todayISO() : playDates[0]?.date || null));
+  const dayIndex = Math.max(0, playDates.findIndex((d) => d.date === chosenDay));
+  const dateInfo = playDates[dayIndex] || null;
+  const [venueFilter, setVenueFilter] = useState(""); // índice de sede, "" = todas
+  const [categoryFilter, setCategoryFilter] = useState(""); // id de categoría, "" = todas
+  const venues = tournament.venues || [];
+  const inCategory = (m) => !categoryFilter || m.categoryId === categoryFilter;
+  const trayMatches = unscheduled.filter(inCategory);
+  const goTo = (a) => { if (a.day) setDay(a.day); if (a.categoryId) setCategoryFilter(a.categoryId); };
+
+  // Configuración de canchas y fechas: plegada en una línea (abierta si todavía no hay fechas)
+  const [configOpen, setConfigOpen] = useState(playDates.length === 0);
+  const configSummary = [
+    venues.length > 0 ? `${venues.length} sede${venues.length === 1 ? "" : "s"}` : null,
+    `${courtsCount} cancha${courtsCount === 1 ? "" : "s"}`,
+    playDates.length > 0 ? (playDates.length === 1 ? formatDateShort(playDates[0].date) : `${formatDateShort(playDates[0].date)} a ${formatDateShort(playDates[playDates.length - 1].date)}`) : "sin fechas",
+    `${duration} min por partido`,
+  ].filter(Boolean).join(" · ");
+
+  const pill = "px-3 py-1.5 rounded-full text-xs border whitespace-nowrap";
+  const selectStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+
   return (
     <div>
       {gridOpen && <ScheduleGridOverlay tournament={tournament} matches={matches} pairsById={pairsById} onOpenResult={openResult} onClose={() => setGridOpen(false)} />}
       {fixtureOpen && <FixtureImagesModal tournament={tournament} matches={matches} pairsById={pairsById} onClose={() => setFixtureOpen(false)} />}
       {modals}
-      {matches.length > 0 && (
-        <div className="flex justify-end gap-2 flex-wrap mb-4">
-          {tournamentType(tournament) === "clasico" && scheduled.length > 0 && (
-            <button type="button" onClick={() => setFixtureOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.lime), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
-              📸 Imágenes para redes
-            </button>
+
+      {configOpen ? (
+        <div>
+          {playDates.length > 0 && (
+            <div className="flex justify-end mb-1">
+              <button type="button" onClick={() => setConfigOpen(false)} className="text-xs text-teal-400 hover:text-lime-400" style={F.body}>Listo, cerrar ▴</button>
+            </div>
           )}
-          <button type="button" onClick={() => setGridOpen(true)} className="px-4 py-2 rounded-full font-semibold text-sm flex items-center gap-2" style={{ ...F.body, ...neonStyle(BRAND.cyan), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
-            ▦ Abrir grilla
-          </button>
+          <CourtsAndDatesEditor tournament={tournament} onChange={update} />
         </div>
+      ) : (
+        <button type="button" onClick={() => setConfigOpen(true)} className="w-full flex items-center justify-between gap-3 flex-wrap px-4 py-2.5 mb-4 rounded-lg border border-teal-800 hover:border-teal-500 text-left" style={F.body}>
+          <span className="text-xs text-teal-300">🏟 {configSummary}</span>
+          <span className="text-xs text-lime-400 font-semibold">✎ Canchas, sedes y fechas</span>
+        </button>
       )}
-      <CourtsAndDatesEditor tournament={tournament} onChange={update} />
 
       {matches.length === 0 ? (
         <p className="opacity-60 text-sm" style={F.body}>Todavía no hay partidos con ambas parejas definidas (cargá grupos o llave en alguna categoría).</p>
       ) : (
         <>
-          <div className="flex gap-2 flex-wrap items-center">
+          <div className="flex gap-2 flex-wrap items-center mb-2">
             <button
               type="button"
               onClick={() => update(autoSchedule(tournament))}
               disabled={playDates.length === 0}
+              title="Completa los partidos de grupos sin horario (se repite solo apenas se cierra un grupo)"
               className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
             >
               Generar horarios de grupos
@@ -4277,46 +4243,38 @@ function ScheduleAdminView({ tournament, update }) {
                 <button type="button" onClick={() => setConfirmingReschedule(false)} className="text-teal-400">Cancelar</button>
               </span>
             ) : (
-              <button type="button" disabled={playDates.length === 0} onClick={() => setConfirmingReschedule(true)} className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400 disabled:opacity-40" style={F.body}>
+              <button type="button" disabled={playDates.length === 0} onClick={() => setConfirmingReschedule(true)} title="Vuelve a ubicar desde cero todo lo que no se jugó, incluida la llave" className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400 disabled:opacity-40" style={F.body}>
                 Rearmar horarios
               </button>
             ))}
+            <span className="flex-1" />
+            {tournamentType(tournament) === "clasico" && scheduled.length > 0 && (
+              <button type="button" onClick={() => setFixtureOpen(true)} className="px-3 py-2 rounded-full font-semibold text-xs flex items-center gap-1.5" style={{ ...F.body, ...neonStyle(BRAND.lime), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
+                📸 Imágenes para redes
+              </button>
+            )}
+            <button type="button" onClick={() => setGridOpen(true)} className="px-3 py-2 rounded-full font-semibold text-xs flex items-center gap-1.5" style={{ ...F.body, ...neonStyle(BRAND.cyan), color: BRAND.ink, backgroundColor: "rgba(8,18,24,0.7)" }}>
+              ▦ Pantalla completa
+            </button>
           </div>
-          <p className="text-xs text-teal-500 mt-2 mb-3" style={F.body}>
-            "Generar horarios de grupos" solo completa los partidos de grupos sin horario (y se repite solo apenas se cierra un grupo). "Rearmar" vuelve a ubicar desde cero todos los que todavía no se jugaron, incluida la llave: usalo si cambiaste el horario de arranque, las canchas o el tiempo entre partidos. Arrastrá las tarjetas para reubicarlas.
-          </p>
-          {offGrid.length > 0 && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
-              {offGrid.length === 1 ? "Hay 1 partido" : `Hay ${offGrid.length} partidos`} con un horario que ya no entra en la grilla (cambió el horario, las canchas o la duración). Tocá "Rearmar horarios" para volver a ubicarlos.
-            </div>
-          )}
-          {atClosed.length > 0 && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
-              {atClosed.length === 1 ? "Hay 1 partido" : `Hay ${atClosed.length} partidos`} en una sede que ese día o a esa hora no se usa ({[...new Set(atClosed.map((m) => (tournament.venues || [])[courtVenueIndex(tournament, m.schedule.court)]?.name))].join(", ")}). Movelos a mano o tocá "Rearmar horarios".
-            </div>
-          )}
+          <p className="text-[11px] text-teal-600 mb-4" style={F.body}>Arrastrá las tarjetas para reubicarlas, o tocá "⇄ Mover". "Rearmar" vuelve a ubicar todo lo que no se jugó: usalo si cambiaste fechas, sedes o canchas.</p>
 
-          {capacityNotice && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
-              ⚠ {capacityNotice}
-            </div>
-          )}
-
-          {splitGroups.length > 0 && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
-              ⚠ {splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba{splitGroups.length === 1 ? "" : "n"} en una sola: {splitGroups.join(", ")}. Podés moverlos a mano en la planilla.
-            </div>
-          )}
-
-          {sameDayNotices.length > 0 && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border space-y-1" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
-              {sameDayNotices.map((text) => <p key={text}>⚠ {text}</p>)}
-            </div>
-          )}
-
-          {offAvailabilityCount > 0 && (
-            <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2414", color: "#fbbf24" }}>
-              ⚠ {offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (están marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.
+          {alerts.length > 0 && (
+            <div className="mb-4 rounded-lg border" style={{ ...F.body, borderColor: "#fbbf2460", backgroundColor: "#fbbf2410" }}>
+              <button type="button" onClick={() => setAlertsOpen(!alertsOpen)} className="w-full flex items-center justify-between px-3 py-2 text-sm font-semibold" style={{ color: "#fbbf24" }}>
+                <span>⚠ {alerts.length === 1 ? "1 aviso" : `${alerts.length} avisos`}</span>
+                <span className="text-xs">{alertsOpen ? "Ocultar ▴" : "Ver ▾"}</span>
+              </button>
+              {alertsOpen && (
+                <ul className="px-3 pb-3 space-y-2">
+                  {alerts.map((a) => (
+                    <li key={a.key} className="text-xs leading-snug" style={{ color: "#fcd34d" }}>
+                      {a.text}
+                      {(a.day || a.categoryId) && <button type="button" onClick={() => goTo(a)} className="ml-1 underline font-semibold text-lime-400">Ver</button>}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 
@@ -4340,148 +4298,202 @@ function ScheduleAdminView({ tournament, update }) {
             </div>
           )}
 
-          <div className="flex flex-wrap gap-3 mb-4 text-[11px]" style={F.body}>
-            {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
-              <span key={label} className="flex items-center gap-1.5">
-                <span className="w-3 h-3 rounded-sm inline-block" style={{ border: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, backgroundColor: color + "22" }} />
-                {label}
-              </span>
-            ))}
-          </div>
-
           {notice && (
             <div className="mb-4 px-3 py-2 rounded text-xs border" style={{ ...F.body, borderColor: "#fb923c60", backgroundColor: "#fb923c14", color: "#fb923c" }}>
               {notice}
             </div>
           )}
 
-          {playDates.length === 0 ? (
-            <p className="opacity-60 text-sm mb-6" style={F.body}>Cargá al menos una fecha arriba para poder armar la planilla.</p>
+          {!dateInfo ? (
+            <p className="opacity-60 text-sm mb-6" style={F.body}>Cargá al menos una fecha en "Canchas, sedes y fechas" para poder armar la planilla.</p>
           ) : (
-            playDates.map((dateInfo, di) => {
-              const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
-              const times = dayTimeSlots(dateInfo, duration);
-              // Solo las canchas de las sedes que se usan ese día
-              const courts = courtsOfDay(tournament, dateInfo.date, scheduled);
-              return (
-                <div key={dateInfo.date} className="mb-8">
-                  <div className="flex items-center gap-2 mb-3 flex-wrap">
-                    <SkewPill color={dateColor}>{formatDateShort(dateInfo.date)}</SkewPill>
-                  </div>
-                  <div className="hidden sm:block overflow-x-auto">
-                    <table className="border-collapse w-full min-w-[560px]">
-                      <thead>
-                        <tr>
-                          <th className="text-left text-[11px] text-teal-500 pb-1 pr-2 w-16" style={F.body}>Hora</th>
-                          {courts.map((court) => (
-                            <th key={court} className="text-center text-[11px] font-extrabold uppercase tracking-wide px-1 pb-1" style={{ ...F.body, color: dateColor }}>
-                              {courtName(tournament, court)}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {times.map((time) => (
-                          <tr key={time}>
-                            <td className="text-[11px] text-teal-500 align-top pt-2 pr-2 whitespace-nowrap" style={F.body}>{time}</td>
-                            {courts.map((court) => {
-                              const cellMatches = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
-                              const conflict = cellMatches.length > 1;
-                              // Su sede no se usa a esa hora: sin "+ Asignar" ni soltar partidos
-                              if (cellMatches.length === 0 && closed.has(`${dateInfo.date}|${time}|${court}`)) {
-                                return (
-                                  <td key={court} className="align-middle p-1 border text-center text-[10px] text-slate-500" style={{ ...F.body, borderColor: dateColor + "22", minWidth: 130, backgroundColor: "#0f172a66" }} title="Esta sede no se usa a esa hora">
-                                    Sede cerrada
-                                  </td>
-                                );
-                              }
-                              return (
-                                <td
-                                  key={court}
-                                  onDragOver={(e) => e.preventDefault()}
-                                  onDrop={onDropOnCell(dateInfo, time, court)}
-                                  className="align-top p-1 border"
-                                  style={{ borderColor: dateColor + "22", minWidth: 130, ...(closed.has(`${dateInfo.date}|${time}|${court}`) ? { backgroundColor: "#0f172a66" } : {}) }}
-                                >
-                                  {cellMatches.length === 0 ? (
-                                    <select
-                                      value=""
-                                      onChange={(e) => { const m = unscheduled.find((u) => u.key === e.target.value); if (m) editSchedule(m, { date: dateInfo.date, time, court }); }}
-                                      className="w-full text-[10px] px-1 py-1.5 rounded border border-dashed opacity-60"
-                                      style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
-                                    >
-                                      <option value="">+ Asignar partido</option>
-                                      {unscheduled.map((u) => <option key={u.key} value={u.key}>{u.categoryName} · {u.label}</option>)}
-                                    </select>
-                                  ) : (
-                                    cellMatches.map((m) => (
-                                      <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={onDragStartMatch(m.key)} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
-                                    ))
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {/* En el celular: cancha por cancha, en una columna (la tabla no entra a lo ancho) */}
-                  <div className="sm:hidden space-y-4">
-                    {courts.map((court) => {
-                      const courtMatches = scheduled.filter((m) => m.schedule.date === dateInfo.date && m.schedule.court === court).sort(compareBySchedule);
-                      return (
-                        <div key={court} className="rounded-xl border p-3" style={{ borderColor: dateColor + "40" }}>
-                          <p className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ ...F.body, color: dateColor }}>{courtName(tournament, court)}</p>
-                          {courtMatches.length === 0 && <p className="text-xs opacity-60 mb-2" style={F.body}>Sin partidos.</p>}
-                          {courtMatches.map((m) => (
-                            <div key={m.key} className="flex gap-2 items-start">
-                              <span className="text-xs font-bold w-11 shrink-0 pt-1.5" style={{ ...F.body, color: dateColor }}>{m.schedule.time}</span>
-                              <div className="flex-1 min-w-0">
-                                <GridMatchCard m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1} offAvailability={offAvailability[m.key]} onClear={() => clearSchedule(m)} onResult={() => openResult(m)} onMove={() => openMove(m)} />
-                              </div>
-                            </div>
-                          ))}
-                          {unscheduled.length > 0 && (
-                            <select
-                              value=""
-                              onChange={(e) => {
-                                const m = unscheduled.find((u) => u.key === e.target.value);
-                                const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null, closed);
-                                if (free) editSchedule(m, free);
-                                else if (m) setNotice(`${courtName(tournament, court)} no tiene horarios libres ese día.`);
-                              }}
-                              className="w-full mt-1 text-sm px-2 py-2 rounded border border-dashed"
-                              style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
-                            >
-                              <option value="">+ Agregar partido en el primer horario libre</option>
-                              {unscheduled.map((u) => <option key={u.key} value={u.key}>{u.categoryName} · {u.label}</option>)}
-                            </select>
-                          )}
-                        </div>
-                      );
-                    })}
+            <>
+              <div className="flex items-center gap-2 flex-wrap mb-3" style={F.body}>
+                {playDates.map((d, di) => {
+                  const on = d.date === dateInfo.date;
+                  const color = GROUP_COLORS[di % GROUP_COLORS.length];
+                  const count = scheduled.filter((m) => m.schedule.date === d.date && inCategory(m)).length;
+                  return (
+                    <button key={d.date} type="button" onClick={() => setDay(d.date)} className={pill} style={on ? { backgroundColor: color, borderColor: color, color: "#14181f", fontWeight: 700 } : { borderColor: color + "60", color }}>
+                      {formatDateShort(d.date)} <span className="opacity-70">· {count}</span>
+                    </button>
+                  );
+                })}
+                <span className="flex-1" />
+                {venues.length >= 2 && (
+                  <select value={venueFilter} onChange={(e) => setVenueFilter(e.target.value)} aria-label="Sede" className="px-2 py-1.5 rounded border text-xs" style={selectStyle}>
+                    <option value="">Todas las sedes</option>
+                    {venues.map((v, i) => <option key={v.id} value={i}>{v.name}</option>)}
+                  </select>
+                )}
+                {tournament.categories.length >= 2 && (
+                  <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} aria-label="Categoría" className="px-2 py-1.5 rounded border text-xs" style={selectStyle}>
+                    <option value="">Todas las categorías</option>
+                    {tournament.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                )}
+              </div>
+
+              <div className="lg:flex lg:items-start lg:gap-4">
+                <div className="flex-1 min-w-0 mb-6">
+                  <ScheduleDayGrid
+                    tournament={tournament} dateInfo={dateInfo} dateColor={GROUP_COLORS[dayIndex % GROUP_COLORS.length]}
+                    scheduled={scheduled} trayMatches={trayMatches} closed={closed} pairsById={pairsById} offAvailability={offAvailability}
+                    venueFilter={venueFilter === "" ? null : Number(venueFilter)} inCategory={inCategory}
+                    onDropOnCell={onDropOnCell} onDragStartMatch={onDragStartMatch} onAssign={editSchedule} onClear={clearSchedule}
+                    onResult={openResult} onMove={openMove} onNotice={setNotice}
+                  />
+                  <div className="flex flex-wrap gap-3 mt-3 text-[11px]" style={F.body}>
+                    {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
+                      <span key={label} className="flex items-center gap-1.5">
+                        <span className="w-3 h-3 rounded-sm inline-block" style={{ border: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, backgroundColor: color + "22" }} />
+                        {label}
+                      </span>
+                    ))}
                   </div>
                 </div>
-              );
-            })
-          )}
 
-          {unscheduled.length > 0 && (
-            <div onDragOver={(e) => e.preventDefault()} onDrop={onDropOnTray}>
-              <h3 className="text-sm font-semibold text-teal-300 mb-2" style={F.body}>Sin horario asignado ({unscheduled.length}) · arrastrá una celda libre de arriba, o soltá acá una tarjeta para quitarle el horario</h3>
-              <div className="space-y-2">
-                {unscheduled.map((m) => (
-                  <ScheduleRow key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} playDates={playDates} courtsCount={courtsCount}
-                    draggable onDragStart={onDragStartMatch(m.key)}
-                    onEdit={(s) => editSchedule(m, s)} onClear={() => clearSchedule(m)} onToggleLive={(ls) => toggleLiveStatus(m, ls)} />
-                ))}
+                {/* Sin horario: al costado y fijo mientras se recorre la planilla (en el celular, abajo).
+                    Soltar acá una tarjeta le quita el horario. */}
+                <aside
+                  onDragOver={(e) => e.preventDefault()} onDrop={onDropOnTray}
+                  className="lg:w-64 shrink-0 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto rounded-xl border border-teal-800 p-3 mb-6"
+                  style={F.body}
+                >
+                  <p className="text-sm font-semibold text-teal-200 mb-1">Sin horario ({trayMatches.length})</p>
+                  <p className="text-[11px] text-teal-600 mb-2">Arrastralos a la planilla o tocá "Ubicar". Soltá acá una tarjeta para sacarle el horario.</p>
+                  {trayMatches.length === 0 && <p className="text-xs text-lime-400">Todos los partidos{categoryFilter ? " de esta categoría" : ""} tienen horario ✓</p>}
+                  <div className="space-y-1.5">
+                    {trayMatches.map((m) => (
+                      <div key={m.key} draggable onDragStart={onDragStartMatch(m.key)} className="rounded-md px-2 py-1.5 text-[11px] leading-tight border cursor-grab" style={{ borderColor: m.draft ? "#a78bfa" : "#38bdf866", borderStyle: m.draft ? "dashed" : "solid" }}>
+                        <p className="text-teal-500 truncate">{m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+                        {m.placeholder && !(m.pairA && m.pairB)
+                          ? <p className="italic opacity-70 truncate">{m.placeholder}</p>
+                          : <p className="truncate"><PairName id={m.pairA} pairsById={pairsById} /> <span className="opacity-60">vs</span> <PairName id={m.pairB} pairsById={pairsById} /></p>}
+                        <button type="button" onClick={() => openMove(m)} className="mt-0.5 text-[10px] underline text-teal-300 hover:text-lime-400">Ubicar</button>
+                      </div>
+                    ))}
+                  </div>
+                </aside>
               </div>
-            </div>
+            </>
           )}
         </>
       )}
     </div>
+  );
+}
+
+/* Planilla de un día de la pestaña Horarios: en la compu, horas x canchas (arrastrar y soltar); en
+   el celular, cancha por cancha. Con filtro de sede solo muestra sus canchas; con filtro de
+   categoría, los partidos de las demás se ven como "Ocupado" (la cancha no está libre). */
+function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatches, closed, pairsById, offAvailability, venueFilter, inCategory, onDropOnCell, onDragStartMatch, onAssign, onClear, onResult, onMove, onNotice }) {
+  const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
+  const times = dayTimeSlots(dateInfo, duration);
+  // Solo las canchas de las sedes que se usan ese día (y de la sede elegida)
+  const courts = courtsOfDay(tournament, dateInfo.date, scheduled).filter((c) => venueFilter == null || courtVenueIndex(tournament, c) === venueFilter);
+  const busyCard = (m) => (
+    <div key={m.key} className="rounded-md px-2 py-1.5 mb-1 text-[10px] text-slate-500 border border-slate-700" style={F.body}>Ocupado · {m.categoryName}</div>
+  );
+  const card = (m, conflict, draggable) => (inCategory(m)
+    ? <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={draggable ? onDragStartMatch(m.key) : undefined} onClear={() => onClear(m)} onResult={() => onResult(m)} onMove={() => onMove(m)} />
+    : busyCard(m));
+
+  if (courts.length === 0) return <p className="opacity-60 text-sm" style={F.body}>Ninguna cancha de esta sede se usa ese día.</p>;
+  return (
+    <>
+      <div className="hidden sm:block overflow-x-auto">
+        <table className="border-collapse w-full" style={{ minWidth: 64 + courts.length * 130 }}>
+          <thead>
+            <tr>
+              <th className="sticky left-0 z-10 text-left text-[11px] text-teal-500 pb-1 pr-2 w-16" style={{ ...F.body, backgroundColor: "#0b1c24" }}>Hora</th>
+              {courts.map((court) => (
+                <th key={court} className="text-center text-[11px] font-extrabold uppercase tracking-wide px-1 pb-1" style={{ ...F.body, color: dateColor }}>
+                  {courtName(tournament, court)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {times.map((time) => (
+              <tr key={time}>
+                <td className="sticky left-0 z-10 text-[11px] text-teal-500 align-top pt-2 pr-2 whitespace-nowrap" style={{ ...F.body, backgroundColor: "#0b1c24" }}>{time}</td>
+                {courts.map((court) => {
+                  const cellMatches = matchesAtSlot(scheduled, dateInfo.date, time, court, null);
+                  const conflict = cellMatches.length > 1;
+                  const isClosed = closed.has(`${dateInfo.date}|${time}|${court}`);
+                  // Su sede no se usa a esa hora: sin "+ Asignar" ni soltar partidos
+                  if (cellMatches.length === 0 && isClosed) {
+                    return (
+                      <td key={court} className="align-middle p-1 border text-center text-[10px] text-slate-500" style={{ ...F.body, borderColor: dateColor + "22", minWidth: 130, backgroundColor: "#0f172a66" }} title="Esta sede no se usa a esa hora">
+                        Sede cerrada
+                      </td>
+                    );
+                  }
+                  return (
+                    <td
+                      key={court}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={onDropOnCell(dateInfo, time, court)}
+                      className="align-top p-1 border"
+                      style={{ borderColor: dateColor + "22", minWidth: 130, ...(isClosed ? { backgroundColor: "#0f172a66" } : {}) }}
+                    >
+                      {cellMatches.length === 0 ? (
+                        <select
+                          value=""
+                          onChange={(e) => { const m = trayMatches.find((u) => u.key === e.target.value); if (m) onAssign(m, { date: dateInfo.date, time, court }); }}
+                          className="w-full text-[10px] px-1 py-1.5 rounded border border-dashed opacity-60"
+                          style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
+                        >
+                          <option value="">+ Asignar partido</option>
+                          {trayMatches.map((u) => <option key={u.key} value={u.key}>{u.categoryName} · {u.label}</option>)}
+                        </select>
+                      ) : (
+                        cellMatches.map((m) => card(m, conflict, true))
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {/* En el celular: cancha por cancha, en una columna (la tabla no entra a lo ancho) */}
+      <div className="sm:hidden space-y-4">
+        {courts.map((court) => {
+          const courtMatches = scheduled.filter((m) => m.schedule.date === dateInfo.date && m.schedule.court === court).sort(compareBySchedule);
+          return (
+            <div key={court} className="rounded-xl border p-3" style={{ borderColor: dateColor + "40" }}>
+              <p className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ ...F.body, color: dateColor }}>{courtName(tournament, court)}</p>
+              {courtMatches.length === 0 && <p className="text-xs opacity-60 mb-2" style={F.body}>Sin partidos.</p>}
+              {courtMatches.map((m) => (
+                <div key={m.key} className="flex gap-2 items-start">
+                  <span className="text-xs font-bold w-11 shrink-0 pt-1.5" style={{ ...F.body, color: dateColor }}>{m.schedule.time}</span>
+                  <div className="flex-1 min-w-0">{card(m, matchesAtSlot(scheduled, m.schedule.date, m.schedule.time, court, null).length > 1, false)}</div>
+                </div>
+              ))}
+              {trayMatches.length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const m = trayMatches.find((u) => u.key === e.target.value);
+                    const free = m && findNextFreeSlotOnCourt(scheduled, dateInfo, court, dateInfo.from, duration, null, closed);
+                    if (free) onAssign(m, free);
+                    else if (m) onNotice(`${courtName(tournament, court)} no tiene horarios libres ese día.`);
+                  }}
+                  className="w-full mt-1 text-sm px-2 py-2 rounded border border-dashed"
+                  style={{ backgroundColor: "transparent", borderColor: dateColor + "60", color: "#94a3b8" }}
+                >
+                  <option value="">+ Agregar partido en el primer horario libre</option>
+                  {trayMatches.map((u) => <option key={u.key} value={u.key}>{u.categoryName} · {u.label}</option>)}
+                </select>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -8574,7 +8586,8 @@ function AdminTournament({ tournament, update, onBack, inscripciones = [], onRes
 
   return (
     <CourtNamesContext.Provider value={tournament}>
-      <div className="px-6 py-8 max-w-4xl mx-auto">
+      {/* La planilla de Horarios necesita más ancho (y Sin horario al costado) */}
+      <div className={`px-6 py-8 mx-auto ${view === "horarios" ? "max-w-7xl" : "max-w-4xl"}`}>
         <button onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-2" style={F.body}>← Mis torneos</button>
         <div className="flex justify-between items-center flex-wrap gap-3 mb-1">
           <h1 className="text-xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
