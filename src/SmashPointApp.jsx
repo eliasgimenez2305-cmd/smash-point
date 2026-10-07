@@ -4260,6 +4260,44 @@ function scheduleAlerts(tournament, matches) {
     : null;
   if (splitGroups.length > 0) alerts.push({ key: "split", categoryId: splitCategory?.id, text: `${splitGroups.length === 1 ? "Un grupo quedó" : `${splitGroups.length} grupos quedaron`} en más de una sede porque no entraba${splitGroups.length === 1 ? "" : "n"} en una sola: ${splitGroups.join(", ")}. Podés moverlos a mano en la planilla.` });
   sameDayNotices.forEach((text) => alerts.push({ key: `sameday-${text}`, text }));
+  // Una pareja en dos partidos a la vez (por ejemplo, después de mover uno a mano). Si los dos ya se
+  // jugaron no se avisa: ya pasó.
+  const played = (m) => matchIsPlayed(m, tournament.matchFormat);
+  const startOf = (s) => Date.parse(`${s.date}T00:00:00Z`) / 60000 + timeToMinutes(s.time);
+  const byPair = {};
+  scheduled.forEach((m) => [m.pairA, m.pairB].filter(Boolean).forEach((pid) => (byPair[`${m.categoryId}|${pid}`] = byPair[`${m.categoryId}|${pid}`] || []).push(m)));
+  const overlapped = [];
+  Object.values(byPair).forEach((list) => {
+    list.sort(compareBySchedule);
+    for (let i = 1; i < list.length; i++) {
+      if (startOf(list[i].schedule) - startOf(list[i - 1].schedule) < duration && !(played(list[i]) && played(list[i - 1]))) overlapped.push(list[i]);
+    }
+  });
+  if (overlapped.length > 0) {
+    const first = firstOf(overlapped);
+    alerts.push({ key: "overlap", day: first.schedule.date, categoryId: first.categoryId, text: `${overlapped.length === 1 ? "Hay 1 pareja" : `Hay ${overlapped.length} parejas`} con dos partidos a la vez (${[...new Set(overlapped.map((m) => m.categoryName))].join(", ")}; por ejemplo #${first.number || "?"} el ${formatDateShort(first.schedule.date)} a las ${first.schedule.time}). Mové uno de los dos.` });
+  }
+  // Llave: un partido que empieza antes de que termine el que lo alimenta, o sin el descanso
+  const rest = Math.max(tournament.bracketRestMinutes || DEFAULT_BRACKET_REST, duration);
+  const shortRest = [];
+  (tournament.categories || []).forEach((c) => {
+    if (!c.bracket) return;
+    const { byes } = walkBracket(c.bracket, tournament.matchFormat);
+    const nums = categoryMatchNumbers(c);
+    c.bracket.forEach((round, ri) => ri > 0 && round.forEach((m, mi) => {
+      if (!m.schedule || isByeMatch(byes, ri, mi)) return;
+      [2 * mi, 2 * mi + 1].forEach((fi) => {
+        const child = c.bracket[ri - 1][fi];
+        if (!child?.schedule || isByeMatch(byes, ri - 1, fi) || (played(m) && played(child))) return;
+        const gap = startOf(m.schedule) - startOf(child.schedule);
+        if (gap < rest) shortRest.push({ c, m, child, gap, nums });
+      });
+    }));
+  });
+  if (shortRest.length > 0) {
+    const { c, m, child, gap, nums } = shortRest.sort((a, b) => a.gap - b.gap)[0]; // primero el más grave
+    alerts.push({ key: "rest", day: m.schedule.date, categoryId: c.id, text: `${shortRest.length === 1 ? "Hay 1 partido" : `Hay ${shortRest.length} partidos`} de llave ${gap < duration ? "que se superpone" : `sin el descanso de ${formatRest(rest)}`} con el partido que lo alimenta: por ejemplo, en ${c.name}, el #${nums.get(m.id) || "?"} (${formatDateShort(m.schedule.date)} ${m.schedule.time}) y el #${nums.get(child.id) || "?"} (${formatDateShort(child.schedule.date)} ${child.schedule.time}). Movelo o tocá "Rearmar horarios".` });
+  }
   if (offAvailabilityCount > 0) {
     const first = firstOf(scheduled.filter((m) => offAvailability[m.key]));
     alerts.push({ key: "avail", day: first.schedule.date, categoryId: first.categoryId, text: `${offAvailabilityCount === 1 ? "Hay 1 partido" : `Hay ${offAvailabilityCount} partidos`} en un horario en que alguna de las parejas dijo que no puede (marcados en la planilla). Si ya lo hablaste con ellas, no hace falta hacer nada.` });
