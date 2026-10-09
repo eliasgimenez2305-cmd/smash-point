@@ -135,3 +135,14 @@ test("choque al guardar entero: si el otro solo cargó resultados, quedan los do
   assert.equal(merged.categories[0].pairs.length, 5, "mi pareja nueva");
   assert.equal(merged.categories[0].groups[0].matches[1].sets[0].a, 7, "su resultado");
 });
+
+test("el mismo dato con las claves en otro orden no cuenta como cambio (no hay choque falso)", () => {
+  const base = { id: "t", rev: 1, status: "Próximo", categories: [{ id: "c", name: "4TA", cupo: 10, pairs: [{ id: "p1", name: "A" }] }] };
+  const mine = { ...base, categories: [{ ...base.categories[0], cupo: 12 }] };
+  // La otra persona solo cambió el estado; su categoría vino con las claves en otro orden
+  const remote = { ...base, rev: 2, status: "En curso", categories: [{ pairs: [{ name: "A", id: "p1" }], cupo: 10, name: "4TA", id: "c" }] };
+  const { merged, conflicts } = mergeTournament(base, mine, remote);
+  assert.deepEqual(conflicts, []);
+  assert.equal(merged.categories[0].cupo, 12, "mi cambio");
+  assert.equal(merged.status, "En curso", "el suyo");
+});

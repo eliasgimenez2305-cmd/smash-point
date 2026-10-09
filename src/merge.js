@@ -16,7 +16,9 @@
 
    Está en un archivo aparte (sin React) para poder probarlo: ver merge.test.js. */
 
-const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// Iguales en contenido, sin importar el orden de las claves (la app arma los objetos en distinto
+// orden según por dónde pasaron: comparar el texto tal cual daba choques que no eran)
+const same = (a, b) => stable(a) === stable(b);
 
 // Lo que se carga en un partido. Es lo único que guardar_partidos acepta.
 export const MATCH_FIELDS = ["sets", "walkover", "retired", "liveStatus", "schedule"];
