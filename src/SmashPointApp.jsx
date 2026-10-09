@@ -6,7 +6,7 @@ import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScor
 import { findNameDuplicates, splitPair } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
-import { mergeTournament, isStaleRemote } from "./merge.js";
+import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -29,8 +29,10 @@ const STORAGE_KEY_EVENTS = "sp:events";
 /* ---------- Supabase (login y perfiles de organizador) ---------- */
 /* Usamos fetch directo a la API REST de Supabase (sin el SDK) para que
    este archivo siga funcionando igual en el sandbox de Claude y en producción. */
-const SUPABASE_URL = "https://cfaapvyttzedackbmkpt.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_D6uARuXOiMKEmpOr2evMsQ_r7V3d9wh";
+/* Por defecto, el proyecto real. Para probar en la compu contra el proyecto de prueba, un archivo
+   .env.local (no se sube) con VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY. */
+const SUPABASE_URL = import.meta.env?.VITE_SUPABASE_URL || "https://cfaapvyttzedackbmkpt.supabase.co";
+const SUPABASE_ANON_KEY = import.meta.env?.VITE_SUPABASE_ANON_KEY || "sb_publishable_D6uARuXOiMKEmpOr2evMsQ_r7V3d9wh";
 
 async function supabaseSignIn(email, password) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -165,6 +167,32 @@ async function kvGet(key) {
   if (!res.ok) throw new Error(`No se pudo leer "${key}".`);
   const rows = await res.json();
   return rows.length > 0 ? rows[0].value : null;
+}
+
+/* Torneos de la tabla torneos, una fila por torneo (supabase/migrations/20261009_tabla_torneos.sql):
+   cada uno con su versión (rev). query: filtro de PostgREST ("id=in.(a,b)"). Devuelve null si la
+   base todavía no tiene la tabla (antes de la migración): ahí se usa la lista vieja de app_data. */
+async function fetchTorneos(query = "") {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/torneos?select=datos,rev&order=orden${query ? `&${query}` : ""}`, {
+    headers: { apikey: SUPABASE_ANON_KEY },
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("No se pudieron leer los torneos.");
+  return (await res.json()).map((r) => ({ ...r.datos, rev: r.rev }));
+}
+
+/* Solo la versión de cada torneo (unos pocos bytes): para saber cuáles cambiaron sin bajarlos.
+   ids: solo esos torneos. null si la base todavía no tiene la tabla. */
+async function fetchTorneoRevs(ids) {
+  const filter = ids ? `&id=in.(${ids.map(encodeURIComponent).join(",")})` : "";
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/torneos?select=id,rev${filter}`, {
+    headers: { apikey: SUPABASE_ANON_KEY },
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("No se pudieron leer los torneos.");
+  return res.json();
 }
 
 async function kvSet(key, value, accessToken) {
@@ -1008,6 +1036,19 @@ function withAutoBracket(tournament, category) {
     c = autoScheduleBracket(tournament, { ...c, bracket: skeleton, bracketIsSkeleton: true, bracketSeeding: null, bracketPublished: !!c.bracket && !!c.bracketPublished });
   }
   return c.bracketIsSkeleton ? fillSkeletonBracket(c, format) : c;
+}
+
+/* Lo que se deduce de los resultados, recalculado al leer un torneo: los cruces de ganadores y
+   perdedores de los grupos de 4, el avance en la llave y los lugares de una llave en borrador.
+   Los resultados se guardan de a partido (guardar_partidos) y esto no viaja con ellos: así cada
+   celular lo calcula igual, sin importar quién cargó qué. */
+function withDerivedResults(category, format) {
+  if (isSuper8(category)) return category;
+  const groups = (category.groups || []).map((g) => (g.format === "bracket4" && g.matches.length >= 4 ? { ...g, matches: propagateGroupBracket4(g.matches, format) } : g));
+  let c = { ...category, groups };
+  if (c.bracket) c = { ...c, bracket: propagateBracket(c.bracket, format) };
+  if (c.bracket && c.bracketIsSkeleton && groups.length > 0) c = fillSkeletonBracket(c, format);
+  return c;
 }
 
 /* Completa los lugares de la primera ronda de un esqueleto con los clasificados de los grupos que
@@ -9020,13 +9061,14 @@ function normalizeLoadedTournaments(tours) {
         bracket: fixBracket(c.bracket),
       }));
     }
+    const matchFormat = t.matchFormat || { ...DEFAULT_MATCH_FORMAT };
     return {
       ...rest,
-      matchFormat: t.matchFormat || { ...DEFAULT_MATCH_FORMAT },
+      matchFormat,
       courtsCount: t.courtsCount ?? 4,
       matchDurationMinutes: t.matchDurationMinutes ?? DEFAULT_MATCH_DURATION,
       playDates: fixPlayDates(t.playDates),
-      categories,
+      categories: categories.map((c) => withDerivedResults(c, matchFormat)),
     };
   });
 }
@@ -9034,9 +9076,15 @@ function normalizeLoadedTournaments(tours) {
 /* ---------- App raíz ---------- */
 
 /* Guardado de torneos de a uno, con número de versión (ver
-   supabase/migrations/20261003_guardar_torneo.sql y src/merge.js). Por cada torneo hay una sola
+   supabase/migrations/20261009_tabla_torneos.sql y src/merge.js). Por cada torneo hay una sola
    escritura en vuelo; los cambios que llegan mientras tanto se guardan después, sobre la versión
-   nueva. Si otra persona guardó antes, se mezclan los cambios por categoría y se vuelve a guardar. */
+   nueva.
+   - Si solo cambió lo que se carga en los partidos (resultados, W.O., RET, en curso, horarios), se
+     manda solo eso con guardar_partidos: dos celulares cargando partidos distintos no chocan. Si
+     alguien más guardó en el medio, la base devuelve el torneo al día y lo cargado después se
+     acomoda encima.
+   - Si cambió algo más, se guarda el torneo entero con guardar_torneo; si otra persona guardó
+     antes, se mezclan los cambios (ver mergeTournament) y se vuelve a guardar. */
 function useTournamentSaver(session, setTournaments, setSaveNotice) {
   const serverCopy = useRef({}); // id -> última versión que sabemos que está en la base
   const pending = useRef({});    // id -> último cambio local todavía sin guardar
@@ -9048,21 +9096,26 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
   const setList = useCallback((fn) => setTournaments((prev) => { const next = fn(prev); listRef.current = next; return next; }), [setTournaments]);
   const replaceLocal = useCallback((t) => setList((list) => (list.some((x) => x.id === t.id) ? list.map((x) => (x.id === t.id ? t : x)) : [...list, t])), [setList]);
   const busy = (id) => !!(saving.current[id] || pending.current[id]);
+  const partidosEnabled = useRef(true); // false si la base todavía no tiene guardar_partidos
 
-  /* La lista recién leída de la base: se anotan las versiones y se reemplazan los torneos que no
-     tienen cambios propios sin guardar. Una versión más vieja que la última guardada (la lectura
-     salió antes de ese guardado) no se aplica: borraría ese cambio. */
-  const applyRemote = useCallback((remoteList) => {
+  /* Torneos recién leídos de la base: se anotan las versiones y se reemplazan los que no tienen
+     cambios propios sin guardar. Una versión más vieja que la última guardada (la lectura salió
+     antes de ese guardado) no se aplica: borraría ese cambio. allIds: todos los torneos que hay en
+     la base (los que no están se borraron); null = solo actualizar los recibidos. */
+  const applyRemote = useCallback((remoteList, allIds = remoteList.map((t) => t.id)) => {
     const keep = new Set(remoteList.filter((t) => busy(t.id) || isStaleRemote(serverCopy.current[t.id], t)).map((t) => t.id));
     remoteList.forEach((t) => { if (!keep.has(t.id)) serverCopy.current[t.id] = t; });
     setList((prev) => {
-      const remoteIds = new Set(remoteList.map((t) => t.id));
-      const kept = prev.filter((t) => remoteIds.has(t.id) || busy(t.id));
-      const merged = kept.map((t) => (busy(t.id) || keep.has(t.id) ? t : remoteList.find((r) => r.id === t.id)));
+      const existing = allIds ? new Set(allIds) : null;
+      const kept = prev.filter((t) => !existing || existing.has(t.id) || busy(t.id));
+      const merged = kept.map((t) => (busy(t.id) || keep.has(t.id) ? t : remoteList.find((r) => r.id === t.id) || t));
       remoteList.forEach((r) => { if (!kept.some((t) => t.id === r.id)) merged.push(r); });
       return merged;
     });
   }, [setList]);
+
+  // Versión conocida de cada torneo (para la recarga liviana: ver reloadTournaments)
+  const knownRev = useCallback((id) => serverCopy.current[id]?.rev, []);
 
   // Base de datos sin la migración todavía: se guarda como antes (la lista entera)
   const saveWholeList = async () => kvSet(STORAGE_KEY_TOURNAMENTS, listRef.current, sessionRef.current?.accessToken);
@@ -9075,14 +9128,47 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
         const mine = pending.current[id];
         pending.current[id] = null;
         const base = serverCopy.current[id];
+        // ¿Solo cambió lo cargado en los partidos? Entonces va solo eso (ver matchChanges)
+        const changes = partidosEnabled.current && base?.rev ? matchChanges(base, mine) : null;
+        if (changes && changes.length === 0) continue; // nada para guardar (solo lo que se recalcula al leer)
         let res;
         try {
-          res = await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0 }, sessionRef.current?.accessToken);
+          res = changes
+            ? await supabaseRpc("guardar_partidos", { p_torneo_id: id, p_cambios: changes, p_rev_conocida: base.rev }, sessionRef.current?.accessToken)
+            : await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0 }, sessionRef.current?.accessToken);
         } catch (err) {
+          // Base sin la migración de la tabla de torneos: se guarda entero, como antes
+          if (changes && err.pgCode === "PGRST202") { partidosEnabled.current = false; pending.current[id] = pending.current[id] || mine; continue; }
           if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
           pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
           setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
           return;
+        }
+        if (changes && res?.estado === "ok") {
+          if ((res.omitidos || []).length > 0) {
+            setSaveNotice("Un resultado no se guardó porque ese partido ya no existe (alguien cambió los grupos o la llave). Revisalo y volvé a cargarlo.");
+          }
+          if (!res.torneo) {
+            serverCopy.current[id] = { ...mine, rev: res.rev };
+            setList((list) => list.map((x) => (x.id === id ? { ...x, rev: res.rev } : x)));
+            continue;
+          }
+          // Alguien más guardó en el medio: la base devolvió el torneo al día (con lo mío). Lo que
+          // se cargó acá mientras tanto se acomoda encima.
+          const remote = normalizeLoadedTournaments([res.torneo])[0];
+          serverCopy.current[id] = remote;
+          const current = pending.current[id] || mine;
+          const later = matchChanges(mine, current);
+          let next;
+          if (later) {
+            next = applyMatchChanges(remote, later).tournament;
+            pending.current[id] = later.length > 0 ? next : null;
+          } else {
+            next = mergeTournament(mine, current, remote).merged;
+            pending.current[id] = next;
+          }
+          replaceLocal(next);
+          continue;
         }
         if (res?.estado === "ok") {
           serverCopy.current[id] = { ...mine, rev: res.rev };
@@ -9126,7 +9212,7 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
     list.forEach((t) => { serverCopy.current[t.id] = t; });
   }, []);
 
-  return useMemo(() => ({ save, remove, applyRemote, remember }), [save, remove, applyRemote, remember]);
+  return useMemo(() => ({ save, remove, applyRemote, remember, knownRev }), [save, remove, applyRemote, remember, knownRev]);
 }
 
 function SmashPointAppInner() {
@@ -9157,9 +9243,11 @@ function SmashPointAppInner() {
           orgs = orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" }));
         } catch {}
 
+        // La tabla de torneos; si la base todavía no la tiene, la lista vieja de app_data
         let tours;
         try {
-          tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
+          tours = await fetchTorneos();
+          if (tours === null) tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
         } catch { tours = null; }
         if (!Array.isArray(tours)) {
           const firstOrganizer = orgs.find((o) => o.role === "organizador") || orgs[0] || { id: "sin-organizador" };
@@ -9350,16 +9438,35 @@ function SmashPointAppInner() {
      resto de los cambios se guarda de a un torneo (saver). */
   const persistTournaments = useCallback(async (next) => {
     setTournaments(next);
-    try { await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); saver.remember(next); } catch {}
+    try {
+      try {
+        await supabaseRpc("restaurar_torneos", { p_lista: next }, session?.accessToken);
+      } catch (err) {
+        if (err.pgCode !== "PGRST202") throw err;
+        await kvSet(STORAGE_KEY_TOURNAMENTS, next, session?.accessToken); // base sin la tabla de torneos
+      }
+      const fresh = await fetchTorneos();
+      saver.remember(fresh ? normalizeLoadedTournaments(fresh) : next);
+    } catch {}
   }, [session, saver]);
 
   /* Vuelve a leer los torneos de Supabase: después de aceptar una inscripción (la pareja la agrega
-     el servidor), al volver a la pestaña del panel y cada 20 segundos con un panel abierto, para ver
-     lo que guardan los demás. No pisa los cambios propios que todavía se están guardando. */
-  const reloadTournaments = useCallback(async () => {
+     el servidor), al volver a la pestaña del panel y cada 7 segundos con un panel abierto, para ver
+     lo que guardan los demás. No pisa los cambios propios que todavía se están guardando.
+     Es liviana: primero solo la versión de cada torneo (unos pocos bytes) y después se bajan enteros
+     únicamente los que cambiaron. ids: solo esos torneos (la página pública de un torneo mira solo
+     el suyo). Con la base vieja (sin la tabla de torneos), la lista entera como antes. */
+  const reloadTournaments = useCallback(async (ids = null) => {
     try {
-      const tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
-      if (Array.isArray(tours)) saver.applyRemote(normalizeLoadedTournaments(tours));
+      const revs = await fetchTorneoRevs(ids);
+      if (revs === null) {
+        const tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
+        if (Array.isArray(tours)) saver.applyRemote(normalizeLoadedTournaments(tours));
+        return;
+      }
+      const changed = revs.filter((r) => r.rev !== saver.knownRev(r.id)).map((r) => r.id);
+      const fresh = changed.length > 0 ? await fetchTorneos(`id=in.(${changed.map(encodeURIComponent).join(",")})`) : [];
+      saver.applyRemote(normalizeLoadedTournaments(fresh || []), ids ? null : revs.map((r) => r.id));
     } catch {}
   }, [saver]);
 
@@ -9367,9 +9474,19 @@ function SmashPointAppInner() {
     if (!session) return;
     const onVisible = () => { if (document.visibilityState === "visible") reloadTournaments(); };
     document.addEventListener("visibilitychange", onVisible);
-    const id = setInterval(() => { if (document.visibilityState === "visible") reloadTournaments(); }, 20000);
+    const id = setInterval(() => { if (document.visibilityState === "visible") reloadTournaments(); }, 7000);
     return () => { document.removeEventListener("visibilitychange", onVisible); clearInterval(id); };
   }, [session, reloadTournaments]);
+
+  // La página pública de un torneo se actualiza sola mientras está a la vista: cada 15 segundos
+  // pregunta si ese torneo cambió (un dato chico) y, si cambió, lo baja
+  useEffect(() => {
+    if (session || route !== "public-tournament" || !selectedId) return;
+    const check = () => { if (document.visibilityState === "visible") reloadTournaments([selectedId]); };
+    document.addEventListener("visibilitychange", check);
+    const id = setInterval(check, 15000);
+    return () => { document.removeEventListener("visibilitychange", check); clearInterval(id); };
+  }, [session, route, selectedId, reloadTournaments]);
 
   // Inscripciones de los torneos del organizador logueado (para los avisos de "nuevas" y su pestaña)
   const [inscripciones, setInscripciones] = useState([]);
