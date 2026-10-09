@@ -182,6 +182,23 @@ async function fetchTorneos(query = "") {
   return (await res.json()).map((r) => ({ ...r.datos, rev: r.rev }));
 }
 
+/* Torneos livianos para la parte pública: solo el resumen de cada uno (ver tournamentSummary). Los
+   que todavía no tienen resumen (nunca se guardaron con esta versión) vienen enteros. query: filtro
+   de PostgREST. null si la base todavía no tiene la tabla. */
+async function fetchTorneosLight(query = "") {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/torneos?select=id,rev,resumen&order=orden${query ? `&${query}` : ""}`, {
+    headers: { apikey: SUPABASE_ANON_KEY },
+    cache: "no-store",
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("No se pudieron leer los torneos.");
+  const rows = await res.json();
+  const missing = rows.filter((r) => !r.resumen).map((r) => r.id);
+  const full = missing.length > 0 ? await fetchTorneos(`id=in.(${missing.map(encodeURIComponent).join(",")})`) : [];
+  const fullById = Object.fromEntries((full || []).map((t) => [t.id, t]));
+  return rows.map((r) => (r.resumen ? lightTournament(r.resumen, r.rev) : fullById[r.id])).filter(Boolean);
+}
+
 /* Solo la versión de cada torneo (unos pocos bytes): para saber cuáles cambiaron sin bajarlos.
    ids: solo esos torneos. null si la base todavía no tiene la tabla. */
 async function fetchTorneoRevs(ids) {
@@ -283,13 +300,22 @@ function categoryCupo(category) {
 
 /* Un Súper 8 con los partidos ya generados no admite más inscriptos */
 function categoryAcceptsRegistrations(category) {
-  return !(isSuper8(category) && category.groups.length > 0);
+  return !(isSuper8(category) && categoryGroupsCount(category) > 0);
+}
+
+/* Parejas anotadas y grupos armados de una categoría. En la parte pública, la portada trabaja con el
+   resumen de cada torneo (ver tournamentSummary), que trae las cuentas pero no las parejas. */
+function categoryPairsCount(category) {
+  return category._pairsCount ?? (category.pairs || []).length;
+}
+function categoryGroupsCount(category) {
+  return category._groupsCount ?? (category.groups || []).length;
 }
 
 /* Lugares libres: cuentan todas las parejas anotadas (a mano o aceptadas). null = sin límite */
 function categorySpotsLeft(category) {
   const cupo = categoryCupo(category);
-  return cupo == null ? null : Math.max(0, cupo - category.pairs.length);
+  return cupo == null ? null : Math.max(0, cupo - categoryPairsCount(category));
 }
 
 /* Abre o cierra las inscripciones de un torneo. Si se cierran después de haber estado abiertas,
@@ -853,7 +879,52 @@ function tournamentHasScores(t) {
   return (t.categories || []).some((c) => (c.groups || []).some((g) => g.matches.some(matchHasScore)) || (c.bracket || []).some((round) => round.some(matchHasScore)));
 }
 
+/* Resumen de un torneo para la parte pública (columna resumen de la tabla torneos, ver
+   supabase/migrations/20261009_tabla_torneos.sql): el torneo sin las parejas, los grupos ni la
+   llave, y con lo que la portada necesita contar. Lo arma la app en cada guardado. Con esto la
+   portada, los eventos y los circuitos no bajan los torneos enteros; un torneo se baja entero
+   recién cuando alguien lo abre.
+   - En cada categoría: _pairsCount, _groupsCount y _placements (nombre de cada pareja y hasta
+     dónde llegó, para los puntos del circuito).
+   - _stats: avance (jugados / total), partidos publicados por día. */
+const HEAVY_CATEGORY_FIELDS = ["pairs", "groups", "bracket", "bracketSeeding", "teams"];
+function tournamentSummary(t) {
+  const { categories = [], rev, _light, ...top } = t;
+  const matchesByDate = {};
+  collectScheduleableMatches(t).forEach((m) => {
+    if (m.schedule && !m.draft) matchesByDate[m.schedule.date] = (matchesByDate[m.schedule.date] || 0) + 1;
+  });
+  return {
+    ...top,
+    categories: categories.map((c) => {
+      const light = { ...c };
+      HEAVY_CATEGORY_FIELDS.forEach((k) => delete light[k]);
+      const names = Object.fromEntries((c.pairs || []).map((p) => [p.id, p.name]));
+      return {
+        ...light,
+        _pairsCount: (c.pairs || []).length,
+        _groupsCount: (c.groups || []).length,
+        _placements: isSuper8(c) || isInfoOnly(t) ? [] : categoryPlacements(c, t.matchFormat).map(({ pairId, tier }) => ({ name: names[pairId], tier })).filter((p) => p.name),
+      };
+    }),
+    _stats: { progress: tournamentProgress(t), matchesByDate },
+  };
+}
+
+/* El torneo "liviano" que usan las pantallas públicas a partir de su resumen: las categorías con
+   listas vacías (así ninguna cuenta se rompe) y las cuentas en _pairsCount, _stats, etc. Nunca se
+   guarda (ver useTournamentSaver). */
+function lightTournament(summary, rev) {
+  return {
+    ...summary,
+    rev,
+    _light: true,
+    categories: (summary.categories || []).map((c) => ({ ...c, pairs: [], groups: [], bracket: null })),
+  };
+}
+
 function tournamentProgress(t) {
+  if (t._stats) return t._stats.progress; // resumen (portada)
   let total = 0, played = 0;
   if (isInfoOnly(t)) return { total, played, pct: 0 }; // los informativos no tienen partidos
   (t.categories || []).forEach((c) => {
@@ -1885,11 +1956,12 @@ function computeCircuitStandings(circuit, tournaments) {
       if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
       if (!matchName) return;
-      categoryPlacements(cat, t.matchFormat).forEach(({ pairId, tier }) => {
-        const pair = cat.pairs.find((p) => p.id === pairId);
-        if (!pair) return;
+      // Con el resumen (portada) vienen ya los nombres con su instancia
+      const placed = cat._placements || categoryPlacements(cat, t.matchFormat).map(({ pairId, tier }) => ({ name: cat.pairs.find((p) => p.id === pairId)?.name, tier }));
+      placed.forEach(({ name, tier }) => {
+        if (!name) return;
         const pts = points[tier] ?? 0;
-        pair.name.split("/").map((s) => s.trim()).filter(Boolean).forEach((playerName) => {
+        name.split("/").map((s) => s.trim()).filter(Boolean).forEach((playerName) => {
           const key = playerName.toLowerCase();
           if (!table[matchName][key]) table[matchName][key] = { name: playerName, points: 0, fechas: 0 };
           table[matchName][key].points += pts;
@@ -5009,9 +5081,11 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
 function homeStats(tournaments) {
   // Los informativos cuentan como torneos activos (se muestran en "Próximos torneos"), pero no suman jugadores
   const active = tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO);
-  const players = active.reduce((sum, t) => sum + t.categories.reduce((s, c) => s + c.pairs.length * (c.format === "super8_individual" ? 1 : 2), 0), 0);
+  const players = active.reduce((sum, t) => sum + t.categories.reduce((s, c) => s + categoryPairsCount(c) * (c.format === "super8_individual" ? 1 : 2), 0), 0);
   const today = todayISO();
-  const matchesToday = tournaments.reduce((sum, t) => sum + collectScheduleableMatches(t).filter((m) => m.schedule && m.schedule.date === today && !m.draft).length, 0);
+  const matchesToday = tournaments.reduce((sum, t) => sum + (t._stats
+    ? t._stats.matchesByDate[today] || 0
+    : collectScheduleableMatches(t).filter((m) => m.schedule && m.schedule.date === today && !m.draft).length), 0);
   return { active: active.length, players, matchesToday };
 }
 
@@ -5240,7 +5314,7 @@ function PublicTournamentCard({ t, big, organizerLabel, onOpen, onRegister, clas
             </p>
             {!info && (
               <p className="mt-3 text-sm text-teal-400" style={F.body}>
-                {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {t.categories.reduce((sum, c) => sum + c.pairs.length, 0)} parejas anotadas
+                {t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""} · {t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0)} parejas anotadas
               </p>
             )}
             <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
@@ -9073,6 +9147,11 @@ function normalizeLoadedTournaments(tours) {
   });
 }
 
+/* Mientras se baja entero un torneo que estaba liviano (solo el resumen de la portada) */
+function LoadingTournament() {
+  return <p className="px-6 py-16 text-center text-teal-400" style={F.body}>Cargando el torneo…</p>;
+}
+
 /* ---------- App raíz ---------- */
 
 /* Guardado de torneos de a uno, con número de versión (ver
@@ -9114,8 +9193,9 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
     });
   }, [setList]);
 
-  // Versión conocida de cada torneo (para la recarga liviana: ver reloadTournaments)
+  // Versión conocida de cada torneo y si está liviano (para la recarga liviana: ver reloadTournaments)
   const knownRev = useCallback((id) => serverCopy.current[id]?.rev, []);
+  const isLight = useCallback((id) => !!listRef.current.find((t) => t.id === id)?._light, []);
 
   // Base de datos sin la migración todavía: se guarda como antes (la lista entera)
   const saveWholeList = async () => kvSet(STORAGE_KEY_TOURNAMENTS, listRef.current, sessionRef.current?.accessToken);
@@ -9134,8 +9214,8 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
         let res;
         try {
           res = changes
-            ? await supabaseRpc("guardar_partidos", { p_torneo_id: id, p_cambios: changes, p_rev_conocida: base.rev }, sessionRef.current?.accessToken)
-            : await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0 }, sessionRef.current?.accessToken);
+            ? await supabaseRpc("guardar_partidos", { p_torneo_id: id, p_cambios: changes, p_rev_conocida: base.rev, p_resumen: tournamentSummary(mine) }, sessionRef.current?.accessToken)
+            : await supabaseRpc("guardar_torneo", { p_torneo: mine, p_rev: base?.rev ?? 0, p_resumen: tournamentSummary(mine) }, sessionRef.current?.accessToken);
         } catch (err) {
           // Base sin la migración de la tabla de torneos: se guarda entero, como antes
           if (changes && err.pgCode === "PGRST202") { partidosEnabled.current = false; pending.current[id] = pending.current[id] || mine; continue; }
@@ -9190,6 +9270,12 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
   };
 
   const save = useCallback((t) => {
+    // Un torneo liviano (solo el resumen de la portada) nunca se guarda: borraría sus parejas,
+    // grupos y llave. Pasa solo si se toca antes de que termine de bajar entero.
+    if (t._light) {
+      setSaveNotice("Este torneo todavía se está cargando. Esperá un momento y volvé a hacer el cambio.");
+      return;
+    }
     pending.current[t.id] = t;
     replaceLocal(t);
     flush(t.id);
@@ -9212,7 +9298,7 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
     list.forEach((t) => { serverCopy.current[t.id] = t; });
   }, []);
 
-  return useMemo(() => ({ save, remove, applyRemote, remember, knownRev }), [save, remove, applyRemote, remember, knownRev]);
+  return useMemo(() => ({ save, remove, applyRemote, remember, knownRev, isLight }), [save, remove, applyRemote, remember, knownRev, isLight]);
 }
 
 function SmashPointAppInner() {
@@ -9243,10 +9329,11 @@ function SmashPointAppInner() {
           orgs = orgs.map((o) => ({ ...o, coverUrl: covers[o.id] || "" }));
         } catch {}
 
-        // La tabla de torneos; si la base todavía no la tiene, la lista vieja de app_data
+        // La tabla de torneos (solo el resumen de cada uno; los que hacen falta enteros se bajan
+        // después); si la base todavía no la tiene, la lista vieja de app_data
         let tours;
         try {
-          tours = await fetchTorneos();
+          tours = await fetchTorneosLight();
           if (tours === null) tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
         } catch { tours = null; }
         if (!Array.isArray(tours)) {
@@ -9284,6 +9371,14 @@ function SmashPointAppInner() {
             const auth = await renewWithLatestToken(stored.refreshToken);
             const profile = orgs.find((o) => o.id === auth.user?.id);
             if (profile) {
+              // El panel trabaja con los torneos enteros: los propios (el creador, todos)
+              const needed = tours.filter((t) => t._light && (profile.role === "creador" || t.organizerId === profile.id)).map((t) => t.id);
+              if (needed.length > 0) {
+                try {
+                  const full = normalizeLoadedTournaments((await fetchTorneos(`id=in.(${needed.map(encodeURIComponent).join(",")})`)) || []);
+                  tours = tours.map((t) => full.find((f) => f.id === t.id) || t);
+                } catch {}
+              }
               const restored = { ...profile, ...authFields(auth) };
               writeStoredAuth({ ...stored, refreshToken: restored.refreshToken });
               setSession(restored);
@@ -9464,11 +9559,37 @@ function SmashPointAppInner() {
         if (Array.isArray(tours)) saver.applyRemote(normalizeLoadedTournaments(tours));
         return;
       }
+      // Los que cambiaron: el resumen si acá está liviano (o es nuevo), entero si está entero
       const changed = revs.filter((r) => r.rev !== saver.knownRev(r.id)).map((r) => r.id);
-      const fresh = changed.length > 0 ? await fetchTorneos(`id=in.(${changed.map(encodeURIComponent).join(",")})`) : [];
-      saver.applyRemote(normalizeLoadedTournaments(fresh || []), ids ? null : revs.map((r) => r.id));
+      const asLight = changed.filter((id) => saver.isLight(id) || saver.knownRev(id) === undefined);
+      const asFull = changed.filter((id) => !asLight.includes(id));
+      const inList = (list) => `id=in.(${list.map(encodeURIComponent).join(",")})`;
+      const fresh = [
+        ...(asLight.length > 0 ? (await fetchTorneosLight(inList(asLight))) || [] : []),
+        ...(asFull.length > 0 ? (await fetchTorneos(inList(asFull))) || [] : []),
+      ];
+      saver.applyRemote(normalizeLoadedTournaments(fresh), ids ? null : revs.map((r) => r.id));
     } catch {}
   }, [saver]);
+
+  /* Baja enteros los torneos que hacen falta y todavía están livianos (solo con el resumen de la
+     portada): el que se abre en la parte pública y, con sesión, los propios (el creador, todos) */
+  const fullIdsWanted = (() => {
+    const ids = [];
+    if (route === "public-tournament" && selectedId) ids.push(selectedId);
+    if (session) tournaments.forEach((t) => { if (session.role === "creador" || t.organizerId === session.id) ids.push(t.id); });
+    return [...new Set(ids)].filter((id) => tournaments.find((t) => t.id === id)?._light);
+  })();
+  const fullIdsKey = fullIdsWanted.join(",");
+  useEffect(() => {
+    if (!fullIdsKey) return;
+    (async () => {
+      try {
+        const full = await fetchTorneos(`id=in.(${fullIdsKey.split(",").map(encodeURIComponent).join(",")})`);
+        if (full) saver.applyRemote(normalizeLoadedTournaments(full), null);
+      } catch {}
+    })();
+  }, [fullIdsKey, saver]);
 
   useEffect(() => {
     if (!session) return;
@@ -9620,7 +9741,9 @@ function SmashPointAppInner() {
     showFooterAds = true;
     content = isInfoOnly(selected)
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
-      : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
+      : selected._light
+        ? <LoadingTournament />
+        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
     content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
@@ -9672,6 +9795,8 @@ function SmashPointAppInner() {
         onDeleteEvent={deleteEvent}
       />
     );
+  } else if (route === "admin-tournament" && selected?._light) {
+    content = <LoadingTournament />;
   } else if (route === "admin-tournament" && selected) {
     content = (
       <AdminTournament
