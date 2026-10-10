@@ -8,6 +8,7 @@ import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -254,6 +255,44 @@ async function fetchInscripciones(accessToken) {
   });
   if (!res.ok) throw new Error("No se pudieron cargar las inscripciones.");
   return res.json();
+}
+
+/* ---------- Reserva de canchas (ver supabase/migrations/20261014_reservas_canchas.sql) ---------- */
+
+/* Pedido a una tabla de Supabase. Si falla, el error trae en .pgCode el código de Postgres
+   (23P01 = se pisa con otra reserva, 23503 = la cancha tiene reservas y no se puede borrar). */
+async function supabaseTable(path, { method = "GET", body, accessToken, prefer } = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(prefer ? { Prefer: prefer } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(data?.message || "No se pudo completar la operación.");
+    err.pgCode = data?.code;
+    throw err;
+  }
+  return data;
+}
+
+const RESERVA_ERRORES = {
+  "23P01": "Ese horario se pisa con otro turno o bloqueo de la cancha.",
+  "23503": "La cancha tiene reservas cargadas: en vez de borrarla, desactivala.",
+  "23514": "Revisá los datos: hay alguno inválido.",
+  "42501": "No tenés permiso para hacer eso.",
+};
+const reservaErrorText = (e) => RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
+
+/* Complejos con dueño y Reservas habilitadas. Si la base todavía no tiene la tabla, lista vacía. */
+async function fetchComplejosReserva() {
+  try { return (await supabaseTable("complejos?select=*")) || []; } catch { return []; }
 }
 
 const INSCRIPCION_ERRORES = {
@@ -6728,20 +6767,44 @@ function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
 }
 
 /* Pestaña "Complejos" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
-function VenueManager({ venues, onSave, onDelete, accessToken }) {
+function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], complejos = [], onSaveComplejo }) {
   const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
   const [form, setForm] = useState(empty);
+  // Reservas: la cuenta del dueño y si tiene la sección habilitada (tabla complejos, aparte de la ficha)
+  const [reserva, setReserva] = useState({ duenoId: "", habilitada: false });
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
   const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
+  const owners = organizers.filter((o) => o.role !== "creador").sort((a, b) => a.name.localeCompare(b.name, "es"));
 
-  const submit = () => {
+  const submit = async () => {
     if (!form.name.trim()) { setError("Poné el nombre del complejo."); return; }
     if (form.whatsapp.trim() && !normalizeArPhone(form.whatsapp)) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
-    onSave({ id: editingId || uid(), ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
-    setForm(empty); setEditingId(null); setError("");
+    if (reserva.habilitada && !reserva.duenoId) { setError("Para habilitar Reservas, elegí la cuenta del dueño."); return; }
+    const id = editingId || uid();
+    onSave({ id, ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
+    const before = complejos.find((c) => c.id === id);
+    if (before || reserva.duenoId || reserva.habilitada) {
+      try {
+        await onSaveComplejo({ id, dueno_id: reserva.duenoId || null, reservas_habilitadas: reserva.habilitada });
+      } catch (e) {
+        setError(`La ficha se guardó, pero no la parte de Reservas: ${reservaErrorText(e)}`);
+        return;
+      }
+    }
+    setForm(empty); setReserva({ duenoId: "", habilitada: false }); setEditingId(null); setError("");
   };
-  const edit = (v) => { setForm({ ...empty, ...v }); setEditingId(v.id); setError(""); window.scrollTo(0, 0); };
+  const edit = (v) => {
+    const c = complejos.find((x) => x.id === v.id);
+    setForm({ ...empty, ...v }); setReserva({ duenoId: c?.dueno_id || "", habilitada: !!c?.reservas_habilitadas });
+    setEditingId(v.id); setError(""); window.scrollTo(0, 0);
+  };
+  const reservaLabel = (v) => {
+    const c = complejos.find((x) => x.id === v.id);
+    if (!c?.reservas_habilitadas) return v.address;
+    const owner = organizers.find((o) => o.id === c.dueno_id);
+    return [v.address, `Reservas: ${owner?.name || "sin dueño"}`].filter(Boolean).join(" · ");
+  };
 
   return (
     <div style={F.body}>
@@ -6766,16 +6829,29 @@ function VenueManager({ venues, onSave, onDelete, accessToken }) {
           </div>
           <ImageUploadField label="Logo" value={form.logoUrl} onChange={(url) => setForm((f) => ({ ...f, logoUrl: url }))} accessToken={accessToken} folder="venues" />
         </div>
+        <div className="border-t border-teal-900 pt-3 mb-3 grid gap-3 sm:grid-cols-2 items-end">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Dueño (cuenta que maneja las reservas)</label>
+            <select value={reserva.duenoId} onChange={(e) => setReserva({ ...reserva, duenoId: e.target.value })} className="w-full px-3 py-2 rounded border text-sm" style={adminInput}>
+              <option value="">Sin dueño</option>
+              {owners.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-teal-200 py-2">
+            <input type="checkbox" checked={reserva.habilitada} onChange={(e) => setReserva({ ...reserva, habilitada: e.target.checked })} />
+            Sección Reservas habilitada
+          </label>
+        </div>
         {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
         <div className="flex gap-3 items-center">
           <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Agregar complejo"}</button>
-          {editingId && <button type="button" onClick={() => { setForm(empty); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
+          {editingId && <button type="button" onClick={() => { setForm(empty); setReserva({ duenoId: "", habilitada: false }); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
         </div>
       </div>
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Complejos cargados</h2>
       <div className="space-y-2">
-        {venues.map((v) => <DirectoryRow key={v.id} title={v.name} subtitle={v.address} imageUrl={v.logoUrl} onEdit={() => edit(v)} onDelete={() => onDelete(v.id)} />)}
+        {venues.map((v) => <DirectoryRow key={v.id} title={v.name} subtitle={reservaLabel(v)} imageUrl={v.logoUrl} onEdit={() => edit(v)} onDelete={() => onDelete(v.id)} />)}
         {venues.length === 0 && <p className="opacity-60 text-sm">Todavía no cargaste ningún complejo.</p>}
       </div>
     </div>
@@ -7032,7 +7108,7 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
   const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
@@ -7064,7 +7140,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
       ) : tab === "respaldo" ? (
         <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} events={events} onRestore={onRestoreBackup} />
       ) : tab === "canchas" ? (
-        <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} />
+        <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} organizers={organizers} complejos={complejos} onSaveComplejo={onSaveComplejo} />
       ) : tab === "profes" ? (
         <CoachManager coaches={coaches} onSave={onSaveCoach} onDelete={onDeleteCoach} accessToken={creator.accessToken} />
       ) : tab === "torneos" ? (
@@ -7683,8 +7759,8 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones }) {
-  const [tab, setTab] = useState("torneos"); // torneos | circuitos
+function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
+  const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos | reservas (solo si es dueño de un complejo habilitado)
   const [creating, setCreating] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(organizer.name);
@@ -7729,7 +7805,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       )}
 
       <div className="flex gap-2 mb-6 overflow-x-auto">
-        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
+        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"], ...(complejos.length > 0 ? [["reservas", "Reservas"]] : [])].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -7741,7 +7817,9 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
         ))}
       </div>
 
-      {tab === "eventos" ? (
+      {tab === "reservas" && complejos.length > 0 ? (
+        <ReservasPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} />
+      ) : tab === "eventos" ? (
         <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
       ) : tab === "circuitos" ? (
         <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
@@ -7762,6 +7840,593 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
         </>
       )}
     </div>
+  );
+}
+
+/* ---------- Reservas: panel del dueño del complejo ---------- */
+
+const HORAS_DEL_DIA = Array.from({ length: 48 }, (_, i) => etiquetaHora(i * PASO));
+const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"]];
+const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
+const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
+
+/* Pestaña "Reservas" del organizador que es dueño de un complejo: la agenda del día y sus canchas */
+function ReservasPanel({ complejos, venues, accessToken }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [view, setView] = useState("agenda"); // agenda | canchas
+  const [canchas, setCanchas] = useState(null);
+  const [error, setError] = useState("");
+  const nombre = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
+
+  const loadCanchas = useCallback(async () => {
+    try {
+      setCanchas(await supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las canchas. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setCanchas(null); loadCanchas(); }, [loadCanchas]);
+
+  const activas = (canchas || []).filter((c) => c.activa);
+  const tab = (key, label) => (
+    <button type="button" onClick={() => setView(key)} className={`px-3 py-1.5 rounded-full text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}>{label}</button>
+  );
+
+  return (
+    <div style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="mb-4 px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombre(c.id)}</option>)}
+        </select>
+      )}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
+        {tab("agenda", "Agenda")}
+        {tab("canchas", "Canchas y precios")}
+      </div>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {canchas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : view === "canchas" || activas.length === 0 ? (
+        <>
+          {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
+          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} />
+        </>
+      ) : (
+        <AgendaReservas complejoId={complejoId} canchas={activas} accessToken={accessToken} />
+      )}
+    </div>
+  );
+}
+
+/* Canchas del complejo: nombre, horario, precio de cada duración y si recibe reservas online */
+function CanchasConfig({ complejoId, canchas, accessToken, onChanged }) {
+  const [adding, setAdding] = useState(false);
+  return (
+    <div className="space-y-3">
+      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} />)}
+      {adding
+        ? <CanchaForm initial={null} complejoId={complejoId} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
+        : <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cancha</button>}
+    </div>
+  );
+}
+
+function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel }) {
+  const toForm = (c) => ({
+    nombre: c?.nombre || `Cancha ${orden + 1}`,
+    apertura: c ? etiquetaHora(horarioCancha(c).desde) : "14:00",
+    cierre: c ? etiquetaHora(horarioCancha(c).hasta) : "23:00",
+    precio_60: c?.precio_60 != null ? String(Math.round(c.precio_60)) : "",
+    precio_90: c?.precio_90 != null ? String(Math.round(c.precio_90)) : "",
+    precio_120: c?.precio_120 != null ? String(Math.round(c.precio_120)) : "",
+    reserva_online: c ? c.reserva_online : true,
+    activa: c ? c.activa : true,
+  });
+  const [form, setForm] = useState(() => toForm(initial));
+  const [editing, setEditing] = useState(!initial);
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+
+  const save = async () => {
+    const row = {
+      nombre: form.nombre.trim(),
+      apertura: form.apertura,
+      cierre: form.cierre,
+      precio_60: leerPrecio(form.precio_60),
+      precio_90: leerPrecio(form.precio_90),
+      precio_120: leerPrecio(form.precio_120),
+      reserva_online: form.reserva_online,
+      activa: form.activa,
+    };
+    if (!row.nombre) { setError("Poné el nombre de la cancha."); return; }
+    if (row.apertura === row.cierre) { setError("La apertura y el cierre no pueden ser la misma hora."); return; }
+    if (row.reserva_online && duracionesOfrecidas(row).length === 0) { setError("Para recibir reservas online cargá el precio de al menos una duración."); return; }
+    setBusy(true); setError("");
+    try {
+      if (initial) await supabaseTable(`canchas?id=eq.${initial.id}`, { method: "PATCH", body: row, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("canchas", { method: "POST", body: { ...row, complejo_id: complejoId, orden }, accessToken, prefer: "return=minimal" });
+      setEditing(false);
+      onDone();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`canchas?id=eq.${initial.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      onDone();
+    } catch (e) { setError(reservaErrorText(e)); setConfirmDelete(false); }
+    finally { setBusy(false); }
+  };
+
+  if (initial && !editing) {
+    const { desde, hasta } = horarioCancha(initial);
+    const precios = DURACIONES.filter((d) => precioDe(initial, d) != null).map((d) => `${d}' ${formatoPrecio(precioDe(initial, d))}`);
+    return (
+      <div className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+        <div className="flex-1 min-w-[12rem]">
+          <p className="font-semibold">{initial.nombre}{!initial.activa && <span className="ml-2 text-xs text-amber-400">desactivada</span>}</p>
+          <p className="text-sm text-teal-300">{rangoLabel(desde, hasta)} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
+          <p className="text-xs text-teal-500">{initial.reserva_online ? "Recibe reservas online" : "Solo turnos cargados por el complejo"}</p>
+        </div>
+        <button type="button" onClick={() => { setForm(toForm(initial)); setEditing(true); }} className="text-sm text-lime-400">Editar</button>
+      </div>
+    );
+  }
+
+  const precioInput = (d) => (
+    <div key={d}>
+      <label className="block text-xs text-teal-400 mb-1">{d} min</label>
+      <input inputMode="numeric" value={form[`precio_${d}`]} onChange={(e) => set(`precio_${d}`, e.target.value)} placeholder="—" className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
+    </div>
+  );
+  const horaSelect = (field, label) => (
+    <div>
+      <label className="block text-xs text-teal-400 mb-1">{label}</label>
+      <select value={form[field]} onChange={(e) => set(field, e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput}>
+        {HORAS_DEL_DIA.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+  const overnight = form.cierre <= form.apertura;
+
+  return (
+    <div className="border border-teal-700 rounded-lg p-4">
+      <div className="grid gap-3 sm:grid-cols-3 mb-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
+        </div>
+        {horaSelect("apertura", "Abre")}
+        {horaSelect("cierre", "Cierra")}
+      </div>
+      {overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
+      <p className="text-xs text-teal-400 mb-1">Precio por duración (dejá vacío lo que no ofrecés)</p>
+      <div className="grid gap-3 grid-cols-3 mb-3">{DURACIONES.map(precioInput)}</div>
+      <div className="flex flex-col gap-2 mb-3 text-sm text-teal-200">
+        <label className="flex items-center gap-2"><input type="checkbox" checked={form.reserva_online} onChange={(e) => set("reserva_online", e.target.checked)} /> Recibe reservas online (si no, solo turnos cargados por el complejo, por ejemplo clases)</label>
+        {initial && <label className="flex items-center gap-2"><input type="checkbox" checked={form.activa} onChange={(e) => set("activa", e.target.checked)} /> Activa (desactivada no aparece en la agenda)</label>}
+      </div>
+      {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
+      <div className="flex flex-wrap gap-3 items-center">
+        <button type="button" disabled={busy} onClick={save} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{initial ? "Guardar cambios" : "Agregar cancha"}</button>
+        <button type="button" disabled={busy} onClick={() => { setError(""); if (initial) setEditing(false); else onCancel(); }} className="text-sm text-teal-400">Cancelar</button>
+        {initial && (confirmDelete
+          ? <span className="text-sm text-red-300 ml-auto">¿Borrar la cancha? <button type="button" disabled={busy} onClick={remove} className="font-semibold text-red-400 ml-1">Sí, borrar</button> <button type="button" onClick={() => setConfirmDelete(false)} className="text-teal-400 ml-2">No</button></span>
+          : <button type="button" onClick={() => setConfirmDelete(true)} className="text-sm text-red-400 ml-auto">Borrar</button>)}
+      </div>
+    </div>
+  );
+}
+
+/* Colores de cada cosa en la agenda */
+function estiloReserva(r) {
+  if (r.tipo === "bloqueo") return { backgroundColor: "rgba(148,163,184,0.18)", border: "1px dashed #94a3b8", color: "#cbd5e1" };
+  if (r.estado === "pendiente") return { backgroundColor: "rgba(251,191,36,0.16)", border: "1px solid #fbbf24", color: "#fde68a" };
+  if (r.no_vino) return { backgroundColor: "rgba(248,113,113,0.14)", border: "1px solid #f87171", color: "#fecaca" };
+  return { backgroundColor: "rgba(159,224,34,0.14)", border: `1px solid ${BRAND.lime}`, color: BRAND.ink };
+}
+
+/* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
+function AgendaReservas({ complejoId, canchas, accessToken }) {
+  const [fecha, setFecha] = useState(hoyArgentina());
+  const [reservas, setReservas] = useState(null);
+  const [error, setError] = useState("");
+  const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
+  const [bloqueando, setBloqueando] = useState(false);
+  const [detalleId, setDetalleId] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setReservas(await supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&fecha=eq.${fecha}&order=inicio.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las reservas. Revisá la conexión."); }
+  }, [complejoId, fecha, accessToken]);
+  useEffect(() => { setReservas(null); load(); }, [load]);
+  // Se actualiza sola cada minuto, por si otra persona del complejo cargó algo
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const filas = useMemo(() => filasAgenda(canchas), [canchas]);
+  const finGrilla = filas[filas.length - 1] + PASO;
+  const lista = useMemo(() => reservas || [], [reservas]);
+  // Lo que ocupa cada cancha, con la fila de la agenda donde se dibuja (la de su inicio, o la primera
+  // si empezó antes); lo que queda entero fuera de la agenda no se dibuja
+  const porCancha = useMemo(() => Object.fromEntries(canchas.map((c) => [c.id,
+    ocupacion(fecha, c.id, lista)
+      .filter((o) => o.hasta > filas[0] && o.desde < finGrilla)
+      .map((o) => ({ ...o, fila: filas[0] + Math.max(0, Math.floor((o.desde - filas[0]) / PASO)) * PASO })),
+  ])), [canchas, fecha, lista, filas, finGrilla]);
+  const canceladas = lista.filter((r) => r.tipo === "turno" && r.estado === "cancelada");
+  const detalle = lista.find((r) => r.id === detalleId);
+  const hoy = hoyArgentina();
+
+  // Lo que se dibuja en cada celda: un turno que empieza ahí (ocupa varias filas), una celda tapada
+  // por un turno que empezó antes, horario libre o cancha cerrada
+  const celda = (c, m) => {
+    const { desde, hasta } = horarioCancha(c);
+    const o = porCancha[c.id].find((x) => x.fila === m);
+    if (o) return { tipo: "reserva", o, span: Math.max(1, Math.ceil((Math.min(o.hasta, finGrilla) - m) / PASO)) };
+    if (porCancha[c.id].some((x) => x.fila < m && x.hasta > m)) return { tipo: "tapada" };
+    if (m < desde || m >= hasta) return { tipo: "cerrada" };
+    return { tipo: "libre" };
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <button type="button" onClick={() => setFecha(sumarDias(fecha, -1))} className="px-3 py-1.5 rounded border border-teal-800 text-teal-300" aria-label="Día anterior">‹</button>
+        <input type="date" value={fecha} onChange={(e) => e.target.value && setFecha(e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label="Fecha" />
+        <button type="button" onClick={() => setFecha(sumarDias(fecha, 1))} className="px-3 py-1.5 rounded border border-teal-800 text-teal-300" aria-label="Día siguiente">›</button>
+        <span className="text-sm text-teal-200 font-semibold">{etiquetaFecha(fecha)}{fecha === hoy && " · hoy"}</span>
+        {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
+      </div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
+        <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
+        <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
+      </div>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+
+      {reservas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-teal-900">
+          <table className="w-full border-collapse text-xs" style={{ minWidth: 80 + canchas.length * 120 }}>
+            <thead>
+              <tr>
+                <th className="sticky left-0 z-10 w-14 px-2 py-2 text-left text-teal-500 font-normal" style={{ backgroundColor: "#0b1c24" }}>Hora</th>
+                {canchas.map((c) => <th key={c.id} className="px-2 py-2 text-left text-teal-200 font-semibold">{c.nombre}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {filas.map((m) => (
+                <tr key={m} className="border-t border-teal-900/60">
+                  <td className="sticky left-0 z-10 px-2 align-top text-teal-500 h-9" style={{ backgroundColor: "#0b1c24" }}>{m % 60 === 0 ? etiquetaHora(m) : ""}</td>
+                  {canchas.map((c) => {
+                    const x = celda(c, m);
+                    if (x.tipo === "tapada") return null;
+                    if (x.tipo === "cerrada") return <td key={c.id} className="h-9" style={{ backgroundColor: "rgba(0,0,0,0.35)" }} />;
+                    if (x.tipo === "libre") {
+                      return (
+                        <td key={c.id} className="h-9 p-0.5">
+                          <button type="button" onClick={() => setNueva({ canchaId: c.id, desde: m })} className="w-full h-full rounded text-teal-700 hover:text-lime-400 hover:bg-white/5" aria-label={`Cargar turno ${c.nombre} ${etiquetaHora(m)}`}>+</button>
+                        </td>
+                      );
+                    }
+                    const { r, desde, hasta } = x.o;
+                    return (
+                      <td key={c.id} rowSpan={x.span} className="p-0.5 align-top">
+                        <button type="button" onClick={() => setDetalleId(r.id)} className="w-full rounded px-2 py-1 text-left leading-tight overflow-hidden flex flex-col justify-start" style={{ ...estiloReserva(r), height: `calc(${x.span * 2.25}rem + ${x.span - 1}px - 4px)` }}>
+                          <span className="block font-semibold truncate">{r.tipo === "bloqueo" ? `🔒 ${r.nota || "Bloqueado"}` : r.nombre}</span>
+                          <span className="block opacity-80">{rangoLabel(desde, hasta)}</span>
+                          {r.tipo === "turno" && (
+                            <span className="block opacity-80">
+                              {r.estado === "pendiente" ? "Pendiente" : r.no_vino ? "No vino" : r.medio_pago ? `✓ ${medioPagoLabel(r.medio_pago)}` : formatoPrecio(r.precio)}
+                            </span>
+                          )}
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {canceladas.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs uppercase tracking-wide text-teal-500 mb-1">Turnos cancelados este día</p>
+          <ul className="text-sm text-teal-300 space-y-0.5">
+            {canceladas.map((r) => (
+              <li key={r.id}>{canchas.find((c) => c.id === r.cancha_id)?.nombre || "Cancha"} · {rangoLabel(minutoEnGrilla(fecha, r.inicio), minutoEnGrilla(fecha, r.fin))} · {r.nombre}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {nueva && (
+        <NuevoTurnoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
+          onClose={() => setNueva(null)} onDone={() => { setNueva(null); load(); }} />
+      )}
+      {bloqueando && (
+        <BloqueoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
+          onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); load(); }} />
+      )}
+      {detalle && (
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} accessToken={accessToken}
+          onClose={() => setDetalleId(null)} onChanged={load} />
+      )}
+    </div>
+  );
+}
+
+/* Turno cargado por el complejo (por WhatsApp, teléfono o en persona). Puede repetirse varias
+   semanas para los turnos fijos. Queda confirmado. */
+function NuevoTurnoModal({ complejoId, canchas, fecha, reservas, preset, accessToken, onClose, onDone }) {
+  const primeraDuracion = (c) => duracionesOfrecidas(c)[0] || 90;
+  const [canchaId, setCanchaId] = useState(preset.canchaId);
+  const cancha = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const [duracion, setDuracion] = useState(() => primeraDuracion(cancha));
+  const inicios = iniciosPosibles(cancha, duracion);
+  const [desde, setDesde] = useState(preset.desde ?? inicios[0] ?? null);
+  const [form, setForm] = useState({ nombre: "", telefono: "", precio: precioDe(cancha, primeraDuracion(cancha)) ?? "", medio_pago: "", nota: "", semanas: 1 });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+
+  const cambiarCancha = (id) => {
+    const c = canchas.find((x) => x.id === id);
+    const d = duracionesOfrecidas(c).includes(duracion) ? duracion : primeraDuracion(c);
+    setCanchaId(id); setDuracion(d); set("precio", precioDe(c, d) ?? "");
+  };
+  const cambiarDuracion = (d) => { setDuracion(d); set("precio", precioDe(cancha, d) ?? form.precio); };
+
+  const submit = async () => {
+    const nombre = form.nombre.trim();
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!nombre) { setError("Poné el nombre de quien reserva."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    if (desde == null) { setError("Elegí el horario."); return; }
+    const motivo = motivoNoEntra(cancha, fecha, desde, duracion, reservas);
+    if (motivo === "fuera_de_horario") { setError("Ese turno no entra en el horario de la cancha."); return; }
+    if (motivo === "superpuesto") { setError("Ese horario se pisa con otro turno o bloqueo."); return; }
+    setBusy(true); setError("");
+    const fallidas = [];
+    for (const f of fechasSemanales(fecha, Number(form.semanas) || 1)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: {
+            complejo_id: complejoId, cancha_id: cancha.id, tipo: "turno", fecha: f,
+            inicio: instante(f, desde), fin: instante(f, desde + duracion), estado: "confirmada", origen: "manual",
+            nombre, telefono, precio: leerPrecio(form.precio), medio_pago: form.medio_pago || null, nota: form.nota.trim() || null,
+          },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length === 0) { onDone(); return; }
+    setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+  };
+
+  return (
+    <Modal title="Cargar turno" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">{etiquetaFecha(fecha)}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+            <select value={cancha.id} onChange={(e) => cambiarCancha(e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Desde</label>
+            <select value={desde ?? ""} onChange={(e) => setDesde(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {desde != null && !inicios.includes(desde) && <option value={desde}>{etiquetaHora(desde)} (no entra)</option>}
+              {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Duración</label>
+          <div className="flex gap-2">
+            {DURACIONES.map((d) => (
+              <button key={d} type="button" onClick={() => cambiarDuracion(d)} className={`flex-1 px-3 py-2 rounded border ${duracion === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                {d} min
+              </button>
+            ))}
+          </div>
+          {desde != null && <p className="text-xs text-teal-500 mt-1">{rangoLabel(desde, desde + duracion)}</p>}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+            <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+            <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Precio</label>
+            <input inputMode="numeric" value={form.precio} onChange={(e) => set("precio", e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Cobro</label>
+            <select value={form.medio_pago} onChange={(e) => set("medio_pago", e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {MEDIOS_PAGO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nota (opcional)</label>
+          <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <div className="flex items-center gap-2 text-teal-200">
+          <label htmlFor="turno-semanas">Turno fijo: repetir</label>
+          <select id="turno-semanas" value={form.semanas} onChange={(e) => set("semanas", e.target.value)} className="px-2 py-1 rounded border" style={adminInput}>
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n === 1 ? "solo este día" : `${n} semanas`}</option>)}
+          </select>
+        </div>
+        {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+        <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : "Guardar turno"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Bloqueo de una cancha (o de todas) un rato: lluvia, mantenimiento, un torneo */
+function BloqueoModal({ complejoId, canchas, fecha, reservas, accessToken, onClose, onDone }) {
+  const filas = filasAgenda(canchas);
+  const [canchaId, setCanchaId] = useState("todas");
+  const [desde, setDesde] = useState(filas[0]);
+  const [hasta, setHasta] = useState(filas[filas.length - 1] + PASO);
+  const [motivo, setMotivo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (hasta <= desde) { setError("El horario de fin tiene que ser después del de inicio."); return; }
+    // A cada cancha se le bloquea solo la parte del rango en que está abierta
+    const elegidas = (canchaId === "todas" ? canchas : canchas.filter((c) => c.id === canchaId))
+      .map((c) => ({ c, d: Math.max(desde, horarioCancha(c).desde), h: Math.min(hasta, horarioCancha(c).hasta) }))
+      .filter(({ d, h }) => h > d);
+    if (elegidas.length === 0) { setError("La cancha está cerrada en ese horario: no hace falta bloquearlo."); return; }
+    const pisadas = elegidas.filter(({ c, d, h }) => ocupacion(fecha, c.id, reservas).some((o) => o.desde < h && d < o.hasta)).map(({ c }) => c);
+    if (pisadas.length > 0) { setError(`Hay turnos o bloqueos en ese horario (${pisadas.map((c) => c.nombre).join(", ")}). Cancelalos primero o elegí otro horario.`); return; }
+    setBusy(true); setError("");
+    const fallidas = [];
+    for (const { c, d, h } of elegidas) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: c.id, tipo: "bloqueo", fecha, inicio: instante(fecha, d), fin: instante(fecha, h), estado: "confirmada", origen: "manual", nota: motivo.trim() || null },
+        });
+      } catch (e) { fallidas.push(`${c.nombre}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length === 0) { onDone(); return; }
+    setError(fallidas.join("\n"));
+  };
+
+  return (
+    <Modal title="Bloquear horario" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">{etiquetaFecha(fecha)}</p>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+          <select value={canchaId} onChange={(e) => setCanchaId(e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+            <option value="todas">Todas las canchas</option>
+            {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+          </select>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Desde</label>
+            <select value={desde} onChange={(e) => setDesde(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {filas.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Hasta</label>
+            <select value={hasta} onChange={(e) => setHasta(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {filas.map((m) => m + PASO).map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Motivo (opcional)</label>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} maxLength={200} placeholder="Ej: lluvia, mantenimiento, torneo" className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+        <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : "Bloquear"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente */
+function DetalleReservaModal({ reserva: r, cancha, fecha, accessToken, onClose, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [error, setError] = useState("");
+  const desde = minutoEnGrilla(fecha, r.inicio);
+  const hasta = minutoEnGrilla(fecha, r.fin);
+
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await onChanged(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
+  const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString() }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const btn = "px-3 py-2 rounded-lg text-sm border disabled:opacity-50";
+
+  return (
+    <Modal title={r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-200">{cancha?.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(desde, hasta)} ({hasta - desde} min)</p>
+        {r.tipo === "bloqueo" ? (
+          <>
+            {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
+            <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>
+          </>
+        ) : (
+          <>
+            <div className="text-teal-300 space-y-1">
+              {r.precio != null && <p>Precio: {formatoPrecio(r.precio)}</p>}
+              {r.telefono && <p>WhatsApp: <a href={`https://wa.me/${r.telefono}`} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">{formatArPhone(r.telefono)}</a></p>}
+              {r.nota && <p>Nota: {r.nota}</p>}
+              <p className="text-xs text-teal-500">{r.origen === "online" ? "Pedido online" : "Cargado por el complejo"}{r.estado === "pendiente" && " · esperando confirmación"}</p>
+            </div>
+            {r.estado === "pendiente" && (
+              <div className="flex gap-2">
+                <button type="button" disabled={busy} onClick={() => patch({ estado: "confirmada" })} className="flex-1 px-3 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
+                <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "rechazada" }, accessToken, prefer: "return=minimal" }); onClose(); })} className={`flex-1 ${btn} border-red-400 text-red-400`}>Rechazar</button>
+              </div>
+            )}
+            {r.estado === "confirmada" && (
+              <>
+                <div>
+                  <p className="text-xs text-teal-400 mb-1">Cobro</p>
+                  <div className="flex gap-2">
+                    {MEDIOS_PAGO.map(([k, l]) => (
+                      <button key={k} type="button" disabled={busy} onClick={() => patch({ medio_pago: k || null })} className={`flex-1 ${btn} ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                    ))}
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-teal-200">
+                  <input type="checkbox" checked={r.no_vino} disabled={busy} onChange={(e) => patch({ no_vino: e.target.checked })} /> No vino
+                </label>
+                {confirmCancel ? (
+                  <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
+                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
+                    <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
+                  </p>
+                ) : (
+                  <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>Cancelar turno</button>
+                )}
+              </>
+            )}
+          </>
+        )}
+        {error && <p className="text-red-400">{error}</p>}
+      </div>
+    </Modal>
   );
 }
 
@@ -9311,6 +9976,8 @@ function SmashPointAppInner() {
   const [venues, setVenues] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [events, setEvents] = useState([]);
+  // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
+  const [complejos, setComplejos] = useState([]);
   const [route, setRoute] = useState("public-home");
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
@@ -9363,6 +10030,7 @@ function SmashPointAppInner() {
         let loadedEvents;
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
+        fetchComplejosReserva().then(setComplejos); // solo lo usan los paneles: no frena la portada
 
         // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
         const stored = readStoredAuth();
@@ -9482,6 +10150,10 @@ function SmashPointAppInner() {
   const upsertById = (list, item) => (list.some((x) => x.id === item.id) ? list.map((x) => (x.id === item.id ? item : x)) : [...list, item]);
   const saveVenue = (v) => persistVenues(upsertById(venues, v));
   const deleteVenue = (id) => persistVenues(venues.filter((v) => v.id !== id));
+  const saveComplejo = async (row) => {
+    const [saved] = await supabaseTable("complejos?on_conflict=id", { method: "POST", body: row, accessToken: session?.accessToken, prefer: "resolution=merge-duplicates,return=representation" });
+    setComplejos((list) => upsertById(list, saved));
+  };
   const persistEvents = useCallback(async (next) => {
     setEvents(next);
     try { await kvSet(STORAGE_KEY_EVENTS, next, session?.accessToken); } catch {}
@@ -9762,6 +10434,8 @@ function SmashPointAppInner() {
         venues={venues}
         coaches={coaches}
         events={events}
+        complejos={complejos}
+        onSaveComplejo={saveComplejo}
         onSaveVenue={saveVenue}
         onDeleteVenue={deleteVenue}
         onSaveCoach={saveCoach}
@@ -9793,6 +10467,8 @@ function SmashPointAppInner() {
         events={events.filter((e) => e.organizerId === session.id)}
         onSaveEvent={saveEvent}
         onDeleteEvent={deleteEvent}
+        complejos={complejos.filter((c) => c.dueno_id === session.id && c.reservas_habilitadas)}
+        venues={venues}
       />
     );
   } else if (route === "admin-tournament" && selected?._light) {
