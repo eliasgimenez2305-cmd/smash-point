@@ -295,6 +295,113 @@ async function fetchComplejosReserva() {
   try { return (await supabaseTable("complejos?select=*")) || []; } catch { return []; }
 }
 
+/* ---------- Jugadores: entran con un código que les llega por mail (ver 20261015_reservas_jugadores.sql) ---------- */
+
+async function supabaseAuthPost(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.msg || data.error_description || data.message || "No se pudo completar.");
+    err.status = res.status;
+    err.code = data.error_code || data.code;
+    throw err;
+  }
+  return data;
+}
+/* Manda el código al mail (si es la primera vez, también crea la cuenta) */
+const supabaseSendOtp = (email) => supabaseAuthPost("otp", { email, create_user: true });
+/* Cambia el código por una sesión: { access_token, refresh_token, expires_in, user } */
+const supabaseVerifyOtp = (email, token) => supabaseAuthPost("verify", { type: "email", email, token });
+
+const PEDIDO_ERRORES = {
+  sin_sesion: "Tu sesión venció: volvé a entrar.",
+  sin_perfil: "Completá tus datos antes de reservar.",
+  cancha_invalida: "Esa cancha ya no recibe reservas online.",
+  duracion_invalida: "Esa duración ya no se ofrece en esa cancha.",
+  fuera_de_horario: "Ese horario está fuera del horario de la cancha.",
+  horario_pasado: "Ese horario ya pasó.",
+  muy_adelante: "Se puede reservar hasta 30 días antes.",
+  bloqueado: "No podés pedir turnos en este complejo. Comunicate con ellos.",
+  ocupado: "Alguien acaba de tomar ese turno. Elegí otro horario.",
+  no_encontrada: "No encontramos esa reserva.",
+  no_cancelable: "Esa reserva ya no se puede cancelar.",
+  fuera_de_plazo: "Falta menos de 24 h para el turno: para cancelarlo, escribile al complejo.",
+};
+const pedidoErrorText = (e) => PEDIDO_ERRORES[e?.code] || "No se pudo completar. Revisá la conexión y probá de nuevo.";
+
+/* Sesión del jugador, aparte de la del organizador: se guarda en el navegador para no tener que
+   pedir el código cada vez, y se renueva sola antes de vencer */
+const JUGADOR_STORAGE_KEY = "sp:jugador";
+function readStoredJugador() {
+  try { return JSON.parse(localStorage.getItem(JUGADOR_STORAGE_KEY) || "null"); } catch { return null; }
+}
+function writeStoredJugador(value) {
+  try {
+    if (value) localStorage.setItem(JUGADOR_STORAGE_KEY, JSON.stringify(value));
+    else localStorage.removeItem(JUGADOR_STORAGE_KEY);
+  } catch {}
+}
+
+function useJugador() {
+  const [jugador, setJugadorState] = useState(null); // { id, email, perfil, accessToken, refreshToken, expiresAt }
+  const ref = useRef(null);
+  const setJugador = useCallback((j) => {
+    ref.current = j;
+    setJugadorState(j);
+    writeStoredJugador(j ? { refreshToken: j.refreshToken } : null);
+  }, []);
+  const fromAuth = useCallback(async (auth) => {
+    const base = { id: auth.user.id, email: auth.user.email, ...authFields(auth) };
+    const rows = await supabaseTable(`jugadores?id=eq.${base.id}&select=*`, { accessToken: base.accessToken });
+    return { ...base, perfil: rows?.[0] || null };
+  }, []);
+
+  useEffect(() => {
+    const stored = readStoredJugador();
+    if (!stored?.refreshToken) return;
+    supabaseRefreshOnce(stored.refreshToken).then(fromAuth).then(setJugador).catch((err) => { if (err.expired) writeStoredJugador(null); });
+  }, [fromAuth, setJugador]);
+
+  /* Token vigente para llamar a la base como el jugador */
+  const token = useCallback(async () => {
+    const j = ref.current;
+    if (!j) throw Object.assign(new Error("sin_sesion"), { code: "sin_sesion" });
+    if (Date.now() < j.expiresAt - 60000) return j.accessToken;
+    try {
+      const next = { ...j, ...authFields(await supabaseRefreshOnce(j.refreshToken)) };
+      setJugador(next);
+      return next.accessToken;
+    } catch (err) {
+      if (err.expired) setJugador(null);
+      throw Object.assign(err, { code: "sin_sesion" });
+    }
+  }, [setJugador]);
+
+  const login = useCallback(async (auth) => { const j = await fromAuth(auth); setJugador(j); return j; }, [fromAuth, setJugador]);
+  const savePerfil = useCallback(async (perfil) => {
+    const accessToken = await token();
+    const rows = await supabaseTable("jugadores?on_conflict=id", {
+      method: "POST", accessToken, prefer: "resolution=merge-duplicates,return=representation",
+      body: { id: ref.current.id, ...perfil },
+    });
+    setJugador({ ...ref.current, perfil: rows[0] });
+  }, [token, setJugador]);
+  const logout = useCallback(() => {
+    const j = ref.current;
+    setJugador(null);
+    if (j) fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${j.accessToken}` } }).catch(() => {});
+  }, [setJugador]);
+
+  return useMemo(() => ({ jugador, token, login, savePerfil, logout }), [jugador, token, login, savePerfil, logout]);
+}
+
+/* Link de WhatsApp con un mensaje ya escrito */
+const waLink = (telefono, texto) => `https://wa.me/${telefono}?text=${encodeURIComponent(texto)}`;
+
 const INSCRIPCION_ERRORES = {
   inscripciones_cerradas: "Las inscripciones de este torneo están cerradas.",
   categoria_invalida: "Elegí una categoría válida.",
@@ -5516,11 +5623,15 @@ function DirectoryAvatar({ url, name, color, size = 64 }) {
 }
 
 /* Pestaña pública "Canchas": fichas de los complejos (logo, nombre, dirección, Instagram, WhatsApp) */
-function VenuesPublicView({ venues }) {
+function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisReservas }) {
   const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
+  const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas);
   return (
     <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
+      <div className="flex items-start justify-between gap-3">
+        <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
+        {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline" style={F.body}>Mis reservas</button>}
+      </div>
       <p className="text-sm text-teal-300 mb-5" style={F.body}>Dónde jugar en Gualeguaychú.</p>
       {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá los complejos de la ciudad.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -5539,11 +5650,446 @@ function VenuesPublicView({ venues }) {
                   )}
                 </div>
               </div>
+              {conReservas(v.id) && (
+                <button type="button" onClick={() => onReservar(v.id)} className="w-full mt-3 px-3 py-2.5 rounded-full text-sm font-semibold" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+                  Reservar cancha
+                </button>
+              )}
               <SocialButtons instagram={v.instagram} whatsapp={v.whatsapp} color={color} />
             </article>
           );
         })}
       </div>
+    </section>
+  );
+}
+
+/* ---------- Reservas: lado del jugador ---------- */
+
+/* Entrada del jugador: mail → código de 6 dígitos → (la primera vez) sus datos. Sin contraseña. */
+function LoginJugadorModal({ jugadorApi, onClose, onDone }) {
+  const { jugador } = jugadorApi;
+  const [step, setStep] = useState(jugador && !jugador.perfil ? "perfil" : "email");
+  const [email, setEmail] = useState("");
+  const [codigo, setCodigo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [reenviarEn, setReenviarEn] = useState(0);
+  useEffect(() => {
+    if (reenviarEn <= 0) return;
+    const t = setTimeout(() => setReenviarEn((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [reenviarEn]);
+
+  const mandar = async () => {
+    const mail = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { setError("Revisá el mail."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseSendOtp(mail);
+      setEmail(mail); setCodigo(""); setStep("codigo"); setReenviarEn(60);
+    } catch (e) {
+      setError(e.status === 429 ? "Pediste muchos códigos seguidos. Esperá un minuto y probá de nuevo." : "No pudimos mandarte el código. Revisá el mail y la conexión.");
+    } finally { setBusy(false); }
+  };
+  const entrar = async () => {
+    const token = codigo.replace(/\D/g, "");
+    if (token.length < 6) { setError("El código tiene 6 números."); return; }
+    setBusy(true); setError("");
+    try {
+      const j = await jugadorApi.login(await supabaseVerifyOtp(email, token));
+      if (j.perfil) onDone(); else setStep("perfil");
+    } catch (e) {
+      setError(e.status === 429 ? "Demasiados intentos. Esperá un minuto." : "El código no es correcto o ya venció. Revisalo o pedí uno nuevo.");
+    } finally { setBusy(false); }
+  };
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+
+  return (
+    <Modal title={step === "perfil" ? "Tus datos" : "Entrar para reservar"} onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        {step === "email" && (
+          <>
+            <p className="text-teal-300">Te mandamos un código a tu mail para entrar. No hace falta contraseña.</p>
+            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && mandar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
+            {error && <p className="text-red-400">{error}</p>}
+            <button type="button" disabled={busy} onClick={mandar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Mandando…" : "Mandarme el código"}</button>
+          </>
+        )}
+        {step === "codigo" && (
+          <>
+            <p className="text-teal-300">Te mandamos un código a <span className="text-teal-100 font-semibold">{email}</span>. Puede tardar un minuto; si no llega, revisá el correo no deseado.</p>
+            <input inputMode="numeric" autoComplete="one-time-code" value={codigo} onChange={(e) => setCodigo(e.target.value)} onKeyDown={(e) => e.key === "Enter" && entrar()} placeholder="Código" maxLength={10} className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
+            {error && <p className="text-red-400">{error}</p>}
+            <button type="button" disabled={busy} onClick={entrar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Entrando…" : "Entrar"}</button>
+            <div className="flex justify-between text-xs">
+              <button type="button" onClick={() => { setStep("email"); setError(""); }} className="text-teal-400">Usar otro mail</button>
+              <button type="button" disabled={reenviarEn > 0 || busy} onClick={mandar} className="text-teal-400 disabled:opacity-50">{reenviarEn > 0 ? `Reenviar en ${reenviarEn} s` : "Reenviar código"}</button>
+            </div>
+          </>
+        )}
+        {step === "perfil" && (
+          <PerfilJugadorForm initial={jugadorApi.jugador?.perfil} email={jugadorApi.jugador?.email} submitLabel="Guardar y seguir"
+            onSave={async (perfil) => { await jugadorApi.savePerfil(perfil); onDone(); }} />
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/* Datos del jugador: nombre, apellido, WhatsApp y (opcional) fecha de nacimiento */
+function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
+  const [form, setForm] = useState({
+    nombre: initial?.nombre || "", apellido: initial?.apellido || "",
+    telefono: initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  const submit = async () => {
+    const nombre = form.nombre.trim().replace(/\s+/g, " ");
+    const apellido = form.apellido.trim().replace(/\s+/g, " ");
+    const telefono = normalizeArPhone(form.telefono);
+    if (!nombre || !apellido) { setError("Completá nombre y apellido."); return; }
+    if (!telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    setBusy(true); setError("");
+    try {
+      await onSave({ nombre, apellido, telefono, fecha_nacimiento: form.fecha_nacimiento || null });
+    } catch { setError("No se pudieron guardar tus datos. Probá de nuevo."); setBusy(false); }
+  };
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      {email && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email}</span>.</p>}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nombre">Nombre</label>
+          <input id="jug-nombre" autoComplete="given-name" value={form.nombre} onChange={set("nombre")} maxLength={40} className={inputCls} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-apellido">Apellido</label>
+          <input id="jug-apellido" autoComplete="family-name" value={form.apellido} onChange={set("apellido")} maxLength={40} className={inputCls} style={adminInput} />
+        </div>
+      </div>
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
+        <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
+      </div>
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nac">Fecha de nacimiento (opcional)</label>
+        <input id="jug-nac" type="date" value={form.fecha_nacimiento} onChange={set("fecha_nacimiento")} min="1920-01-02" className={inputCls} style={adminInput} />
+      </div>
+      <p className="text-xs text-teal-500">Usamos tus datos solo para tus reservas e inscripciones. El complejo donde reservás ve tu nombre y tu WhatsApp.</p>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : submitLabel}</button>
+    </div>
+  );
+}
+
+/* "Hoy", "Mañana", "Sáb 11" */
+function etiquetaDiaCorta(fecha, hoy) {
+  if (fecha === hoy) return "Hoy";
+  if (fecha === sumarDias(hoy, 1)) return "Mañana";
+  const [dia, num] = etiquetaFecha(fecha).split(" ");
+  return `${dia.slice(0, 3)} ${num.slice(0, 2)}`;
+}
+
+/* Reservar en un complejo: día, duración, y los horarios de cada cancha (libres y ocupados) */
+function ReservarCancha({ venue, jugadorApi, onBack, onMisReservas }) {
+  const hoy = hoyArgentina();
+  const [canchas, setCanchas] = useState(null);
+  const [fecha, setFecha] = useState(hoy);
+  const [duracion, setDuracion] = useState(null);
+  const [ocupado, setOcupado] = useState(null);
+  const [error, setError] = useState("");
+  const [elegido, setElegido] = useState(null); // { cancha, desde }
+  const [pidiendoLogin, setPidiendoLogin] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [pedidoError, setPedidoError] = useState("");
+  const [enviado, setEnviado] = useState(null);
+  const { jugador } = jugadorApi;
+
+  useEffect(() => {
+    supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(venue.id)}&activa=is.true&reserva_online=is.true&order=orden.asc,created_at.asc`)
+      .then((rows) => {
+        setCanchas(rows || []);
+        const durs = DURACIONES.filter((d) => (rows || []).some((c) => duracionesOfrecidas(c).includes(d)));
+        setDuracion(durs.includes(90) ? 90 : durs[0] ?? null);
+      })
+      .catch(() => setError("No se pudieron cargar las canchas. Revisá la conexión."));
+  }, [venue.id]);
+
+  const loadOcupado = useCallback(async () => {
+    try {
+      const rows = await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: fecha });
+      setOcupado((rows || []).map((r) => ({ ...r, estado: "confirmada" })));
+      setError("");
+    } catch { setError("No se pudieron cargar los horarios. Revisá la conexión."); }
+  }, [venue.id, fecha]);
+  useEffect(() => { setOcupado(null); loadOcupado(); }, [loadOcupado]);
+
+  const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
+  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
+  const ahora = Date.now();
+
+  const elegir = (cancha, desde) => {
+    setPedidoError("");
+    setElegido({ cancha, desde });
+    if (!jugador?.perfil) setPidiendoLogin(true);
+  };
+  const pedir = async () => {
+    setBusy(true); setPedidoError("");
+    try {
+      await supabaseRpc("pedir_turno", { p_cancha: elegido.cancha.id, p_fecha: fecha, p_minuto: elegido.desde, p_duracion: duracion }, await jugadorApi.token());
+      setEnviado(elegido); setElegido(null);
+      loadOcupado();
+    } catch (e) {
+      setPedidoError(pedidoErrorText(e));
+      if (e.code === "ocupado") loadOcupado();
+      if (e.code === "sin_perfil" || e.code === "sin_sesion") setPidiendoLogin(true);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400">← Complejos</button>
+        {jugador && <button type="button" onClick={onMisReservas} className="text-sm text-lime-400 underline">Mis reservas</button>}
+      </div>
+      <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>{venue.name}</h1>
+      <p className="text-sm text-teal-300 mb-5">Elegí el día y el horario. El turno se paga en el complejo.</p>
+
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {canchas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : canchas.length === 0 || duracion == null ? (
+        <p className="text-sm text-teal-300">Este complejo todavía no tiene turnos para reservar online. Escribiles por WhatsApp.</p>
+      ) : (
+        <>
+          <div className="flex gap-2 overflow-x-auto pb-2 mb-3" style={{ scrollbarWidth: "none" }}>
+            {dias.map((d) => (
+              <button key={d} type="button" onClick={() => setFecha(d)} className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border ${fecha === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                {etiquetaDiaCorta(d, hoy)}
+              </button>
+            ))}
+          </div>
+          {duraciones.length > 1 && (
+            <div className="flex gap-2 mb-4">
+              {duraciones.map((d) => (
+                <button key={d} type="button" onClick={() => setDuracion(d)} className={`flex-1 px-3 py-2 rounded-lg text-sm border ${duracion === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{d} min</button>
+              ))}
+            </div>
+          )}
+          <p className="text-sm text-teal-200 font-semibold mb-3">{etiquetaFecha(fecha)} · turnos de {duracion} min</p>
+          {ocupado === null ? (
+            !error && <p className="text-sm opacity-60">Cargando horarios…</p>
+          ) : (
+            <div className="space-y-4">
+              {canchas.filter((c) => duracionesOfrecidas(c).includes(duracion)).map((c) => {
+                const inicios = iniciosPosibles(c, duracion).filter((m) => Date.parse(instante(fecha, m)) > ahora);
+                return (
+                  <div key={c.id} className="rounded-xl p-3" style={{ ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)" }}>
+                    <div className="flex justify-between items-baseline mb-2">
+                      <h2 className="font-semibold text-teal-100">{c.nombre}</h2>
+                      <span className="text-sm text-lime-400">{formatoPrecio(precioDe(c, duracion))}</span>
+                    </div>
+                    {inicios.length === 0 ? (
+                      <p className="text-sm text-teal-500">No quedan horarios este día.</p>
+                    ) : (
+                      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                        {inicios.map((m) => {
+                          const libre = motivoNoEntra(c, fecha, m, duracion, ocupado) === null;
+                          return libre ? (
+                            <button key={m} type="button" onClick={() => elegir(c, m)} className="px-1 py-2 rounded-lg text-sm font-semibold border border-lime-400 text-lime-400 hover:bg-lime-400/10">{etiquetaHora(m)}</button>
+                          ) : (
+                            <span key={m} className="px-1 py-2 rounded-lg text-sm text-center border border-teal-900 text-teal-700 line-through" aria-label={`${etiquetaHora(m)} ocupado`}>{etiquetaHora(m)}</span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {pidiendoLogin && (
+        <LoginJugadorModal jugadorApi={jugadorApi} onClose={() => { setPidiendoLogin(false); if (!jugadorApi.jugador?.perfil) setElegido(null); }} onDone={() => setPidiendoLogin(false)} />
+      )}
+      {elegido && !pidiendoLogin && jugador?.perfil && (
+        <Modal title="Confirmá tu pedido" onClose={() => setElegido(null)}>
+          <div className="space-y-3 text-sm" style={F.body}>
+            <div className="rounded-lg p-3 space-y-1" style={{ backgroundColor: "rgba(255,255,255,0.04)" }}>
+              <p className="text-base font-semibold text-teal-100">{venue.name} · {elegido.cancha.nombre}</p>
+              <p className="text-teal-200">{etiquetaFecha(fecha)} · {rangoLabel(elegido.desde, elegido.desde + duracion)}</p>
+              <p className="text-lime-400 font-semibold">{formatoPrecio(precioDe(elegido.cancha, duracion))} <span className="text-teal-400 font-normal">(se paga en el complejo)</span></p>
+            </div>
+            <div className="text-teal-300">
+              <p>{jugador.perfil.nombre} {jugador.perfil.apellido} · {formatArPhone(jugador.perfil.telefono)}</p>
+              <p className="text-xs text-teal-500">{jugador.email}</p>
+            </div>
+            <ul className="text-xs text-teal-400 space-y-1 list-disc pl-4">
+              <li>El complejo tiene que confirmar tu pedido. Si no lo confirma en 24 h (o antes del turno), vence y el horario se libera.</li>
+              <li>Si te equivocaste, tenés 30 minutos para cancelarlo. Después, se puede cancelar hasta 24 h antes del turno.</li>
+            </ul>
+            {pedidoError && <p className="text-red-400">{pedidoError}</p>}
+            <button type="button" disabled={busy} onClick={pedir} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Enviando…" : "Pedir turno"}</button>
+          </div>
+        </Modal>
+      )}
+      {enviado && (
+        <Modal title="¡Pedido enviado!" onClose={() => setEnviado(null)}>
+          <div className="space-y-3 text-sm" style={F.body}>
+            <p className="text-teal-200">{venue.name} · {enviado.cancha.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(enviado.desde, enviado.desde + duracion)}</p>
+            <p className="text-teal-300">El complejo tiene que confirmarlo. Podés ver cómo va en <span className="text-teal-100">Mis reservas</span>. Si te equivocaste, tenés 30 minutos para cancelarlo.</p>
+            <div className="flex gap-2">
+              <button type="button" onClick={onMisReservas} className="flex-1 px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver mis reservas</button>
+              <button type="button" onClick={() => setEnviado(null)} className="flex-1 px-4 py-2.5 rounded-lg border border-teal-700 text-teal-200">Seguir mirando</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+const ESTADO_RESERVA = {
+  pendiente: ["Esperando confirmación", "#fbbf24"],
+  confirmada: ["Confirmado", BRAND.lime],
+  rechazada: ["Rechazado por el complejo", "#f87171"],
+  vencida: ["Vencido (el complejo no lo confirmó)", "#94a3b8"],
+  cancelada: ["Cancelado", "#94a3b8"],
+};
+
+/* ¿El jugador puede cancelar esta reserva desde la app? (lo mismo que controla cancelar_mi_reserva) */
+function puedeCancelar(r, ahora = Date.now()) {
+  if (r.estado !== "pendiente" && r.estado !== "confirmada") return false;
+  const inicio = Date.parse(r.inicio);
+  if (inicio <= ahora) return false;
+  return ahora <= Date.parse(r.created_at) + 30 * 60000 || inicio - ahora >= 24 * 3600000;
+}
+
+/* Reservas del jugador logueado: próximas (con cancelar) y anteriores; y sus datos */
+function MisReservas({ jugadorApi, venues, onBack }) {
+  const { jugador } = jugadorApi;
+  const [reservas, setReservas] = useState(null);
+  const [canchas, setCanchas] = useState({});
+  const [error, setError] = useState("");
+  const [cancelandoId, setCancelandoId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [aviso, setAviso] = useState("");
+  const [editando, setEditando] = useState(false);
+  const [entrando, setEntrando] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!jugadorApi.jugador) return;
+    try {
+      const rows = await supabaseTable(`reservas?jugador_id=eq.${jugadorApi.jugador.id}&order=inicio.desc&limit=60`, { accessToken: await jugadorApi.token() });
+      const ids = [...new Set(rows.map((r) => r.cancha_id))];
+      if (ids.length > 0) {
+        const cs = await supabaseTable(`canchas?id=in.(${ids.join(",")})&select=id,nombre`);
+        setCanchas(Object.fromEntries(cs.map((c) => [c.id, c.nombre])));
+      }
+      setReservas(rows); setError("");
+    } catch { setError("No se pudieron cargar tus reservas. Revisá la conexión."); }
+  }, [jugadorApi]);
+  useEffect(() => { load(); }, [load]);
+
+  const cancelar = async (r) => {
+    setBusy(true); setAviso("");
+    try {
+      const res = await supabaseRpc("cancelar_mi_reserva", { p_id: r.id }, await jugadorApi.token());
+      setAviso(res === "avisada" ? "Turno cancelado. El complejo ya lo ve en su agenda." : "Turno cancelado.");
+      setCancelandoId(null);
+      load();
+    } catch (e) { setAviso(pedidoErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  if (!jugador) {
+    return (
+      <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+        <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
+        <p className="text-teal-300 mb-3">Entrá con tu mail para ver tus reservas.</p>
+        <button type="button" onClick={() => setEntrando(true)} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Entrar</button>
+        {entrando && <LoginJugadorModal jugadorApi={jugadorApi} onClose={() => setEntrando(false)} onDone={() => setEntrando(false)} />}
+      </section>
+    );
+  }
+
+  const ahora = Date.now();
+  const proximas = (reservas || []).filter((r) => Date.parse(r.fin) > ahora && (r.estado === "pendiente" || r.estado === "confirmada")).reverse();
+  const anteriores = (reservas || []).filter((r) => !proximas.includes(r));
+  const tarjeta = (r) => {
+    const venue = venues.find((v) => v.id === r.complejo_id);
+    const [label, color] = ESTADO_RESERVA[r.estado] || [r.estado, "#94a3b8"];
+    const desde = minutoEnGrilla(r.fecha, r.inicio);
+    const hasta = minutoEnGrilla(r.fecha, r.fin);
+    const wa = normalizeArPhone(venue?.whatsapp);
+    const activa = (r.estado === "pendiente" || r.estado === "confirmada") && Date.parse(r.inicio) > ahora;
+    return (
+      <article key={r.id} className="rounded-xl p-3 border border-teal-800" style={{ backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <div className="flex justify-between gap-2">
+          <p className="font-semibold text-teal-100">{venue?.name || "Complejo"} · {canchas[r.cancha_id] || "Cancha"}</p>
+          <span className="text-xs shrink-0" style={{ color }}>● {label}</span>
+        </div>
+        <p className="text-sm text-teal-300">{etiquetaFecha(r.fecha)} · {rangoLabel(desde, hasta)}{r.precio != null && ` · ${formatoPrecio(r.precio)}`}</p>
+        {activa && (puedeCancelar(r, ahora) ? (
+          cancelandoId === r.id ? (
+            <p className="text-sm text-red-300 mt-2">¿Cancelar este turno?{" "}
+              <button type="button" disabled={busy} onClick={() => cancelar(r)} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
+              <button type="button" onClick={() => setCancelandoId(null)} className="text-teal-400 ml-2">No</button>
+            </p>
+          ) : (
+            <button type="button" onClick={() => { setCancelandoId(r.id); setAviso(""); }} className="mt-2 text-sm text-red-400">Cancelar turno</button>
+          )
+        ) : (
+          <p className="text-xs text-teal-500 mt-2">
+            Falta menos de 24 h: para cancelarlo, escribile al complejo
+            {wa && <> por <a href={waLink(wa, `Hola, tengo un turno el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchas[r.cancha_id] || "cancha"}) y no voy a poder ir.`)} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">WhatsApp</a></>}.
+          </p>
+        ))}
+      </article>
+    );
+  };
+
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+      <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Mis reservas</h1>
+      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email}</p>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {aviso && <p className="text-sm text-lime-400 mb-3">{aviso}</p>}
+      {reservas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : (
+        <>
+          <h2 className="text-xs uppercase tracking-wide text-teal-500 mb-2">Próximas</h2>
+          <div className="space-y-2 mb-6">
+            {proximas.map(tarjeta)}
+            {proximas.length === 0 && <p className="text-sm text-teal-400">No tenés turnos próximos.</p>}
+          </div>
+          {anteriores.length > 0 && (
+            <>
+              <h2 className="text-xs uppercase tracking-wide text-teal-500 mb-2">Anteriores y canceladas</h2>
+              <div className="space-y-2 mb-6 opacity-80">{anteriores.map(tarjeta)}</div>
+            </>
+          )}
+        </>
+      )}
+      <div className="border-t border-teal-900 pt-4 flex flex-wrap gap-4 text-sm">
+        <button type="button" onClick={() => setEditando(true)} className="text-teal-300 underline">Mis datos</button>
+        <button type="button" onClick={() => { jugadorApi.logout(); onBack(); }} className="text-teal-400">Cerrar sesión</button>
+      </div>
+      {editando && (
+        <Modal title="Mis datos" onClose={() => setEditando(false)}>
+          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} submitLabel="Guardar" onSave={async (p) => { await jugadorApi.savePerfil(p); setEditando(false); }} />
+        </Modal>
+      )}
     </section>
   );
 }
@@ -5695,8 +6241,11 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
-function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin }) {
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, complejos = [], jugadorApi }) {
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
+  // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
+  const [reservarId, setReservarId] = useState(null);
+  const [misReservas, setMisReservas] = useState(false);
   const [selectedOrgId, setSelectedOrgId] = useState(null);
   const [selectedEventId, setSelectedEventId] = useState(null);
   const [showAll, setShowAll] = useState(false);
@@ -5707,7 +6256,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const onRegister = (t) => setRegisteringId(t.id);
   const organizerLabel = (t) => (isInfoOnly(t) ? t.organizerName || null : organizers.find((o) => o.id === t.organizerId)?.name || null);
 
-  const goTab = (key) => { setTab(key); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const goTab = (key) => { setTab(key); setReservarId(null); setMisReservas(false); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
   const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
   const selectedEvent = events.find((e) => e.id === selectedEventId);
   const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
@@ -5720,8 +6269,15 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   );
 
   let body;
-  if (tab === "canchas") {
-    body = <VenuesPublicView venues={venues} />;
+  const reservarVenue = venues.find((v) => v.id === reservarId);
+  const verMisReservas = () => { setReservarId(null); setMisReservas(true); window.scrollTo(0, 0); };
+  const volverAComplejos = () => { setReservarId(null); setMisReservas(false); window.scrollTo(0, 0); };
+  if (tab === "canchas" && misReservas) {
+    body = <MisReservas jugadorApi={jugadorApi} venues={venues} onBack={volverAComplejos} />;
+  } else if (tab === "canchas" && reservarVenue) {
+    body = <ReservarCancha venue={reservarVenue} jugadorApi={jugadorApi} onBack={volverAComplejos} onMisReservas={verMisReservas} />;
+  } else if (tab === "canchas") {
+    body = <VenuesPublicView venues={venues} complejos={complejos} jugador={jugadorApi?.jugador} onReservar={(id) => { setReservarId(id); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
   } else if (selectedEvent && eventTournaments.length > 0) {
@@ -7761,6 +8317,17 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
 
 function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos | reservas (solo si es dueño de un complejo habilitado)
+  // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
+  const [pedidosPendientes, setPedidosPendientes] = useState(0);
+  const complejoIds = complejos.map((c) => c.id).join(",");
+  useEffect(() => {
+    if (!complejoIds) return;
+    const load = () => supabaseTable(`reservas?complejo_id=in.(${complejoIds.split(",").map(encodeURIComponent).join(",")})&estado=eq.pendiente&select=id`, { accessToken: organizer.accessToken })
+      .then((rows) => setPedidosPendientes(rows.length)).catch(() => {});
+    load();
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [complejoIds, organizer.accessToken, tab]);
   const [creating, setCreating] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileName, setProfileName] = useState(organizer.name);
@@ -7805,7 +8372,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       )}
 
       <div className="flex gap-2 mb-6 overflow-x-auto">
-        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"], ...(complejos.length > 0 ? [["reservas", "Reservas"]] : [])].map(([key, label]) => (
+        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"], ...(complejos.length > 0 ? [["reservas", pedidosPendientes > 0 ? `Reservas (${pedidosPendientes})` : "Reservas"]] : [])].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -7856,6 +8423,10 @@ function ReservasPanel({ complejos, venues, accessToken }) {
   const [view, setView] = useState("agenda"); // agenda | canchas
   const [canchas, setCanchas] = useState(null);
   const [error, setError] = useState("");
+  const [fecha, setFecha] = useState(hoyArgentina());
+  // Sube con cada cambio, para que la agenda y los pedidos pendientes se vuelvan a cargar juntos
+  const [version, setVersion] = useState(0);
+  const changed = useCallback(() => setVersion((v) => v + 1), []);
   const nombre = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
   const loadCanchas = useCallback(async () => {
@@ -7892,7 +8463,10 @@ function ReservasPanel({ complejos, venues, accessToken }) {
           <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} />
         </>
       ) : (
-        <AgendaReservas complejoId={complejoId} canchas={activas} accessToken={accessToken} />
+        <>
+          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} />
+        </>
       )}
     </div>
   );
@@ -8031,8 +8605,7 @@ function estiloReserva(r) {
 }
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
-function AgendaReservas({ complejoId, canchas, accessToken }) {
-  const [fecha, setFecha] = useState(hoyArgentina());
+function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged }) {
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -8041,11 +8614,13 @@ function AgendaReservas({ complejoId, canchas, accessToken }) {
 
   const load = useCallback(async () => {
     try {
+      await supabaseRpc("vencer_pedidos", {}, accessToken).catch(() => {}); // pedidos sin confirmar que ya vencieron
       setReservas(await supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&fecha=eq.${fecha}&order=inicio.asc`, { accessToken }));
       setError("");
     } catch { setError("No se pudieron cargar las reservas. Revisá la conexión."); }
   }, [complejoId, fecha, accessToken]);
   useEffect(() => { setReservas(null); load(); }, [load]);
+  useEffect(() => { if (version > 0) load(); }, [version, load]);
   // Se actualiza sola cada minuto, por si otra persona del complejo cargó algo
   useEffect(() => {
     const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
@@ -8062,7 +8637,8 @@ function AgendaReservas({ complejoId, canchas, accessToken }) {
       .filter((o) => o.hasta > filas[0] && o.desde < finGrilla)
       .map((o) => ({ ...o, fila: filas[0] + Math.max(0, Math.floor((o.desde - filas[0]) / PASO)) * PASO })),
   ])), [canchas, fecha, lista, filas, finGrilla]);
-  const canceladas = lista.filter((r) => r.tipo === "turno" && r.estado === "cancelada");
+  // Las que el jugador canceló dentro de sus 30 minutos (por error) no se muestran
+  const canceladas = lista.filter((r) => r.tipo === "turno" && r.estado === "cancelada" && !r.cancelacion_silenciosa);
   const detalle = lista.find((r) => r.id === detalleId);
   const hoy = hoyArgentina();
 
@@ -8146,7 +8722,7 @@ function AgendaReservas({ complejoId, canchas, accessToken }) {
           <p className="text-xs uppercase tracking-wide text-teal-500 mb-1">Turnos cancelados este día</p>
           <ul className="text-sm text-teal-300 space-y-0.5">
             {canceladas.map((r) => (
-              <li key={r.id}>{canchas.find((c) => c.id === r.cancha_id)?.nombre || "Cancha"} · {rangoLabel(minutoEnGrilla(fecha, r.inicio), minutoEnGrilla(fecha, r.fin))} · {r.nombre}</li>
+              <li key={r.id}>{canchas.find((c) => c.id === r.cancha_id)?.nombre || "Cancha"} · {rangoLabel(minutoEnGrilla(fecha, r.inicio), minutoEnGrilla(fecha, r.fin))} · {r.nombre}{r.cancelada_por === "jugador" && " · canceló el jugador"}</li>
             ))}
           </ul>
         </div>
@@ -8154,15 +8730,15 @@ function AgendaReservas({ complejoId, canchas, accessToken }) {
 
       {nueva && (
         <NuevoTurnoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
-          onClose={() => setNueva(null)} onDone={() => { setNueva(null); load(); }} />
+          onClose={() => setNueva(null)} onDone={() => { setNueva(null); onChanged(); }} />
       )}
       {bloqueando && (
         <BloqueoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
-          onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); load(); }} />
+          onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} accessToken={accessToken}
-          onClose={() => setDetalleId(null)} onChanged={load} />
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken}
+          onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
   );
@@ -8358,13 +8934,125 @@ function BloqueoModal({ complejoId, canchas, fecha, reservas, accessToken, onClo
   );
 }
 
-/* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente */
-function DetalleReservaModal({ reserva: r, cancha, fecha, accessToken, onClose, onChanged }) {
+/* Mensaje de WhatsApp para avisarle al jugador que su turno quedó confirmado o rechazado */
+function mensajeTurno(r, venueName, canchaNombre, confirmado) {
+  const desde = minutoEnGrilla(r.fecha, r.inicio);
+  const turno = `el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchaNombre || "cancha"})`;
+  return confirmado
+    ? `Hola ${r.nombre}, te confirmamos el turno en ${venueName} ${turno}. ¡Te esperamos!`
+    : `Hola ${r.nombre}, no podemos darte el turno en ${venueName} ${turno}. Si querés, pedí otro horario.`;
+}
+
+/* "sábado 10/10 a las 23:30" (hora de Argentina) */
+function etiquetaVencimiento(iso) {
+  const ar = new Date(Date.parse(iso) - 3 * 3600000).toISOString();
+  return `${etiquetaFecha(ar.slice(0, 10)).toLowerCase()} a las ${ar.slice(11, 16)}`;
+}
+
+/* Pedidos online que esperan confirmación (de cualquier día) y cancelaciones recientes de jugadores.
+   Arriba de la agenda, para que el complejo los vea apenas entra. */
+function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
+  const [pendientes, setPendientes] = useState([]);
+  const [canceladas, setCanceladas] = useState([]);
+  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState("");
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre;
+
+  const load = useCallback(async () => {
+    try {
+      await supabaseRpc("vencer_pedidos", {}, accessToken).catch(() => {});
+      const base = `reservas?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+      const hace48 = new Date(Date.now() - 48 * 3600000).toISOString();
+      const [p, c] = await Promise.all([
+        supabaseTable(`${base}&estado=eq.pendiente&order=inicio.asc`, { accessToken }),
+        supabaseTable(`${base}&estado=eq.cancelada&cancelada_por=eq.jugador&cancelacion_silenciosa=is.false&cancelada_at=gte.${encodeURIComponent(hace48)}&order=cancelada_at.desc`, { accessToken }),
+      ]);
+      setPendientes(p); setCanceladas(c); setError("");
+    } catch { setError("No se pudieron cargar los pedidos pendientes."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { load(); }, [load, version]);
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const resolver = async (r, confirmar) => {
+    setBusyId(r.id); setError("");
+    try {
+      await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
+      setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
+      onChanged();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusyId(null); }
+  };
+
+  const avisables = resueltos.filter((r) => r.telefono);
+  if (pendientes.length === 0 && canceladas.length === 0 && avisables.length === 0 && !error) return null;
+  const linea = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id) || "Cancha"}`;
+
+  return (
+    <div className="rounded-xl p-3 mb-5 space-y-3" style={{ ...neonStyle("#fbbf24"), backgroundColor: "rgba(8,18,24,0.7)" }}>
+      {pendientes.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-amber-300 mb-2">Pedidos para confirmar ({pendientes.length})</p>
+          <ul className="space-y-3">
+            {pendientes.map((r) => {
+              const venceEn = Date.parse(r.vence_at) - Date.now();
+              return (
+                <li key={r.id} className="text-sm">
+                  <p className="font-semibold text-teal-100">{r.nombre} {r.telefono && <a href={`https://wa.me/${r.telefono}`} target="_blank" rel="noopener noreferrer" className="text-xs text-lime-400 underline font-normal ml-1">WhatsApp</a>}</p>
+                  <p className="text-teal-300">{linea(r)} <button type="button" onClick={() => onVer(r.fecha)} className="text-xs text-teal-400 underline ml-1">ver día</button></p>
+                  {r.vence_at && <p className={`text-xs ${venceEn < 3 * 3600000 ? "text-amber-300" : "text-teal-500"}`}>Si no lo confirmás, vence el {etiquetaVencimiento(r.vence_at)}</p>}
+                  <div className="flex gap-2 mt-2 max-w-sm">
+                    <button type="button" disabled={busyId === r.id} onClick={() => resolver(r, true)} className="flex-1 px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
+                    <button type="button" disabled={busyId === r.id} onClick={() => resolver(r, false)} className="flex-1 px-3 py-1.5 rounded-lg border border-red-400 text-red-400 disabled:opacity-50">Rechazar</button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {avisables.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {avisables.map((r) => (
+            <li key={r.id} className="text-teal-300">
+              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} ·{" "}
+              <a href={waLink(r.telefono, mensajeTurno(r, venueName, nombreCancha(r.cancha_id), r.confirmado))} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">Avisarle por WhatsApp</a>
+            </li>
+          ))}
+        </ul>
+      )}
+      {canceladas.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-teal-400 mb-1">Turnos que cancelaron los jugadores (últimas 48 h)</p>
+          <ul className="text-sm text-teal-300 space-y-0.5">
+            {canceladas.map((r) => <li key={r.id}>{r.nombre} · {linea(r)}</li>)}
+          </ul>
+        </div>
+      )}
+      {error && <p className="text-sm text-red-400">{error}</p>}
+    </div>
+  );
+}
+
+/* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
+   bloquear al jugador si lo pidió online */
+function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState("");
+  const [bloqueado, setBloqueado] = useState(null); // ¿el jugador está bloqueado en este complejo?
+  const [confirmBloqueo, setConfirmBloqueo] = useState(false);
   const desde = minutoEnGrilla(fecha, r.inicio);
   const hasta = minutoEnGrilla(fecha, r.fin);
+  const bloqueoUrl = `jugadores_bloqueados?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&jugador_id=eq.${r.jugador_id}`;
+
+  useEffect(() => {
+    if (!r.jugador_id) return;
+    supabaseTable(bloqueoUrl, { accessToken }).then((rows) => setBloqueado(rows.length > 0)).catch(() => {});
+  }, [bloqueoUrl, r.jugador_id, accessToken]);
 
   const run = async (fn) => {
     setBusy(true); setError("");
@@ -8373,7 +9061,17 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, accessToken, onClose, 
   };
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
-  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString() }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const rechazar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "rechazada" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const cambiarBloqueo = async () => {
+    setBusy(true); setError("");
+    try {
+      if (bloqueado) await supabaseTable(bloqueoUrl, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      else await supabaseTable("jugadores_bloqueados", { method: "POST", body: { complejo_id: r.complejo_id, jugador_id: r.jugador_id }, accessToken, prefer: "return=minimal" });
+      setBloqueado(!bloqueado); setConfirmBloqueo(false);
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
   const btn = "px-3 py-2 rounded-lg text-sm border disabled:opacity-50";
 
   return (
@@ -8396,11 +9094,14 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, accessToken, onClose, 
             {r.estado === "pendiente" && (
               <div className="flex gap-2">
                 <button type="button" disabled={busy} onClick={() => patch({ estado: "confirmada" })} className="flex-1 px-3 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
-                <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "rechazada" }, accessToken, prefer: "return=minimal" }); onClose(); })} className={`flex-1 ${btn} border-red-400 text-red-400`}>Rechazar</button>
+                <button type="button" disabled={busy} onClick={rechazar} className={`flex-1 ${btn} border-red-400 text-red-400`}>Rechazar</button>
               </div>
             )}
             {r.estado === "confirmada" && (
               <>
+                {r.origen === "online" && r.telefono && (
+                  <a href={waLink(r.telefono, mensajeTurno(r, venueName, cancha?.nombre, true))} target="_blank" rel="noopener noreferrer" className="block text-lime-400 underline">Avisarle por WhatsApp que está confirmado</a>
+                )}
                 <div>
                   <p className="text-xs text-teal-400 mb-1">Cobro</p>
                   <div className="flex gap-2">
@@ -8421,6 +9122,22 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, accessToken, onClose, 
                   <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>Cancelar turno</button>
                 )}
               </>
+            )}
+            {r.jugador_id && bloqueado !== null && (
+              <div className="border-t border-teal-900 pt-3">
+                {bloqueado ? (
+                  <p className="text-amber-300">Este jugador está bloqueado: no puede pedirte turnos online.{" "}
+                    <button type="button" disabled={busy} onClick={cambiarBloqueo} className="text-teal-300 underline">Desbloquear</button>
+                  </p>
+                ) : confirmBloqueo ? (
+                  <p className="text-red-300">¿Bloquear a {r.nombre}? No va a poder pedirte más turnos online.{" "}
+                    <button type="button" disabled={busy} onClick={cambiarBloqueo} className="font-semibold text-red-400">Sí, bloquear</button>{" "}
+                    <button type="button" onClick={() => setConfirmBloqueo(false)} className="text-teal-400 ml-2">No</button>
+                  </p>
+                ) : (
+                  <button type="button" onClick={() => setConfirmBloqueo(true)} className="text-xs text-teal-500 underline">Bloquear a este jugador</button>
+                )}
+              </div>
             )}
           </>
         )}
@@ -9983,6 +10700,7 @@ function SmashPointAppInner() {
   const [session, setSession] = useState(null);
   const [saveNotice, setSaveNotice] = useState(null);
   const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
+  const jugadorApi = useJugador();
 
   useEffect(() => {
     (async () => {
@@ -10408,7 +11126,7 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   } else if (route === "public-tournament" && selected) {
     showFooterAds = true;
     content = isInfoOnly(selected)
@@ -10484,7 +11202,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
   }
 
   return (
