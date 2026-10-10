@@ -140,19 +140,25 @@ begin
   insert into resultados (caso, ok, detalle) values ('Otro usuario no puede cambiar precios', n = 0, n::text);
 end $$;
 
--- 3) Como el público (sin login)
-set local role anon;
+-- 3) Como el público (sin login). El rol anon no tiene acceso a las tablas temporales (ni a la de
+-- resultados), así que se cambia a anon solo para cada consulta y se vuelve antes de anotar.
+reset role;
 
 do $$
 declare
   n int;
 begin
+  set local role anon;
   select count(*) into n from canchas where complejo_id = 'cprueba-reservas';
+  reset role;
   insert into resultados (caso, ok, detalle) values ('El público ve las canchas', n = 2, n::text);
   begin
+    set local role anon;
     select count(*) into n from reservas;
+    reset role;
     insert into resultados (caso, ok) values ('El público no puede leer las reservas', false);
   exception when insufficient_privilege then
+    -- al saltar el error, el rol vuelve solo al que había antes del bloque
     insert into resultados (caso, ok) values ('El público no puede leer las reservas', true);
   end;
 end $$;
