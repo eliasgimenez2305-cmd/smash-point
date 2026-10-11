@@ -10786,6 +10786,9 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
   // Cuentas de consumos del complejo y qué jugador está vinculado a cuál (null = no hay o no tiene permiso)
   const [links, setLinks] = useState(null);
   const [cuentas, setCuentas] = useState(null);
+  const [productosCx, setProductosCx] = useState([]);
+  const [consumiendo, setConsumiendo] = useState(null); // clave del jugador anotando consumos
+  const [avisoFila, setAvisoFila] = useState(null); // { k, texto } después de anotar o cobrar
   const [vinculando, setVinculando] = useState(null); // clave del jugador con el selector de cuenta abierto
   const [cobrandoTodo, setCobrandoTodo] = useState(null); // clave del jugador cobrando inscripción + consumos
   const complejosKey = complejoIds.join(",");
@@ -10797,11 +10800,13 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     } catch { setError("No se pudieron cargar los cobros. Revisá la conexión."); }
     if (!complejosKey) return;
     const ids = complejosKey.split(",");
-    const [ls, ...cs] = await Promise.all([
+    const inIds = ids.map(encodeURIComponent).join(",");
+    const [ls, ps, ...cs] = await Promise.all([
       supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}`, { accessToken }).catch(() => null),
+      supabaseTable(`productos?complejo_id=in.(${inIds})&activo=is.true&order=orden.asc,nombre.asc`, { accessToken }).catch(() => []),
       ...ids.map((cid) => supabaseRpc("cuentas_con_saldo", { p_complejo: cid }, accessToken).then((r) => (r || []).map((c) => ({ ...c, complejo_id: cid }))).catch(() => null)),
     ]);
-    if (ls && cs.every(Boolean)) { setLinks(ls); setCuentas(cs.flat()); } else { setLinks(null); setCuentas(null); }
+    if (ls && cs.every(Boolean)) { setLinks(ls); setCuentas(cs.flat()); setProductosCx(ps || []); } else { setLinks(null); setCuentas(null); }
   }, [tournament.id, accessToken, complejosKey]);
   useEffect(() => { load(); }, [load]);
 
@@ -10854,6 +10859,30 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
+  // La cuenta del jugador: la vinculada o, si no tiene, una nueva con su nombre (se crea sola)
+  const cuentaDe = (f) => {
+    const link = (links || []).find((l) => l.categoria_id === f.c.id && l.pareja_id === f.pair.id && l.jugador === f.jugador);
+    return link ? (cuentas || []).find((x) => x.id === link.cuenta_id) || null : null;
+  };
+  const asegurarCuenta = async (f) => {
+    const ya = cuentaDe(f);
+    if (ya) return ya;
+    const [nueva] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoIds[0], nombre: f.nombre }, accessToken, prefer: "return=representation" });
+    await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: nueva.id, complejo_id: nueva.complejo_id }, accessToken, prefer: "return=minimal" });
+    return nueva;
+  };
+  const anotarA = async (f, items, otro, total) => {
+    setBusy(true); setError("");
+    try {
+      const cuenta = await asegurarCuenta(f);
+      await guardarConsumos(accessToken, cuenta, items, otro);
+      await load();
+      setAvisoFila({ k: f.k, texto: `Anotado ${formatoPrecio(total)} a ${f.nombre}` });
+      setConsumiendo(null);
+      return true;
+    } catch (e) { setError(reservaErrorText(e)); return false; }
+    finally { setBusy(false); }
+  };
   const desvincular = async (f) => {
     setBusy(true); setError("");
     try {
@@ -10870,6 +10899,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     try {
       await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
       setCobrandoTodo(null);
+      setAvisoFila(null);
       await load();
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
@@ -10929,62 +10959,77 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                         {c.format !== "super8_individual" && <p className="text-xs text-teal-500">{f.pair.name}</p>}
                       </div>
                       <span className="text-xs font-semibold" style={{ color: estado[1] }}>● {estado[0]}</span>
-                      {f.debe !== 0 && cobrando !== f.k && (
-                        <button type="button" onClick={() => abrir(f)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>
-                      )}
+                      {(() => {
+                        const cuenta = cuentaDe(f);
+                        const todo = cuenta ? totalDe(cuenta) : 0;
+                        const conConsumos = cuenta && Math.max(0, saldoDe(cuenta)) > 0;
+                        if (cobrando === f.k || cobrandoTodo === f.k || (f.debe === 0 && !conConsumos)) return null;
+                        return (
+                          <button type="button" onClick={() => { if (conConsumos) { setCobrandoTodo(f.k); setCobrando(null); setForm({ monto: String(todo), medio: "efectivo" }); setError(""); } else abrir(f); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+                            {conConsumos ? `Cobrar ${formatoPrecio(todo)}` : "Cobrar"}
+                          </button>
+                        );
+                      })()}
                     </div>
                     {f.debe > 0 && f.telefono && cobrando !== f.k && (
                       <a href={waLink(f.telefono, `Hola, te recordamos el pago de la inscripción de ${tournament.name} (${c.name}): ${formatoPrecio(f.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
                     )}
                     {cuentas && links && (() => {
-                      const link = links.find((l) => l.categoria_id === c.id && l.pareja_id === f.pair.id && l.jugador === f.jugador);
-                      const cuenta = link && cuentas.find((x) => x.id === link.cuenta_id);
-                      if (cuenta) {
-                        const consumos = Math.max(0, saldoDe(cuenta));
-                        const todo = totalDe(cuenta);
-                        return (
-                          <div className="mt-2 text-xs">
-                            <p className="text-teal-300">🧾 Cuenta: <span className="text-teal-100">{cuenta.nombre}</span>{consumos > 0 ? <> · consumos <span className="text-amber-300">{formatoPrecio(consumos)}</span></> : " · sin consumos pendientes"} <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline ml-1">desvincular</button></p>
-                            {todo > 0 && cobrandoTodo !== f.k && cobrando !== f.k && (
-                              <button type="button" onClick={() => { setCobrandoTodo(f.k); setCobrando(null); setForm({ monto: String(todo), medio: "efectivo" }); setError(""); }} className="mt-2 px-3 py-1.5 rounded-lg font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(todo)}</button>
-                            )}
-                            {cobrandoTodo === f.k && (
-                              <div className="mt-2 space-y-2">
-                                <p className="text-teal-400">Inscripción{cuenta.debe_inscripciones > f.debe ? "es" : ""} {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
-                                <div className="flex flex-wrap gap-2 items-center">
-                                  <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-                                  {MEDIOS_COBRO.map(([m, l]) => (
-                                    <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
-                                  ))}
-                                </div>
-                                <div className="flex gap-3 items-center">
-                                  <button type="button" disabled={busy} onClick={() => cobrarTodo(cuenta)} className="px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
-                                  <button type="button" onClick={() => setCobrandoTodo(null)} className="text-teal-400 text-sm">Cancelar</button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-                      if (vinculando !== f.k) {
-                        return <button type="button" onClick={() => { setVinculando(f.k); setError(""); }} className="mt-1 text-xs text-teal-300 underline">🧾 Su cuenta de consumos</button>;
-                      }
-                      // Sugerencias: las cuentas cuyo nombre se parece al del jugador
-                      const sugeridas = cuentas.map((x) => ({ x, m: nameMatch(f.nombre, x.nombre) })).filter((o) => o.m).sort((a, b) => (a.m === "igual" ? -1 : 0) - (b.m === "igual" ? -1 : 0)).map((o) => o.x);
+                      const cuenta = cuentaDe(f);
+                      const consumos = cuenta ? Math.max(0, saldoDe(cuenta)) : 0;
                       return (
-                        <div className="mt-2 rounded-lg border border-teal-800 p-2 space-y-2 text-xs">
-                          <p className="text-teal-400">¿Cuál es la cuenta de {f.nombre}?</p>
-                          <div className="flex flex-wrap gap-2">
-                            {sugeridas.map((x) => <button key={x.id} type="button" disabled={busy} onClick={() => vincular(f, x.id)} className="px-2 py-1 rounded border border-lime-400 text-lime-400">{x.nombre}</button>)}
-                            <button type="button" disabled={busy} onClick={() => vincular(f, null, f.nombre)} className="px-2 py-1 rounded border border-dashed border-teal-600 text-teal-200">+ Crear "{f.nombre}"</button>
-                          </div>
-                          {cuentas.length > sugeridas.length && (
-                            <select defaultValue="" onChange={(e) => e.target.value && vincular(f, e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} aria-label="Otra cuenta">
-                              <option value="">Otra cuenta…</option>
-                              {cuentas.filter((x) => !sugeridas.includes(x)).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
-                            </select>
+                        <div className="mt-2 text-xs space-y-2">
+                          {avisoFila?.k === f.k && <p className="text-lime-400">{avisoFila.texto}</p>}
+                          {cuenta && consumos > 0 && (
+                            <p className="text-teal-300">🧾 Consumos <span className="text-amber-300">{formatoPrecio(consumos)}</span>{cuenta.nombre !== f.nombre && <> · cuenta "{cuenta.nombre}"</>}</p>
                           )}
-                          <button type="button" onClick={() => setVinculando(null)} className="block text-teal-400">Cancelar</button>
+                          {consumiendo === f.k ? (
+                            <div className="space-y-1">
+                              <AnotarConsumo compacto productos={productosCx.filter((x) => x.complejo_id === (cuenta?.complejo_id || complejoIds[0]))} esDueno={esDueno} busy={busy} onAnotar={(items, otro, total) => anotarA(f, items, otro, total)} />
+                              <button type="button" onClick={() => setConsumiendo(null)} className="text-teal-400">Cerrar</button>
+                            </div>
+                          ) : cobrando !== f.k && cobrandoTodo !== f.k && vinculando !== f.k && (
+                            <div className="flex flex-wrap items-center gap-3">
+                              <button type="button" onClick={() => { setConsumiendo(f.k); setAvisoFila(null); setError(""); }} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>
+                              {cuenta
+                                ? <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline">usar otra cuenta</button>
+                                : cuentas.length > 0 && <button type="button" onClick={() => setVinculando(f.k)} className="text-teal-500 underline">usar una cuenta que ya existe</button>}
+                            </div>
+                          )}
+                          {vinculando === f.k && !cuenta && (() => {
+                            // Sugerencias: las cuentas cuyo nombre se parece al del jugador
+                            const sugeridas = cuentas.map((x) => ({ x, m: nameMatch(f.nombre, x.nombre) })).filter((o) => o.m).sort((a, b) => (a.m === "igual" ? -1 : 0) - (b.m === "igual" ? -1 : 0)).map((o) => o.x);
+                            return (
+                              <div className="rounded-lg border border-teal-800 p-2 space-y-2">
+                                <p className="text-teal-400">¿Cuál es la cuenta de {f.nombre}?</p>
+                                <div className="flex flex-wrap gap-2">
+                                  {sugeridas.map((x) => <button key={x.id} type="button" disabled={busy} onClick={() => vincular(f, x.id)} className="px-2 py-1 rounded border border-lime-400 text-lime-400">{x.nombre}</button>)}
+                                </div>
+                                {cuentas.length > sugeridas.length && (
+                                  <select defaultValue="" onChange={(e) => e.target.value && vincular(f, e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} aria-label="Otra cuenta">
+                                    <option value="">Otra cuenta…</option>
+                                    {cuentas.filter((x) => !sugeridas.includes(x)).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                                  </select>
+                                )}
+                                <button type="button" onClick={() => setVinculando(null)} className="block text-teal-400">Cancelar</button>
+                              </div>
+                            );
+                          })()}
+                          {cobrandoTodo === f.k && cuenta && (
+                            <div className="space-y-2">
+                              <p className="text-teal-400">Inscripción {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
+                              <div className="flex flex-wrap gap-2 items-center">
+                                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                                {MEDIOS_COBRO.map(([m, l]) => (
+                                  <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                                ))}
+                              </div>
+                              <div className="flex gap-3 items-center">
+                                <button type="button" disabled={busy} onClick={() => cobrarTodo(cuenta)} className="px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
+                                <button type="button" onClick={() => setCobrandoTodo(null)} className="text-teal-400 text-sm">Cancelar</button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })()}
@@ -11745,11 +11790,77 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno }) {
   );
 }
 
+/* Anotar consumos: tocar productos (con − / +) y algo suelto ("+ Otro"). onAnotar(items, otro, total)
+   guarda y devuelve true si salió bien (ahí se vacía). Se usa en la cuenta y en Cobros del torneo. */
+function AnotarConsumo({ productos, esDueno, busy, onAnotar, compacto = false }) {
+  const [carrito, setCarrito] = useState({}); // productoId -> cantidad
+  const [otro, setOtro] = useState(null); // { descripcion, precio }
+  const [error, setError] = useState("");
+  const activos = productos.filter((p) => p.activo);
+  const items = Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ p: productos.find((x) => x.id === id), n })).filter((x) => x.p);
+  const otroPrecio = otro ? leerPrecio(otro.precio) : null;
+  const total = items.reduce((s, { p, n }) => s + n * Number(p.precio), 0) + (otro && otro.descripcion.trim() && otroPrecio != null ? otroPrecio : 0);
+  const sumar = (id, d) => setCarrito((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
+
+  const anotar = async () => {
+    if (otro && (!otro.descripcion.trim() || otroPrecio == null)) { setError("Completá qué es y el precio de lo que no está en la lista."); return; }
+    if (items.length === 0 && !otro) return;
+    setError("");
+    if (await onAnotar(items, otro ? { descripcion: otro.descripcion.trim(), precio: otroPrecio } : null, total)) { setCarrito({}); setOtro(null); }
+  };
+
+  return (
+    <div className={`rounded-lg border border-teal-800 space-y-3 ${compacto ? "p-2" : "p-3"}`}>
+      {!compacto && <p className="text-xs uppercase tracking-wide text-teal-500">Anotar</p>}
+      {activos.length === 0 && <p className="text-teal-400 text-sm">No hay productos cargados. {esDueno ? "Cargalos en Consumos → \"Productos y stock\"." : "Pedile al dueño que los cargue."} Igual podés anotar algo con "+ Otro".</p>}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {activos.map((p) => (
+          <button key={p.id} type="button" onClick={() => sumar(p.id, 1)} className="relative rounded-lg border px-2 py-2 text-left hover:border-lime-400" style={{ borderColor: carrito[p.id] ? BRAND.lime : "#134e4a", backgroundColor: "rgba(8,18,24,0.7)" }}>
+            <span className="block text-teal-100 font-semibold truncate text-sm">{p.nombre}</span>
+            <span className="block text-xs text-teal-400">{formatoPrecio(p.precio)}{p.stock != null && <span className={pocoStock(p) ? "text-amber-300" : ""}> · quedan {p.stock}</span>}</span>
+            {carrito[p.id] > 0 && <span className="absolute -top-2 -right-2 w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{carrito[p.id]}</span>}
+          </button>
+        ))}
+        <button type="button" onClick={() => setOtro(otro ? null : { descripcion: "", precio: "" })} className="rounded-lg border border-dashed border-teal-700 px-2 py-2 text-teal-300 text-sm">+ Otro</button>
+      </div>
+      {otro && (
+        <div className="flex flex-wrap gap-2">
+          <input value={otro.descripcion} onChange={(e) => setOtro({ ...otro, descripcion: e.target.value })} maxLength={60} placeholder="Qué es" aria-label="Descripción" className="flex-1 min-w-[8rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
+          <input inputMode="numeric" value={otro.precio} onChange={(e) => setOtro({ ...otro, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+        </div>
+      )}
+      {items.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {items.map(({ p, n }) => (
+            <li key={p.id} className="flex items-center gap-2 text-teal-200">
+              <button type="button" onClick={() => sumar(p.id, -1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno menos de ${p.nombre}`}>−</button>
+              <span className="w-6 text-center">{n}</span>
+              <button type="button" onClick={() => sumar(p.id, 1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno más de ${p.nombre}`}>+</button>
+              <span className="flex-1">{p.nombre}</span>
+              <span>{formatoPrecio(n * Number(p.precio))}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+      {(items.length > 0 || otro) && (
+        <button type="button" disabled={busy} onClick={anotar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Anotando…" : `Anotar ${formatoPrecio(total)}`}</button>
+      )}
+    </div>
+  );
+}
+
+/* Guarda en la cuenta lo elegido en AnotarConsumo (el precio y el nombre del producto los pone la base) */
+async function guardarConsumos(accessToken, cuenta, items, otro) {
+  for (const { p, n } of items) {
+    await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, producto_id: p.id, descripcion: p.nombre, cantidad: n, precio_unitario: p.precio } });
+  }
+  if (otro) await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, descripcion: otro.descripcion, cantidad: 1, precio_unitario: otro.precio } });
+}
+
 /* Una cuenta: anotar consumos (tocando productos), cobrar y ver todo lo anotado y pagado */
 function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessToken, esDueno, onBack, onChanged }) {
   const [movs, setMovs] = useState(null);
-  const [carrito, setCarrito] = useState({}); // productoId -> cantidad
-  const [otro, setOtro] = useState(null); // { descripcion, precio }
   const [cobrando, setCobrando] = useState(false);
   const [form, setForm] = useState({ monto: "", medio: "efectivo" });
   const [busy, setBusy] = useState(false);
@@ -11775,28 +11886,13 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
   }, [cuenta.id, accessToken]);
   useEffect(() => { load(); }, [load, cuenta.consumido, cuenta.pagado]);
 
-  const activos = productos.filter((p) => p.activo);
-  const items = Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ p: productos.find((x) => x.id === id), n })).filter((x) => x.p);
-  const otroPrecio = otro ? leerPrecio(otro.precio) : null;
-  const totalCarrito = items.reduce((s, { p, n }) => s + n * Number(p.precio), 0) + (otro && otro.descripcion.trim() && otroPrecio != null ? otroPrecio : 0);
-  const sumar = (id, d) => setCarrito((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
-
+  // Devuelve true si salió bien
   const run = async (fn, okMsg) => {
     setBusy(true); setError(""); setAviso("");
-    try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); }
+    try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); return true; } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); return false; }
     finally { setBusy(false); }
   };
-  const anotar = () => {
-    if (otro && (!otro.descripcion.trim() || otroPrecio == null)) { setError("Completá la descripción y el precio de lo que no está en la lista."); return; }
-    if (items.length === 0 && !otro) return;
-    run(async () => {
-      for (const { p, n } of items) {
-        await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: complejoId, cuenta_id: cuenta.id, producto_id: p.id, descripcion: p.nombre, cantidad: n, precio_unitario: p.precio } });
-      }
-      if (otro) await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: complejoId, cuenta_id: cuenta.id, descripcion: otro.descripcion.trim(), cantidad: 1, precio_unitario: otroPrecio } });
-      setCarrito({}); setOtro(null);
-    }, `Anotado: ${formatoPrecio(totalCarrito)}`);
-  };
+  const anotar = (items, otro, totalAnotado) => run(() => guardarConsumos(accessToken, { id: cuenta.id, complejo_id: complejoId }, items, otro), `Anotado: ${formatoPrecio(totalAnotado)}`);
   const cobrar = () => {
     const monto = leerPrecio(form.monto);
     if (!monto) { setError("Poné el monto."); return; }
@@ -11853,42 +11949,7 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
       {error && <p className="text-red-400">{error}</p>}
       {aviso && <p className="text-lime-400">{aviso}</p>}
 
-      <div className="rounded-lg border border-teal-800 p-3 space-y-3">
-        <p className="text-xs uppercase tracking-wide text-teal-500">Anotar</p>
-        {activos.length === 0 && <p className="text-teal-400">No hay productos cargados. {esDueno ? "Cargalos en \"Productos y stock\"." : "Pedile al dueño que los cargue."}</p>}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {activos.map((p) => (
-            <button key={p.id} type="button" onClick={() => sumar(p.id, 1)} className="relative rounded-lg border px-2 py-2 text-left hover:border-lime-400" style={{ borderColor: carrito[p.id] ? BRAND.lime : "#134e4a", backgroundColor: "rgba(8,18,24,0.7)" }}>
-              <span className="block text-teal-100 font-semibold truncate">{p.nombre}</span>
-              <span className="block text-xs text-teal-400">{formatoPrecio(p.precio)}{p.stock != null && <span className={pocoStock(p) ? "text-amber-300" : ""}> · quedan {p.stock}</span>}</span>
-              {carrito[p.id] > 0 && <span className="absolute -top-2 -right-2 w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{carrito[p.id]}</span>}
-            </button>
-          ))}
-          <button type="button" onClick={() => setOtro(otro ? null : { descripcion: "", precio: "" })} className="rounded-lg border border-dashed border-teal-700 px-2 py-2 text-teal-300">+ Otro</button>
-        </div>
-        {otro && (
-          <div className="flex flex-wrap gap-2">
-            <input value={otro.descripcion} onChange={(e) => setOtro({ ...otro, descripcion: e.target.value })} maxLength={60} placeholder="Qué es" aria-label="Descripción" className="flex-1 min-w-[8rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
-            <input inputMode="numeric" value={otro.precio} onChange={(e) => setOtro({ ...otro, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-          </div>
-        )}
-        {items.length > 0 && (
-          <ul className="space-y-1">
-            {items.map(({ p, n }) => (
-              <li key={p.id} className="flex items-center gap-2 text-teal-200">
-                <button type="button" onClick={() => sumar(p.id, -1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno menos de ${p.nombre}`}>−</button>
-                <span className="w-6 text-center">{n}</span>
-                <button type="button" onClick={() => sumar(p.id, 1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno más de ${p.nombre}`}>+</button>
-                <span className="flex-1">{p.nombre}</span>
-                <span>{formatoPrecio(n * Number(p.precio))}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        {(items.length > 0 || otro) && (
-          <button type="button" disabled={busy} onClick={anotar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Anotando…" : `Anotar ${formatoPrecio(totalCarrito)}`}</button>
-        )}
-      </div>
+      <AnotarConsumo productos={productos} esDueno={esDueno} busy={busy} onAnotar={anotar} />
 
       <div className="flex flex-wrap gap-2 items-center">
         {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); setForm({ monto: String(total), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
