@@ -370,7 +370,7 @@ function useJugador() {
   const token = useCallback(async () => {
     const j = ref.current;
     if (!j) throw Object.assign(new Error("sin_sesion"), { code: "sin_sesion" });
-    if (Date.now() < j.expiresAt - 60000) return j.accessToken;
+    if (Date.now() < j.expiresAt - 6 * 60000) return j.accessToken;
     try {
       const next = { ...j, ...authFields(await supabaseRefreshOnce(j.refreshToken)) };
       setJugador(next);
@@ -5667,9 +5667,9 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
 /* ---------- Reservas: lado del jugador ---------- */
 
 /* Entrada del jugador: mail → código de 6 dígitos → (la primera vez) sus datos. Sin contraseña. */
-function LoginJugadorModal({ jugadorApi, onClose, onDone }) {
+function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titulo = "Entrar para reservar" }) {
   const { jugador } = jugadorApi;
-  const [step, setStep] = useState(jugador && !jugador.perfil ? "perfil" : "email");
+  const [step, setStep] = useState(jugador && !jugador.perfil && conPerfil ? "perfil" : "email");
   const [email, setEmail] = useState("");
   const [codigo, setCodigo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -5698,7 +5698,7 @@ function LoginJugadorModal({ jugadorApi, onClose, onDone }) {
     setBusy(true); setError("");
     try {
       const j = await jugadorApi.login(await supabaseVerifyOtp(email, token));
-      if (j.perfil) onDone(); else setStep("perfil");
+      if (j.perfil || !conPerfil) onDone(); else setStep("perfil");
     } catch (e) {
       setError(e.status === 429 ? "Demasiados intentos. Esperá un minuto." : "El código no es correcto o ya venció. Revisalo o pedí uno nuevo.");
     } finally { setBusy(false); }
@@ -5706,7 +5706,7 @@ function LoginJugadorModal({ jugadorApi, onClose, onDone }) {
   const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
 
   return (
-    <Modal title={step === "perfil" ? "Tus datos" : "Entrar para reservar"} onClose={onClose}>
+    <Modal title={step === "perfil" ? "Tus datos" : titulo} onClose={onClose}>
       <div className="space-y-3 text-sm" style={F.body}>
         {step === "email" && (
           <>
@@ -6755,7 +6755,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
     </CourtNamesContext.Provider>
   );
 }
-function Login({ onLogin, onBack }) {
+function Login({ onLogin, onBack, onColaborador }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -6850,6 +6850,9 @@ function Login({ onLogin, onBack }) {
               </button>
 
               <button type="button" disabled={loading} onClick={submit} className="w-full py-2.5 rounded-md font-semibold transition" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: loading ? 0.6 : 1, ...F.body }}>{loading ? "Ingresando…" : "Ingresar"}</button>
+              {onColaborador && (
+                <button type="button" onClick={onColaborador} className="w-full mt-4 text-sm text-teal-300 hover:text-lime-400" style={F.body}>¿Trabajás en un complejo? Entrá con tu mail</button>
+              )}
               <button type="button" onClick={onBack} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al sitio público</button>
             </div>
           ) : (
@@ -8418,9 +8421,10 @@ const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
 const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
 
 /* Pestaña "Reservas" del organizador que es dueño de un complejo: la agenda del día y sus canchas */
-function ReservasPanel({ complejos, venues, accessToken }) {
+function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
+  const dueno = rol === "dueno";
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [view, setView] = useState("agenda"); // agenda | canchas
+  const [view, setView] = useState("agenda"); // agenda | canchas | colaboradores (estas dos, solo el dueño)
   const [canchas, setCanchas] = useState(null);
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
@@ -8452,11 +8456,16 @@ function ReservasPanel({ complejos, venues, accessToken }) {
       <div className="flex flex-wrap items-center gap-2 mb-5">
         <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
         {tab("agenda", "Agenda")}
-        {tab("canchas", "Canchas y precios")}
+        {dueno && tab("canchas", "Canchas y precios")}
+        {dueno && tab("colaboradores", "Colaboradores")}
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
       {canchas === null ? (
         !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : dueno && view === "colaboradores" ? (
+        <ColaboradoresConfig complejoId={complejoId} accessToken={accessToken} />
+      ) : !dueno && activas.length === 0 ? (
+        <p className="text-sm text-teal-300">El complejo todavía no cargó sus canchas.</p>
       ) : view === "canchas" || activas.length === 0 ? (
         <>
           {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
@@ -8464,10 +8473,148 @@ function ReservasPanel({ complejos, venues, accessToken }) {
         </>
       ) : (
         <>
-          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
-          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} />
+          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} rol={rol} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} />
         </>
       )}
+    </div>
+  );
+}
+
+/* Colaboradores del complejo (empleados): el dueño agrega su mail y ellos entran con un código
+   que les llega a ese mail. Ven la agenda, confirman pedidos y registran cobros. */
+function ColaboradoresConfig({ complejoId, accessToken }) {
+  const [lista, setLista] = useState(null);
+  const [form, setForm] = useState({ email: "", nombre: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [quitando, setQuitando] = useState(null);
+  const base = `colaboradores?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+
+  const load = useCallback(async () => {
+    try { setLista(await supabaseTable(`${base}&order=created_at.asc`, { accessToken })); setError(""); }
+    catch { setError("No se pudieron cargar los colaboradores."); }
+  }, [base, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const agregar = async () => {
+    const email = form.email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError("Revisá el mail."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, email, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
+      setForm({ email: "", nombre: "" });
+      load();
+    } catch (e) { setError(e.pgCode === "23505" ? "Ese mail ya está en la lista." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const quitar = async (email) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`${base}&email=eq.${encodeURIComponent(email)}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setQuitando(null);
+      load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const entrada = `${window.location.origin}${window.location.pathname}#complejo`;
+
+  return (
+    <div className="space-y-4 text-sm">
+      <p className="text-teal-300">
+        Tus empleados entran desde <span className="text-teal-100 break-all">{entrada}</span> con el mail que cargues acá: les llega un código, sin contraseña.
+        Pueden ver la agenda, confirmar o rechazar pedidos y registrar cobros. No pueden cargar ni cancelar turnos, ni tocar canchas, precios o torneos.
+      </p>
+      <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-email">Mail</label>
+          <input id="colab-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="empleado@mail.com" className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-nombre">Nombre (opcional)</label>
+          <input id="colab-nombre" value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <button type="button" disabled={busy} onClick={agregar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Agregar</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {lista === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : lista.length === 0 ? (
+        <p className="text-teal-400">Todavía no agregaste colaboradores.</p>
+      ) : (
+        <ul className="space-y-2">
+          {lista.map((c) => (
+            <li key={c.email} className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-2">
+              <div className="flex-1 min-w-[12rem]">
+                <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
+                {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+              </div>
+              {quitando === c.email ? (
+                <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
+              ) : (
+                <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* Panel del colaborador (empleado de un complejo): entra con el código por mail y ve la agenda de
+   los complejos donde lo agregaron. Se llega con #complejo en la dirección. */
+function ColaboradorHome({ jugadorApi, venues, onBack }) {
+  const { jugador } = jugadorApi;
+  const [complejos, setComplejos] = useState(null);
+  const [error, setError] = useState("");
+  const [entrando, setEntrando] = useState(false);
+  const jugadorId = jugador?.id;
+  const { token } = jugadorApi;
+
+  useEffect(() => {
+    if (!jugadorId) { setComplejos(null); return; }
+    (async () => {
+      try {
+        const ids = await supabaseRpc("mis_complejos_colaborador", {}, await token());
+        setComplejos((ids || []).map((id) => ({ id })));
+        setError("");
+      } catch { setError("No se pudo cargar tu panel. Revisá la conexión."); }
+    })();
+  }, [jugadorId, token]);
+  // La sesión vence a la hora: se renueva sola mientras el panel está abierto
+  useEffect(() => {
+    if (!jugadorId) return;
+    const t = setInterval(() => { token().catch(() => {}); }, 5 * 60000);
+    return () => clearInterval(t);
+  }, [jugadorId, token]);
+
+  return (
+    <div className="px-6 py-8 max-w-3xl mx-auto" style={F.body}>
+      <div className="flex justify-between items-center mb-6 gap-3">
+        <h1 className="text-xl" style={F.display}>PANEL DEL COMPLEJO</h1>
+        {jugador
+          ? <button type="button" onClick={() => { jugadorApi.logout(); setComplejos(null); }} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
+          : <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400">← Sitio público</button>}
+      </div>
+      {!jugador ? (
+        <>
+          <p className="text-sm text-teal-300 mb-4">Para empleados de los complejos. Entrá con el mail que te cargó el dueño: te llega un código, sin contraseña.</p>
+          <button type="button" onClick={() => setEntrando(true)} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Entrar con mi mail</button>
+        </>
+      ) : error ? (
+        <p className="text-sm text-red-400">{error}</p>
+      ) : complejos === null ? (
+        <p className="text-sm opacity-60">Cargando…</p>
+      ) : complejos.length === 0 ? (
+        <p className="text-sm text-teal-300">Tu mail (<span className="text-teal-100">{jugador.email}</span>) no está habilitado en ningún complejo. Pedile al dueño que te agregue como colaborador.</p>
+      ) : (
+        <>
+          <p className="text-xs text-teal-500 mb-4">Entraste como {jugador.email}</p>
+          <ReservasPanel complejos={complejos} venues={venues} accessToken={jugador.accessToken} rol="colaborador" />
+        </>
+      )}
+      {entrando && <LoginJugadorModal jugadorApi={jugadorApi} conPerfil={false} titulo="Entrar al panel del complejo" onClose={() => setEntrando(false)} onDone={() => setEntrando(false)} />}
     </div>
   );
 }
@@ -8605,7 +8752,8 @@ function estiloReserva(r) {
 }
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
-function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged }) {
+function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno" }) {
+  const dueno = rol === "dueno";
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -8663,8 +8811,8 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
         {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
       </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
-        <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
+        {dueno && <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>}
+        {dueno && <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>}
         <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
@@ -8689,6 +8837,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
                     if (x.tipo === "tapada") return null;
                     if (x.tipo === "cerrada") return <td key={c.id} className="h-9" style={{ backgroundColor: "rgba(0,0,0,0.35)" }} />;
                     if (x.tipo === "libre") {
+                      if (!dueno) return <td key={c.id} className="h-9" />;
                       return (
                         <td key={c.id} className="h-9 p-0.5">
                           <button type="button" onClick={() => setNueva({ canchaId: c.id, desde: m })} className="w-full h-full rounded text-teal-700 hover:text-lime-400 hover:bg-white/5" aria-label={`Cargar turno ${c.nombre} ${etiquetaHora(m)}`}>+</button>
@@ -8737,7 +8886,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
           onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken}
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol}
           onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
@@ -8934,6 +9083,13 @@ function BloqueoModal({ complejoId, canchas, fecha, reservas, accessToken, onClo
   );
 }
 
+/* Confirmar o rechazar un pedido: el dueño cambia la reserva directo; el colaborador, por la
+   función del servidor que controla qué puede tocar */
+function resolverPedido(id, confirmar, rol, accessToken) {
+  if (rol === "colaborador") return supabaseRpc("colaborador_reserva", { p_id: id, p_accion: confirmar ? "confirmar" : "rechazar" }, accessToken);
+  return supabaseTable(`reservas?id=eq.${id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
+}
+
 /* Mensaje de WhatsApp para avisarle al jugador que su turno quedó confirmado o rechazado */
 function mensajeTurno(r, venueName, canchaNombre, confirmado) {
   const desde = minutoEnGrilla(r.fecha, r.inicio);
@@ -8951,7 +9107,7 @@ function etiquetaVencimiento(iso) {
 
 /* Pedidos online que esperan confirmación (de cualquier día) y cancelaciones recientes de jugadores.
    Arriba de la agenda, para que el complejo los vea apenas entra. */
-function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
+function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer, rol = "dueno" }) {
   const [pendientes, setPendientes] = useState([]);
   const [canceladas, setCanceladas] = useState([]);
   const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
@@ -8980,7 +9136,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
   const resolver = async (r, confirmar) => {
     setBusyId(r.id); setError("");
     try {
-      await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
+      await resolverPedido(r.id, confirmar, rol, accessToken);
       setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
       onChanged();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -9039,7 +9195,8 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
 
 /* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
    bloquear al jugador si lo pidió online */
-function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged }) {
+function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno" }) {
+  const dueno = rol === "dueno";
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState("");
@@ -9050,9 +9207,9 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const bloqueoUrl = `jugadores_bloqueados?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&jugador_id=eq.${r.jugador_id}`;
 
   useEffect(() => {
-    if (!r.jugador_id) return;
+    if (!r.jugador_id || !dueno) return;
     supabaseTable(bloqueoUrl, { accessToken }).then((rows) => setBloqueado(rows.length > 0)).catch(() => {});
-  }, [bloqueoUrl, r.jugador_id, accessToken]);
+  }, [bloqueoUrl, r.jugador_id, accessToken, dueno]);
 
   const run = async (fn) => {
     setBusy(true); setError("");
@@ -9062,7 +9219,11 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
   const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
-  const rechazar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "rechazada" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const confirmar = () => run(() => resolverPedido(r.id, true, rol, accessToken));
+  const rechazar = () => run(async () => { await resolverPedido(r.id, false, rol, accessToken); onClose(); });
+  const cobro = (medio) => run(() => (dueno
+    ? supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" })
+    : supabaseRpc("colaborador_reserva", { p_id: r.id, p_accion: "cobro", p_medio: medio }, accessToken)));
   const cambiarBloqueo = async () => {
     setBusy(true); setError("");
     try {
@@ -9081,7 +9242,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
         {r.tipo === "bloqueo" ? (
           <>
             {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
-            <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>
+            {dueno && <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>}
           </>
         ) : (
           <>
@@ -9093,7 +9254,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
             </div>
             {r.estado === "pendiente" && (
               <div className="flex gap-2">
-                <button type="button" disabled={busy} onClick={() => patch({ estado: "confirmada" })} className="flex-1 px-3 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
+                <button type="button" disabled={busy} onClick={confirmar} className="flex-1 px-3 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
                 <button type="button" disabled={busy} onClick={rechazar} className={`flex-1 ${btn} border-red-400 text-red-400`}>Rechazar</button>
               </div>
             )}
@@ -9106,14 +9267,16 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                   <p className="text-xs text-teal-400 mb-1">Cobro</p>
                   <div className="flex gap-2">
                     {MEDIOS_PAGO.map(([k, l]) => (
-                      <button key={k} type="button" disabled={busy} onClick={() => patch({ medio_pago: k || null })} className={`flex-1 ${btn} ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`flex-1 ${btn} ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
                     ))}
                   </div>
                 </div>
+                {dueno && (
                 <label className="flex items-center gap-2 text-teal-200">
                   <input type="checkbox" checked={r.no_vino} disabled={busy} onChange={(e) => patch({ no_vino: e.target.checked })} /> No vino
                 </label>
-                {confirmCancel ? (
+                )}
+                {!dueno ? null : confirmCancel ? (
                   <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
                     <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
@@ -9123,7 +9286,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                 )}
               </>
             )}
-            {r.jugador_id && bloqueado !== null && (
+            {dueno && r.jugador_id && bloqueado !== null && (
               <div className="border-t border-teal-900 pt-3">
                 {bloqueado ? (
                   <p className="text-amber-300">Este jugador está bloqueado: no puede pedirte turnos online.{" "}
@@ -10695,7 +10858,7 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
-  const [route, setRoute] = useState("public-home");
+  const [route, setRoute] = useState(() => (window.location.hash === "#complejo" ? "colaborador" : "public-home"));
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
   const [saveNotice, setSaveNotice] = useState(null);
@@ -10770,7 +10933,8 @@ function SmashPointAppInner() {
               setSession(restored);
               const home = profile.role === "creador" ? "creator-home" : "admin-home";
               const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
-              setRoute(canResume ? "admin-tournament" : home);
+              // Con #complejo en la dirección se queda en el panel del colaborador
+              if (window.location.hash !== "#complejo") setRoute(canResume ? "admin-tournament" : home);
               if (canResume) setSelectedId(stored.selectedId);
             } else {
               writeStoredAuth(null);
@@ -11135,7 +11299,9 @@ function SmashPointAppInner() {
         ? <LoadingTournament />
         : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
-    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} />;
+    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} onColaborador={() => { window.location.hash = "complejo"; setRoute("colaborador"); }} />;
+  } else if (route === "colaborador") {
+    content = <ColaboradorHome jugadorApi={jugadorApi} venues={venues} onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute("public-home"); }} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
