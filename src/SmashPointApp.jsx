@@ -8473,7 +8473,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
         </>
       ) : (
         <>
-          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} rol={rol} />
+          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
           <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} />
         </>
       )}
@@ -8482,7 +8482,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
 }
 
 /* Colaboradores del complejo (empleados): el dueño agrega su mail y ellos entran con un código
-   que les llega a ese mail. Ven la agenda, confirman pedidos y registran cobros. */
+   que les llega a ese mail. Manejan la agenda; canchas, precios y colaboradores son del dueño. */
 function ColaboradoresConfig({ complejoId, accessToken }) {
   const [lista, setLista] = useState(null);
   const [form, setForm] = useState({ email: "", nombre: "" });
@@ -8523,7 +8523,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
         Tus empleados entran desde <span className="text-teal-100 break-all">{entrada}</span> con el mail que cargues acá: les llega un código, sin contraseña.
-        Pueden ver la agenda, confirmar o rechazar pedidos y registrar cobros. No pueden cargar ni cancelar turnos, ni tocar canchas, precios o torneos.
+        Manejan la agenda igual que vos: cargan, confirman y cancelan turnos, bloquean horarios, marcan "no vino" y registran cobros. No cambian canchas, horarios ni precios, ni ven esta lista, ni bloquean jugadores.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
@@ -8753,7 +8753,6 @@ function estiloReserva(r) {
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
 function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno" }) {
-  const dueno = rol === "dueno";
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -8811,8 +8810,8 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
         {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
       </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        {dueno && <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>}
-        {dueno && <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>}
+        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
+        <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
         <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
@@ -8837,7 +8836,6 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
                     if (x.tipo === "tapada") return null;
                     if (x.tipo === "cerrada") return <td key={c.id} className="h-9" style={{ backgroundColor: "rgba(0,0,0,0.35)" }} />;
                     if (x.tipo === "libre") {
-                      if (!dueno) return <td key={c.id} className="h-9" />;
                       return (
                         <td key={c.id} className="h-9 p-0.5">
                           <button type="button" onClick={() => setNueva({ canchaId: c.id, desde: m })} className="w-full h-full rounded text-teal-700 hover:text-lime-400 hover:bg-white/5" aria-label={`Cargar turno ${c.nombre} ${etiquetaHora(m)}`}>+</button>
@@ -9083,10 +9081,8 @@ function BloqueoModal({ complejoId, canchas, fecha, reservas, accessToken, onClo
   );
 }
 
-/* Confirmar o rechazar un pedido: el dueño cambia la reserva directo; el colaborador, por la
-   función del servidor que controla qué puede tocar */
-function resolverPedido(id, confirmar, rol, accessToken) {
-  if (rol === "colaborador") return supabaseRpc("colaborador_reserva", { p_id: id, p_accion: confirmar ? "confirmar" : "rechazar" }, accessToken);
+/* Confirmar o rechazar un pedido */
+function resolverPedido(id, confirmar, accessToken) {
   return supabaseTable(`reservas?id=eq.${id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
 }
 
@@ -9107,7 +9103,7 @@ function etiquetaVencimiento(iso) {
 
 /* Pedidos online que esperan confirmación (de cualquier día) y cancelaciones recientes de jugadores.
    Arriba de la agenda, para que el complejo los vea apenas entra. */
-function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer, rol = "dueno" }) {
+function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
   const [pendientes, setPendientes] = useState([]);
   const [canceladas, setCanceladas] = useState([]);
   const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
@@ -9136,7 +9132,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
   const resolver = async (r, confirmar) => {
     setBusyId(r.id); setError("");
     try {
-      await resolverPedido(r.id, confirmar, rol, accessToken);
+      await resolverPedido(r.id, confirmar, accessToken);
       setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
       onChanged();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -9219,11 +9215,9 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
   const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
-  const confirmar = () => run(() => resolverPedido(r.id, true, rol, accessToken));
-  const rechazar = () => run(async () => { await resolverPedido(r.id, false, rol, accessToken); onClose(); });
-  const cobro = (medio) => run(() => (dueno
-    ? supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" })
-    : supabaseRpc("colaborador_reserva", { p_id: r.id, p_accion: "cobro", p_medio: medio }, accessToken)));
+  const confirmar = () => patch({ estado: "confirmada" });
+  const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
+  const cobro = (medio) => patch({ medio_pago: medio });
   const cambiarBloqueo = async () => {
     setBusy(true); setError("");
     try {
@@ -9242,7 +9236,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
         {r.tipo === "bloqueo" ? (
           <>
             {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
-            {dueno && <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>}
+            <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>
           </>
         ) : (
           <>
@@ -9271,12 +9265,10 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                     ))}
                   </div>
                 </div>
-                {dueno && (
                 <label className="flex items-center gap-2 text-teal-200">
                   <input type="checkbox" checked={r.no_vino} disabled={busy} onChange={(e) => patch({ no_vino: e.target.checked })} /> No vino
                 </label>
-                )}
-                {!dueno ? null : confirmCancel ? (
+                {confirmCancel ? (
                   <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
                     <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>

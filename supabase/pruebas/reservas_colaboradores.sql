@@ -65,7 +65,8 @@ select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000
 do $$
 declare
   n int;
-  t text;
+  v_nuevo uuid;
+  v_bloqueo uuid;
   v_pend uuid := (select valor::uuid from ids where clave = 'pendiente');
   v_conf uuid := (select valor::uuid from ids where clave = 'confirmada');
 begin
@@ -76,33 +77,42 @@ begin
   select count(*) into n from reservas where complejo_id = 'cprueba-otro';
   insert into resultados (caso, ok, detalle) values ('No ve las de otro complejo', n = 0, n::text);
 
-  t := colaborador_reserva(v_pend, 'confirmar');
-  insert into resultados (caso, ok, detalle) values ('Confirma un pedido pendiente', t = 'ok' and (select estado from reservas where id = v_pend) = 'confirmada', t);
-  t := colaborador_reserva(v_conf, 'cobro', 'efectivo');
-  insert into resultados (caso, ok, detalle) values ('Registra el cobro en efectivo', (select medio_pago from reservas where id = v_conf) = 'efectivo', t);
-  t := colaborador_reserva(v_conf, 'cobro', null);
-  insert into resultados (caso, ok) values ('Vuelve a "sin cobrar"', (select medio_pago from reservas where id = v_conf) is null);
+  update reservas set estado = 'confirmada' where id = v_pend;
+  insert into resultados (caso, ok) values ('Confirma un pedido pendiente', (select estado from reservas where id = v_pend) = 'confirmada');
+  update reservas set medio_pago = 'efectivo', no_vino = true where id = v_conf;
+  insert into resultados (caso, ok) values ('Registra el cobro y marca "no vino"', (select medio_pago = 'efectivo' and no_vino from reservas where id = v_conf));
+  update reservas set estado = 'cancelada', cancelada_at = now(), cancelada_por = 'complejo' where id = v_conf;
+  insert into resultados (caso, ok) values ('Cancela un turno', (select estado from reservas where id = v_conf) = 'cancelada');
 
-  begin perform colaborador_reserva(v_conf, 'confirmar'); insert into resultados (caso, ok) values ('No confirma lo que ya está confirmado', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('No confirma lo que ya está confirmado', sqlerrm = 'estado_invalido', sqlerrm); end;
-  begin perform colaborador_reserva(v_conf, 'cobro', 'tarjeta'); insert into resultados (caso, ok) values ('Medio de pago inventado: rechazado', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('Medio de pago inventado: rechazado', sqlerrm = 'datos_invalidos', sqlerrm); end;
-  begin perform colaborador_reserva(v_conf, 'cancelar'); insert into resultados (caso, ok) values ('No puede cancelar turnos', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('No puede cancelar turnos', sqlerrm = 'datos_invalidos', sqlerrm); end;
-  begin perform colaborador_reserva((select valor::uuid from ids where clave = 'otro'), 'confirmar'); insert into resultados (caso, ok) values ('No toca pedidos de otro complejo', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('No toca pedidos de otro complejo', sqlerrm = 'no_autorizado', sqlerrm); end;
+  insert into reservas (complejo_id, cancha_id, fecha, inicio, fin, nombre)
+  values ('cprueba-c', (select valor::uuid from ids where clave = 'cancha'), current_date + 4, (current_date + 4) + time '15:00', (current_date + 4) + time '16:00', 'Por teléfono')
+  returning id into v_nuevo;
+  insert into resultados (caso, ok) values ('Carga un turno a mano', v_nuevo is not null);
+  insert into reservas (complejo_id, cancha_id, tipo, fecha, inicio, fin, nota)
+  values ('cprueba-c', (select valor::uuid from ids where clave = 'cancha'), 'bloqueo', current_date + 4, (current_date + 4) + time '17:00', (current_date + 4) + time '18:00', 'lluvia')
+  returning id into v_bloqueo;
+  delete from reservas where id = v_bloqueo;
+  get diagnostics n = row_count;
+  insert into resultados (caso, ok, detalle) values ('Bloquea un horario y lo quita', n = 1, n::text);
+  delete from reservas where id = v_nuevo;
+  get diagnostics n = row_count;
+  insert into resultados (caso, ok, detalle) values ('No puede borrar turnos (se cancelan)', n = 0, n::text);
 
-  update reservas set estado = 'cancelada' where id = v_conf;
+  update reservas set estado = 'confirmada' where id = (select valor::uuid from ids where clave = 'otro');
   get diagnostics n = row_count;
-  insert into resultados (caso, ok, detalle) values ('No cambia reservas directo', n = 0, n::text);
-  update canchas set precio_90 = 1 where complejo_id = 'cprueba-c';
-  get diagnostics n = row_count;
-  insert into resultados (caso, ok, detalle) values ('No cambia precios', n = 0, n::text);
+  insert into resultados (caso, ok, detalle) values ('No toca reservas de otro complejo', n = 0, n::text);
   begin
     insert into reservas (complejo_id, cancha_id, fecha, inicio, fin, nombre)
-    values ('cprueba-c', (select valor::uuid from ids where clave = 'cancha'), current_date + 4, (current_date + 4) + time '15:00', (current_date + 4) + time '16:00', 'X');
-    insert into resultados (caso, ok) values ('No carga turnos', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('No carga turnos', sqlstate = '42501', sqlerrm); end;
+    values ('cprueba-otro', (select valor::uuid from ids where clave = 'cancha_otro'), current_date + 4, (current_date + 4) + time '15:00', (current_date + 4) + time '16:00', 'X');
+    insert into resultados (caso, ok) values ('No carga turnos en otro complejo', false);
+  exception when others then insert into resultados (caso, ok, detalle) values ('No carga turnos en otro complejo', sqlstate = '42501', sqlerrm); end;
+  update canchas set precio_90 = 1, apertura = '08:00' where complejo_id = 'cprueba-c';
+  get diagnostics n = row_count;
+  insert into resultados (caso, ok, detalle) values ('No cambia horarios ni precios', n = 0, n::text);
+  begin
+    insert into jugadores_bloqueados (complejo_id, jugador_id) values ('cprueba-c', '00000000-0000-4000-8000-0000000000c3');
+    insert into resultados (caso, ok) values ('No bloquea jugadores', false);
+  exception when others then insert into resultados (caso, ok, detalle) values ('No bloquea jugadores', sqlstate = '42501', sqlerrm); end;
   select count(*) into n from colaboradores;
   insert into resultados (caso, ok, detalle) values ('No ve la lista de colaboradores', n = 0, n::text);
   begin
@@ -125,11 +135,11 @@ end $$;
 
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000c3","role":"authenticated"}', true);
 do $$
+declare n int;
 begin
-  perform colaborador_reserva((select valor::uuid from ids where clave = 'confirmada'), 'cobro', 'efectivo');
-  insert into resultados (caso, ok) values ('Alguien que no está en la lista: bloqueado', false);
-exception when others then
-  insert into resultados (caso, ok, detalle) values ('Alguien que no está en la lista: bloqueado', sqlerrm = 'no_autorizado', sqlerrm);
+  update reservas set medio_pago = 'efectivo' where complejo_id = 'cprueba-c';
+  get diagnostics n = row_count;
+  insert into resultados (caso, ok, detalle) values ('Alguien que no está en la lista: no toca nada', n = 0, n::text);
 end $$;
 
 -- 4) El dueño lo quita y el empleado pierde el acceso
