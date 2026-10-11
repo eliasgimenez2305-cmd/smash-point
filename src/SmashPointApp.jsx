@@ -5164,6 +5164,66 @@ function ChevronCircle({ color }) {
 const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
+/* Política de privacidad (se llega con #privacidad en la dirección). Ley 25.326 de Protección de
+   los Datos Personales. Si cambia qué datos se guardan o con quién se comparten, actualizarla. */
+const PRIVACIDAD_FECHA = "11 de octubre de 2026";
+function PrivacidadView({ onBack }) {
+  const h2 = "text-base uppercase mt-6 mb-2";
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6 text-sm text-teal-200 leading-relaxed" style={F.body}>
+      <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Volver</button>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Política de privacidad</h1>
+      <p className="text-xs text-teal-500 mb-4">Última actualización: {PRIVACIDAD_FECHA}</p>
+
+      <p>En Smash Point cuidamos tus datos personales. Acá te contamos qué datos guardamos, para qué los usamos, con quién los compartimos y cómo podés consultarlos, corregirlos o pedir que los borremos, según la Ley 25.326 de Protección de los Datos Personales.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Quién es responsable</h2>
+      <p>Smash Point (Gualeguaychú, Entre Ríos, Argentina). Para cualquier consulta sobre tus datos escribinos a <a href={`mailto:${CONTACT_EMAIL}`} className="text-lime-400 underline">{CONTACT_EMAIL}</a>.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Qué datos guardamos</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li><span className="text-teal-100">Si reservás canchas:</span> tu mail (con el que entrás), nombre, apellido, WhatsApp y, si querés, tu fecha de nacimiento; y tus reservas (complejo, cancha, día, horario, precio y su estado).</li>
+        <li><span className="text-teal-100">Si te inscribís a un torneo:</span> el nombre de los jugadores y un WhatsApp de contacto, y si corresponde los días y horarios en que pueden jugar.</li>
+        <li><span className="text-teal-100">Si organizás torneos o trabajás en un complejo:</span> tu mail, tu nombre y lo que cargás en el panel (torneos, resultados, turnos, cobros).</li>
+        <li><span className="text-teal-100">En tu navegador:</span> guardamos la sesión para que no tengas que volver a entrar cada vez. Se borra al cerrar sesión. No usamos publicidad que te siga ni herramientas de seguimiento.</li>
+      </ul>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Para qué los usamos</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li>Para gestionar tus reservas e inscripciones y avisarte sobre ellas (por mail o por WhatsApp).</li>
+        <li>Para mostrar los torneos: fixture, resultados, posiciones y rankings.</li>
+        <li>La fecha de nacimiento, solo si la cargás, para armar más adelante rankings por edad.</li>
+      </ul>
+      <p className="mt-2">No vendemos ni alquilamos tus datos, y no los usamos para publicidad.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Quién los ve</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li><span className="text-teal-100">El complejo donde reservás</span> (su dueño y sus empleados) ve tu nombre, tu WhatsApp y tus reservas en ese complejo, para confirmarlas y comunicarse con vos.</li>
+        <li><span className="text-teal-100">El organizador del torneo</span> ve el WhatsApp que cargaste al inscribirte.</li>
+        <li><span className="text-teal-100">Todos</span> pueden ver el nombre de los jugadores en los torneos públicos (parejas, grupos, resultados y rankings). Tu WhatsApp, tu mail y tu fecha de nacimiento nunca se muestran en público.</li>
+        <li><span className="text-teal-100">Nuestros proveedores</span>, que guardan y envían la información por nosotros y solo para esto: Supabase (base de datos y acceso), Netlify (publicación de la página) y Resend (envío de mails). Sus servidores pueden estar fuera de Argentina (por ejemplo, en Brasil o en Estados Unidos).</li>
+      </ul>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Cuánto tiempo los guardamos</h2>
+      <p>Mientras uses Smash Point. Las reservas y los resultados de torneos pueden quedar como historial (por ejemplo, para los rankings). Si pedís que borremos tu cuenta, borramos tus datos personales; en los torneos ya jugados puede quedar tu nombre como parte del resultado.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Tus derechos</h2>
+      <p>Podés pedir gratis acceso a tus datos, corregirlos o que los borremos, escribiéndonos a <a href={`mailto:${CONTACT_EMAIL}`} className="text-lime-400 underline">{CONTACT_EMAIL}</a>. Tu nombre, WhatsApp y fecha de nacimiento también los podés corregir vos desde "Mis reservas" → "Mis datos". Respondemos dentro de los plazos de la ley (10 días corridos para el acceso y 5 días hábiles para corregir o borrar).</p>
+      <p className="mt-2">El derecho de acceso se puede ejercer gratis cada seis meses, salvo que haya un interés legítimo para hacerlo antes (art. 14, inc. 3, Ley 25.326).</p>
+      <p className="mt-2">La Agencia de Acceso a la Información Pública, como órgano de control de la Ley 25.326, tiene la atribución de atender las denuncias y reclamos de quienes resulten afectados en sus derechos por incumplimiento de las normas vigentes sobre protección de datos personales.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Menores de edad</h2>
+      <p>Si sos menor de edad, usá Smash Point con el permiso de tu madre, padre o tutor.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Seguridad</h2>
+      <p>Tus datos se guardan con acceso restringido: cada persona ve solo lo que le corresponde (por ejemplo, un complejo no ve las reservas de otro). Entrás con un código que te llega al mail, sin contraseñas guardadas en la página.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Cambios</h2>
+      <p>Si cambiamos esta política, actualizamos la fecha de arriba. Si el cambio es importante, te avisamos en la app.</p>
+    </section>
+  );
+}
+
 /* Contacto al pie de las pantallas públicas, con el ingreso de organizadores y de empleados de
    complejos (discreto, para que la portada sea del público) */
 function ContactFooter({ onGoLogin }) {
@@ -5181,6 +5241,8 @@ function ContactFooter({ onGoLogin }) {
           <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">Ingreso organizadores</button>
           {" · "}
           <a href="#complejo" className="hover:text-lime-400 underline decoration-teal-800">Empleados de complejos</a>
+          {" · "}
+          <a href="#privacidad" className="hover:text-lime-400 underline decoration-teal-800">Privacidad</a>
         </p>
       )}
     </footer>
@@ -5895,7 +5957,7 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
         <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nac">Fecha de nacimiento (opcional)</label>
         <input id="jug-nac" type="date" value={form.fecha_nacimiento} onChange={set("fecha_nacimiento")} min="1920-01-02" className={inputCls} style={adminInput} />
       </div>
-      <p className="text-xs text-teal-500">Usamos tus datos solo para tus reservas e inscripciones. El complejo donde reservás ve tu nombre y tu WhatsApp.</p>
+      <p className="text-xs text-teal-500">Usamos tus datos solo para tus reservas e inscripciones. El complejo donde reservás ve tu nombre y tu WhatsApp. <a href="#privacidad" target="_blank" rel="noopener noreferrer" className="underline text-teal-300">Política de privacidad</a></p>
       {error && <p className="text-red-400">{error}</p>}
       <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : submitLabel}</button>
     </div>
@@ -11053,10 +11115,11 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
-  const [route, setRoute] = useState(() => (window.location.hash === "#complejo" ? "colaborador" : "public-home"));
+  const routeFromHash = () => ({ "#complejo": "colaborador", "#privacidad": "privacidad" })[window.location.hash] || null;
+  const [route, setRoute] = useState(() => routeFromHash() || "public-home");
   // El link "Empleados de complejos" del pie lleva a #complejo: abre el panel del colaborador
   useEffect(() => {
-    const onHash = () => { if (window.location.hash === "#complejo") { setRoute("colaborador"); window.scrollTo(0, 0); } };
+    const onHash = () => { const r = routeFromHash(); if (r) { setRoute(r); window.scrollTo(0, 0); } };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -11134,8 +11197,8 @@ function SmashPointAppInner() {
               setSession(restored);
               const home = profile.role === "creador" ? "creator-home" : "admin-home";
               const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
-              // Con #complejo en la dirección se queda en el panel del colaborador
-              if (window.location.hash !== "#complejo") setRoute(canResume ? "admin-tournament" : home);
+              // Con #complejo o #privacidad en la dirección se queda en esa pantalla
+              if (!routeFromHash()) setRoute(canResume ? "admin-tournament" : home);
               if (canResume) setSelectedId(stored.selectedId);
             } else {
               writeStoredAuth(null);
@@ -11544,6 +11607,8 @@ function SmashPointAppInner() {
         : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
     content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} onColaborador={() => { window.location.hash = "complejo"; setRoute("colaborador"); }} />;
+  } else if (route === "privacidad") {
+    content = <PrivacidadView onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute(session ? (session.role === "creador" ? "creator-home" : "admin-home") : "public-home"); }} />;
   } else if (route === "colaborador") {
     content = <ColaboradorHome jugadorApi={jugadorApi} venues={venues} onEntrar={entrarComoColaborador} onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute("public-home"); }} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
