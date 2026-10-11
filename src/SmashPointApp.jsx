@@ -8,7 +8,7 @@ import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -5630,6 +5630,9 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
         <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
         {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline" style={F.body}>Mis reservas</button>}
       </div>
+      <div className="mt-4">
+        <BuscadorTurnos venues={venues} complejos={complejos} onElegir={onReservar} />
+      </div>
       <p className="text-sm text-teal-300 mb-5" style={F.body}>Dónde jugar en Gualeguaychú.</p>
       {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá los complejos de la ciudad.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -5663,6 +5666,119 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
 }
 
 /* ---------- Reservas: lado del jugador ---------- */
+
+/* Buscador de turnos en todos los complejos a la vez: día, desde qué hora y duración; una tarjeta
+   por complejo con sus horarios libres. Tocar un horario lleva directo a confirmar (onElegir). */
+function BuscadorTurnos({ venues, complejos, onElegir }) {
+  const hoy = hoyArgentina();
+  const habilitados = complejos.filter((c) => c.reservas_habilitadas && venues.some((v) => v.id === c.id));
+  const ids = habilitados.map((c) => c.id).join(",");
+  const [canchas, setCanchas] = useState(null);
+  const [fecha, setFecha] = useState(hoy);
+  const [hora, setHora] = useState(""); // "" = cualquier hora
+  const [duracion, setDuracion] = useState(null);
+  const [ocupado, setOcupado] = useState(null); // { [complejoId]: [...] }
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!ids) return;
+    supabaseTable(`canchas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})&activa=is.true&reserva_online=is.true&order=orden.asc,created_at.asc`)
+      .then((rows) => {
+        setCanchas(rows || []);
+        const durs = DURACIONES.filter((d) => (rows || []).some((c) => duracionesOfrecidas(c).includes(d)));
+        setDuracion((cur) => cur ?? (durs.includes(90) ? 90 : durs[0] ?? null));
+      })
+      .catch(() => setError("No se pudieron cargar los turnos. Revisá la conexión."));
+  }, [ids]);
+
+  useEffect(() => {
+    if (!ids) return;
+    setOcupado(null);
+    let vigente = true;
+    Promise.all(ids.split(",").map((id) => supabaseRpc("disponibilidad_canchas", { p_complejo: id, p_fecha: fecha }).then((rows) => [id, (rows || []).map((r) => ({ ...r, estado: "confirmada" }))])))
+      .then((pares) => { if (vigente) { setOcupado(Object.fromEntries(pares)); setError(""); } })
+      .catch(() => { if (vigente) setError("No se pudieron cargar los horarios. Revisá la conexión."); });
+    return () => { vigente = false; };
+  }, [ids, fecha]);
+
+  if (habilitados.length === 0) return null;
+  const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
+  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
+  const desdeMin = hora ? Number(hora) : 0;
+  const tarjetas = canchas && ocupado && duracion
+    ? habilitados.map((c) => {
+        const venue = venues.find((v) => v.id === c.id);
+        const suyas = canchas.filter((x) => x.complejo_id === c.id);
+        return { venue, libres: iniciosLibres(suyas, fecha, duracion, ocupado[c.id] || [], { desdeMin }), precio: precioDesde(suyas, duracion), ofrece: suyas.some((x) => duracionesOfrecidas(x).includes(duracion)) };
+      }).filter((t) => t.ofrece).sort((a, b) => (b.libres.length > 0) - (a.libres.length > 0) || a.venue.name.localeCompare(b.venue.name, "es"))
+    : null;
+  const chip = "shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border";
+
+  return (
+    <section className="mb-8" style={F.body}>
+      <h2 className="text-lg uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Reservá tu cancha</h2>
+      <p className="text-sm text-teal-300 mb-3">Elegí el día y la hora, y mirá dónde hay lugar.</p>
+      <div className="flex gap-2 overflow-x-auto pb-2 mb-2" style={{ scrollbarWidth: "none", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
+        {dias.map((d) => (
+          <button key={d} type="button" onClick={() => setFecha(d)} className={`${chip} ${fecha === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{etiquetaDiaCorta(d, hoy)}</button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <select value={hora} onChange={(e) => setHora(e.target.value)} className="px-3 py-2 rounded-lg border text-sm" style={adminInput} aria-label="Desde qué hora">
+          <option value="">Cualquier hora</option>
+          {Array.from({ length: 17 }, (_, i) => (i + 7) * 60).map((m) => <option key={m} value={m}>Desde las {etiquetaHora(m)}</option>)}
+        </select>
+        {duraciones.length > 1 && (
+          <div className="flex gap-1 p-1 rounded-lg border border-teal-800">
+            {duraciones.map((d) => (
+              <button key={d} type="button" onClick={() => setDuracion(d)} className={`px-3 py-1 rounded-md text-sm ${duracion === d ? "text-[#14181f] font-semibold" : "text-teal-300"}`} style={duracion === d ? { backgroundColor: BRAND.lime } : undefined}>{d} min</button>
+            ))}
+          </div>
+        )}
+      </div>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {!tarjetas ? (
+        !error && <p className="text-sm opacity-60">Buscando turnos…</p>
+      ) : tarjetas.length === 0 ? (
+        <p className="text-sm text-teal-300">Ningún complejo ofrece turnos de {duracion} min.</p>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {tarjetas.map(({ venue, libres, precio }, i) => {
+            const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
+            return (
+              <article key={venue.id} className="rounded-2xl p-4 min-w-0" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
+                <div className="flex items-center gap-3 mb-3">
+                  <DirectoryAvatar url={venue.logoUrl} name={venue.name} color={color} size={52} />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{venue.name}</h3>
+                    {venue.address && <p className="text-xs text-teal-400 truncate">📍 {venue.address}</p>}
+                  </div>
+                  {precio != null && (
+                    <div className="text-right shrink-0">
+                      <p className="text-[10px] uppercase text-teal-500">desde</p>
+                      <p className="text-sm font-semibold" style={{ color }}>{formatoPrecio(precio)}</p>
+                    </div>
+                  )}
+                </div>
+                {libres.length === 0 ? (
+                  <p className="text-sm text-teal-500">Sin turnos libres{hora ? " desde esa hora" : " este día"}.</p>
+                ) : (
+                  <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "thin", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
+                    {libres.map(({ desde }) => (
+                      <button key={desde} type="button" onClick={() => onElegir(venue.id, { fecha, duracion, desde })} className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold border border-lime-400 text-lime-400 hover:bg-lime-400/10">
+                        {etiquetaHora(desde)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
 
 /* Entrada del jugador: mail → código de 6 dígitos → (la primera vez) sus datos. Sin contraseña. */
 function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titulo = "Entrar para reservar" }) {
@@ -5786,6 +5902,9 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
   );
 }
 
+/* Desvanecido en el borde derecho de una fila que se desliza: avisa que hay más para ver */
+const FADE_RIGHT = "linear-gradient(to right, black 85%, transparent)";
+
 /* "Hoy", "Mañana", "Sáb 11" */
 function etiquetaDiaCorta(fecha, hoy) {
   if (fecha === hoy) return "Hoy";
@@ -5795,10 +5914,11 @@ function etiquetaDiaCorta(fecha, hoy) {
 }
 
 /* Reservar en un complejo: día, duración, y los horarios de cada cancha (libres y ocupados) */
-function ReservarCancha({ venue, jugadorApi, onBack, onMisReservas }) {
+function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReservas }) {
   const hoy = hoyArgentina();
   const [canchas, setCanchas] = useState(null);
-  const [fecha, setFecha] = useState(hoy);
+  const [fecha, setFecha] = useState(inicial?.fecha || hoy);
+  const pendienteInicial = useRef(inicial?.desde != null ? inicial : null); // horario del buscador, a abrir apenas carguen los datos
   const [duracion, setDuracion] = useState(null);
   const [ocupado, setOcupado] = useState(null);
   const [error, setError] = useState("");
@@ -5814,10 +5934,10 @@ function ReservarCancha({ venue, jugadorApi, onBack, onMisReservas }) {
       .then((rows) => {
         setCanchas(rows || []);
         const durs = DURACIONES.filter((d) => (rows || []).some((c) => duracionesOfrecidas(c).includes(d)));
-        setDuracion(durs.includes(90) ? 90 : durs[0] ?? null);
+        setDuracion(inicial?.duracion && durs.includes(inicial.duracion) ? inicial.duracion : durs.includes(90) ? 90 : durs[0] ?? null);
       })
       .catch(() => setError("No se pudieron cargar las canchas. Revisá la conexión."));
-  }, [venue.id]);
+  }, [venue.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadOcupado = useCallback(async () => {
     try {
@@ -5837,6 +5957,16 @@ function ReservarCancha({ venue, jugadorApi, onBack, onMisReservas }) {
     setElegido({ cancha, desde });
     if (!jugador?.perfil) setPidiendoLogin(true);
   };
+  // Vino del buscador con un horario: se abre la confirmación en la primera cancha libre
+  useEffect(() => {
+    const ini = pendienteInicial.current;
+    if (!ini || !canchas || !ocupado || duracion !== ini.duracion || fecha !== ini.fecha) return;
+    pendienteInicial.current = null;
+    const libre = iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin: ini.desde }).find((l) => l.desde === ini.desde);
+    if (libre) elegir(libre.cancha, libre.desde);
+    else setError("Ese horario se acaba de ocupar. Elegí otro.");
+  }, [canchas, ocupado, duracion, fecha]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const pedir = async () => {
     setBusy(true); setPedidoError("");
     try {
@@ -5866,7 +5996,7 @@ function ReservarCancha({ venue, jugadorApi, onBack, onMisReservas }) {
         <p className="text-sm text-teal-300">Este complejo todavía no tiene turnos para reservar online. Escribiles por WhatsApp.</p>
       ) : (
         <>
-          <div className="flex gap-2 overflow-x-auto pb-2 mb-3" style={{ scrollbarWidth: "none" }}>
+          <div className="flex gap-2 overflow-x-auto pb-2 mb-3" style={{ scrollbarWidth: "none", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
             {dias.map((d) => (
               <button key={d} type="button" onClick={() => setFecha(d)} className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border ${fecha === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
                 {etiquetaDiaCorta(d, hoy)}
@@ -6243,6 +6373,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
   const [reservarId, setReservarId] = useState(null);
+  const [reservarInicial, setReservarInicial] = useState(null); // { fecha, duracion, desde } elegido en el buscador
   const [misReservas, setMisReservas] = useState(false);
   const [selectedOrgId, setSelectedOrgId] = useState(null);
   const [selectedEventId, setSelectedEventId] = useState(null);
@@ -6273,9 +6404,9 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   if (tab === "canchas" && misReservas) {
     body = <MisReservas jugadorApi={jugadorApi} venues={venues} onBack={volverAComplejos} />;
   } else if (tab === "canchas" && reservarVenue) {
-    body = <ReservarCancha venue={reservarVenue} jugadorApi={jugadorApi} onBack={volverAComplejos} onMisReservas={verMisReservas} />;
+    body = <ReservarCancha key={reservarVenue.id} venue={reservarVenue} inicial={reservarInicial} jugadorApi={jugadorApi} onBack={volverAComplejos} onMisReservas={verMisReservas} />;
   } else if (tab === "canchas") {
-    body = <VenuesPublicView venues={venues} complejos={complejos} jugador={jugadorApi?.jugador} onReservar={(id) => { setReservarId(id); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
+    body = <VenuesPublicView venues={venues} complejos={complejos} jugador={jugadorApi?.jugador} onReservar={(id, inicial = null) => { setReservarId(id); setReservarInicial(inicial); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
   } else if (selectedEvent && eventTournaments.length > 0) {

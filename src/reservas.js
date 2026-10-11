@@ -98,6 +98,26 @@ export function motivoNoEntra(cancha, fecha, desde, duracion, reservas) {
   return null;
 }
 
+/* Horarios de inicio libres en un complejo (en alguna de sus canchas que ofrezca esa duración),
+   que todavía no pasaron y desde un minuto mínimo: [{ desde, cancha }] con la primera cancha libre */
+export function iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin = 0, ahora = Date.now() } = {}) {
+  const porInicio = new Map();
+  for (const c of canchas) {
+    if (!duracionesOfrecidas(c).includes(duracion)) continue;
+    for (const m of iniciosPosibles(c, duracion)) {
+      if (m < desdeMin || porInicio.has(m) || Date.parse(instante(fecha, m)) <= ahora) continue;
+      if (motivoNoEntra(c, fecha, m, duracion, ocupado) === null) porInicio.set(m, c);
+    }
+  }
+  return [...porInicio.entries()].sort((a, b) => a[0] - b[0]).map(([desde, cancha]) => ({ desde, cancha }));
+}
+
+/* Precio más barato de esa duración entre las canchas ("desde $…") */
+export function precioDesde(canchas, duracion) {
+  const precios = canchas.map((c) => precioDe(c, duracion)).filter((p) => p != null);
+  return precios.length > 0 ? Math.min(...precios) : null;
+}
+
 /* Filas de la agenda: de la primera apertura al último cierre de las canchas, cada 30 min */
 export function filasAgenda(canchas) {
   if (canchas.length === 0) return [];

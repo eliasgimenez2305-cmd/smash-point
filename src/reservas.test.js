@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha } from "./reservas.js";
+import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde } from "./reservas.js";
 
 const cancha1 = { id: "c1", apertura: "14:00:00", cierre: "22:00:00", precio_60: 10000, precio_90: 14000, precio_120: null };
 const nocturna = { id: "c2", apertura: "18:00", cierre: "01:00", precio_90: 15000 };
@@ -63,6 +63,24 @@ test("fechas", () => {
   assert.equal(sumarDias("2026-10-31", 1), "2026-11-01");
   assert.equal(hoyArgentina(new Date("2026-10-15T02:00:00Z")), "2026-10-14"); // 23 hs del 14 en Argentina
   assert.equal(etiquetaFecha("2026-10-14"), "Miércoles 14/10");
+});
+
+test("horarios libres en un complejo: alcanza con una cancha libre", () => {
+  const c2 = { id: "c3", apertura: "14:00", cierre: "22:00", precio_90: 12000 };
+  const ocupado = [
+    { cancha_id: "c1", estado: "confirmada", inicio: instante("2026-10-14", 18 * 60), fin: instante("2026-10-14", 19 * 60 + 30) },
+    { cancha_id: "c3", estado: "confirmada", inicio: instante("2026-10-14", 18 * 60), fin: instante("2026-10-14", 19 * 60 + 30) },
+  ];
+  const ahora = Date.parse("2026-10-14T12:00:00-03:00");
+  const libres = iniciosLibres([cancha1, c2], "2026-10-14", 90, ocupado, { desdeMin: 17 * 60, ahora });
+  const horas = libres.map((l) => etiquetaHora(l.desde));
+  assert.deepEqual(horas.slice(0, 3), ["19:30", "20:00", "20:30"]); // 17:00 a 19:00 se pisan en las dos
+  assert.equal(libres[0].cancha.id, "c1");
+  // Lo que ya pasó no aparece
+  const tarde = Date.parse("2026-10-14T20:10:00-03:00");
+  assert.deepEqual(iniciosLibres([cancha1], "2026-10-14", 90, [], { ahora: tarde }).map((l) => etiquetaHora(l.desde)), ["20:30"]);
+  assert.equal(precioDesde([cancha1, c2], 90), 12000);
+  assert.equal(precioDesde([cancha1], 120), null);
 });
 
 test("precios escritos a mano", () => {
