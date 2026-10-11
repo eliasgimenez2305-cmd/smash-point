@@ -12,6 +12,7 @@ grant usage on sequence resultados_n_seq to authenticated;
 
 -- Preparación (como administrador de la base)
 insert into ids values ('org', (select id::text from organizers where username = 'organizador-prueba'));
+insert into ids values ('org_email', (select u.email from auth.users u join organizers o on o.id = u.id where o.username = 'organizador-prueba'));
 insert into auth.users (id, email, email_confirmed_at) values
   ('00000000-0000-4000-8000-0000000000e1', 'cobra@prueba.test', now()),
   ('00000000-0000-4000-8000-0000000000e2', 'soloagenda@prueba.test', now()),
@@ -39,7 +40,7 @@ begin
   insert into pagos_inscripcion (torneo_id, organizador_id, categoria_id, pareja_id, jugador, monto, medio, cobrado_por, cobrado_por_email)
   values ('tcobros', v_org, 'c1', 'p1', 1, 15000, 'efectivo', gen_random_uuid(), 'otro@mail.com') returning id into v_id;
   select * into r from pagos_inscripcion where id = v_id;
-  insert into resultados (caso, ok, detalle) values ('Organizador registra un pago; "quién cobró" lo pone la base', r.cobrado_por = v_org and r.cobrado_por_email = (select email from auth.users where id = v_org), r.cobrado_por_email);
+  insert into resultados (caso, ok, detalle) values ('Organizador registra un pago; "quién cobró" lo pone la base', r.cobrado_por = v_org and r.cobrado_por_email = (select valor from ids where clave = 'org_email'), r.cobrado_por_email);
   insert into ids values ('pago1', v_id::text);
   begin
     insert into pagos_inscripcion (torneo_id, organizador_id, categoria_id, pareja_id, jugador, monto, medio) values ('tcobros', v_org, 'c1', 'p1', 3, 100, 'efectivo');
