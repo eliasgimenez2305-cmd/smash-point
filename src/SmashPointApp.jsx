@@ -10658,8 +10658,9 @@ function ProgressMark({ state }) {
 
 /* Configuración: las categorías del torneo con su nombre y su cupo (vacío = sin límite; el Súper 8
    es siempre de 8), para agregar, renombrar y borrar en un solo lugar */
-function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
+function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onPrecioTorneo, onPrecioCategoria }) {
   const [newName, setNewName] = useState("");
+  const [precios, setPrecios] = useState({}); // precios en edición ("torneo" o id de categoría)
   const [names, setNames] = useState({}); // nombres en edición, se guardan al salir del campo
   const [cupos, setCupos] = useState({});
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
@@ -10669,6 +10670,19 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
     <div className="border border-teal-800 rounded-lg p-4 mb-6" style={F.body}>
       <p className="text-sm font-semibold mb-1">Categorías y cupos</p>
       <p className="text-[11px] text-teal-600 mb-3">Cada categoría tiene sus parejas, grupos y llave. El cupo cuenta todas las parejas anotadas (vacío = sin límite).</p>
+      {onPrecioTorneo && (
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          <label htmlFor="precio-torneo" className="text-sm text-teal-300">Inscripción por jugador</label>
+          <input
+            id="precio-torneo" inputMode="numeric"
+            value={precios.torneo ?? (tournament.precioJugador ?? "")}
+            onChange={(e) => setPrecios({ ...precios, torneo: e.target.value })}
+            onBlur={() => { if (precios.torneo !== undefined) { onPrecioTorneo(leerPrecio(precios.torneo)); setPrecios(({ torneo: _, ...rest }) => rest); } }}
+            placeholder="Ej: 15000" className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
+          />
+          <span className="text-[11px] text-teal-600">Para todas las categorías; si una tiene otro precio, ponelo al lado de su cupo.</span>
+        </div>
+      )}
       <div className="space-y-2">
         {tournament.categories.map((c, ci) => {
           const color = GROUP_COLORS[ci % GROUP_COLORS.length];
@@ -10692,6 +10706,16 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
                   onChange={(e) => setCupos({ ...cupos, [c.id]: e.target.value })}
                   onBlur={() => { if (cupos[c.id] !== undefined) { onCupo(c.id, parseCupo(cupos[c.id])); setCupos(({ [c.id]: _, ...rest }) => rest); } }}
                   placeholder="Sin límite" aria-label={`Cupo de ${c.name}`}
+                  className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
+                />
+              )}
+              {onPrecioCategoria && (
+                <input
+                  inputMode="numeric"
+                  value={precios[c.id] ?? (c.precioJugador ?? "")}
+                  onChange={(e) => setPrecios({ ...precios, [c.id]: e.target.value })}
+                  onBlur={() => { if (precios[c.id] !== undefined) { onPrecioCategoria(c.id, leerPrecio(precios[c.id])); setPrecios(({ [c.id]: _, ...rest }) => rest); } }}
+                  placeholder={tournament.precioJugador != null ? `$ ${tournament.precioJugador}` : "$ por jugador"} aria-label={`Precio por jugador de ${c.name}`}
                   className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
                 />
               )}
@@ -10719,7 +10743,189 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
   );
 }
 
-function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false }) {
+/* ---------- Cobro de inscripciones (ver 20261018_cobros_inscripciones.sql) ---------- */
+
+const MEDIOS_COBRO = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"]];
+const medioCobroLabel = (m) => MEDIOS_COBRO.find(([k]) => k === m)?.[1] || m;
+
+/* Precio por jugador de una categoría: el suyo o, si no tiene, el del torneo (null = sin precio) */
+function precioJugador(tournament, category) {
+  const p = category?.precioJugador ?? tournament?.precioJugador;
+  return p == null || p === "" ? null : Number(p);
+}
+
+/* Jugadores de una pareja para cobrar: 2 (o 1 en el Súper 8 individual), con su nombre */
+function jugadoresDePareja(category, pair) {
+  const cuantos = category.format === "super8_individual" ? 1 : 2;
+  const nombres = cuantos === 1 ? [pair.name] : splitPair(pair.name);
+  return Array.from({ length: cuantos }, (_, i) => ({ jugador: i + 1, nombre: nombres[i] || `Jugador ${i + 1}` }));
+}
+
+/* Pestaña "Cobros" de un torneo: quién pagó la inscripción y quién debe, por jugador. La usan el
+   organizador y sus colaboradores con acceso a torneos; anular un pago es solo del organizador. */
+function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId, esDueno }) {
+  const [pagos, setPagos] = useState(null);
+  const [error, setError] = useState("");
+  const [filtro, setFiltro] = useState("todos"); // todos | deben | pagaron
+  const [cobrando, setCobrando] = useState(null); // clave del jugador con el formulario abierto
+  const [form, setForm] = useState({ monto: "", medio: "efectivo" });
+  const [busy, setBusy] = useState(false);
+  const [anulando, setAnulando] = useState(null);
+  const [verHistorial, setVerHistorial] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setPagos(await supabaseTable(`pagos_inscripcion?torneo_id=eq.${encodeURIComponent(tournament.id)}&order=created_at.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los cobros. Revisá la conexión."); }
+  }, [tournament.id, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const clave = (catId, pairId, jugador) => `${catId}|${pairId}|${jugador}`;
+  const pagosDe = (k) => (pagos || []).filter((p) => clave(p.categoria_id, p.pareja_id, p.jugador) === k);
+
+  // Una fila por jugador, con lo que pagó y lo que debe
+  const filas = tournament.categories.flatMap((c) => c.pairs.flatMap((pair) => jugadoresDePareja(c, pair).map(({ jugador, nombre }) => {
+    const k = clave(c.id, pair.id, jugador);
+    const pagado = pagosDe(k).reduce((s, p) => s + Number(p.monto), 0);
+    const precio = precioJugador(tournament, c);
+    const debe = precio == null ? null : Math.max(0, precio - pagado);
+    const telefono = inscripciones.find((i) => i.id === pair.inscripcionId)?.telefono || null;
+    return { k, c, pair, jugador, nombre, pagado, precio, debe, telefono };
+  })));
+  const conPrecio = filas.filter((f) => f.precio != null);
+  const esperado = conPrecio.reduce((s, f) => s + f.precio, 0);
+  const cobrado = (pagos || []).reduce((s, p) => s + Number(p.monto), 0);
+  const falta = conPrecio.reduce((s, f) => s + f.debe, 0);
+  const porMedio = MEDIOS_COBRO.map(([m, l]) => [l, (pagos || []).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, v]) => v > 0);
+  const sinPrecio = tournament.categories.some((c) => c.pairs.length > 0 && precioJugador(tournament, c) == null);
+
+  const visibles = filas.filter((f) => filtro === "todos" || (filtro === "deben" ? f.debe == null ? f.pagado === 0 : f.debe > 0 : f.debe === 0 || (f.debe == null && f.pagado > 0)));
+
+  const abrir = (f) => { setCobrando(f.k); setForm({ monto: f.debe ? String(f.debe) : f.precio == null ? "" : "", medio: "efectivo" }); setError(""); };
+  const cobrar = async (f) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("pagos_inscripcion", {
+        method: "POST", accessToken, prefer: "return=minimal",
+        body: { torneo_id: tournament.id, organizador_id: organizerId, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, monto, medio: form.medio },
+      });
+      setCobrando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const anular = async (p) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`pagos_inscripcion?id=eq.${p.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setAnulando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const filtroBtn = (key, label) => (
+    <button type="button" onClick={() => setFiltro(key)} className={`px-3 py-1 rounded-full text-sm border ${filtro === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  if (tournament.categories.every((c) => c.pairs.length === 0)) {
+    return <p className="text-sm opacity-60" style={F.body}>Todavía no hay parejas anotadas.</p>;
+  }
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {pagos !== null && <div className="grid grid-cols-3 gap-2">
+        {[["Cobrado", cobrado, BRAND.lime], ["Falta", falta, "#fbbf24"], ["Total", esperado, BRAND.cyan]].map(([l, v, color]) => (
+          <div key={l} className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+            <p className="text-[11px] uppercase text-teal-400">{l}</p>
+            <p className="text-base font-semibold" style={{ color }}>{formatoPrecio(v) || "$0"}</p>
+          </div>
+        ))}
+      </div>}
+      {porMedio.length > 0 && <p className="text-xs text-teal-400">{porMedio.map(([l, v]) => `${l}: ${formatoPrecio(v)}`).join(" · ")}</p>}
+      {sinPrecio && <p className="text-xs text-amber-300">Hay categorías sin precio por jugador: se carga en Configuración → Categorías. Mientras tanto se pueden registrar pagos poniendo el monto.</p>}
+
+      <div className="flex flex-wrap gap-2">
+        {filtroBtn("todos", "Todos")}
+        {filtroBtn("deben", "Deben")}
+        {filtroBtn("pagaron", "Pagaron")}
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {pagos === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : (
+        tournament.categories.filter((c) => visibles.some((f) => f.c.id === c.id)).map((c) => (
+          <div key={c.id}>
+            <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">{c.name}{precioJugador(tournament, c) != null && ` · ${formatoPrecio(precioJugador(tournament, c))} por jugador`}</p>
+            <ul className="space-y-2">
+              {visibles.filter((f) => f.c.id === c.id).map((f) => {
+                const estado = f.debe === 0 ? ["Pagó", BRAND.lime] : f.pagado > 0 ? [f.debe == null ? `Pagó ${formatoPrecio(f.pagado)}` : `Debe ${formatoPrecio(f.debe)}`, "#fbbf24"] : [f.debe == null ? "Sin pagos" : `Debe ${formatoPrecio(f.debe)}`, "#f87171"];
+                const historial = pagosDe(f.k);
+                return (
+                  <li key={f.k} className="rounded-lg border border-teal-900 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex-1 min-w-[10rem]">
+                        <p className="text-teal-100 font-semibold">{f.nombre}</p>
+                        {c.format !== "super8_individual" && <p className="text-xs text-teal-500">{f.pair.name}</p>}
+                      </div>
+                      <span className="text-xs font-semibold" style={{ color: estado[1] }}>● {estado[0]}</span>
+                      {f.debe !== 0 && cobrando !== f.k && (
+                        <button type="button" onClick={() => abrir(f)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>
+                      )}
+                    </div>
+                    {f.debe > 0 && f.telefono && cobrando !== f.k && (
+                      <a href={waLink(f.telefono, `Hola, te recordamos el pago de la inscripción de ${tournament.name} (${c.name}): ${formatoPrecio(f.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
+                    )}
+                    {cobrando === f.k && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                          {MEDIOS_COBRO.map(([m, l]) => (
+                            <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                          ))}
+                        </div>
+                        <div className="flex gap-3 items-center">
+                          <button type="button" disabled={busy} onClick={() => cobrar(f)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
+                          <button type="button" onClick={() => setCobrando(null)} className="text-teal-400">Cancelar</button>
+                        </div>
+                      </div>
+                    )}
+                    {historial.length > 0 && (
+                      <button type="button" onClick={() => setVerHistorial(verHistorial === f.k ? null : f.k)} className="mt-1 text-xs text-teal-500 underline">
+                        {verHistorial === f.k ? "Ocultar pagos" : `${historial.length === 1 ? "1 pago" : `${historial.length} pagos`}`}
+                      </button>
+                    )}
+                    {verHistorial === f.k && (
+                      <ul className="mt-2 space-y-1 text-xs text-teal-300">
+                        {historial.map((p) => (
+                          <li key={p.id} className="flex flex-wrap gap-x-2 items-center">
+                            <span className="text-teal-100">{formatoPrecio(p.monto)}</span>
+                            <span>· {medioCobroLabel(p.medio)} · {cuando(p.created_at)}</span>
+                            <span className="text-teal-500 break-all">· {p.cobrado_por === organizerId ? "el organizador" : p.cobrado_por_email}</span>
+                            {esDueno && (anulando === p.id ? (
+                              <span className="text-red-300">¿Anular? <button type="button" disabled={busy} onClick={() => anular(p)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setAnulando(null)} className="text-teal-400 ml-1">No</button></span>
+                            ) : (
+                              <button type="button" onClick={() => setAnulando(p.id)} className="text-red-400">Anular</button>
+                            ))}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
@@ -10729,9 +10935,9 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
   // de horarios: sus partidos van en "Partidos".
   // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
   const allTabs = usesSchedule
-    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"]]
-    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"]];
-  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos"].includes(key)) : allTabs;
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
+    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : [])];
+  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
@@ -10837,6 +11043,12 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
             <TournamentTypeEditor tournament={tournament} update={update} />
             <CategoriesSettings
               tournament={tournament} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory}
+              onPrecioTorneo={(precio) => { const { precioJugador: _, ...rest } = tournament; update(precio == null ? rest : { ...rest, precioJugador: precio }); }}
+              onPrecioCategoria={(id, precio) => setCategories(tournament.categories.map((c) => {
+                if (c.id !== id) return c;
+                const { precioJugador: _, ...rest } = c;
+                return precio == null ? rest : { ...rest, precioJugador: precio };
+              }))}
               onCupo={(id, cupo) => setCategories(tournament.categories.map((c) => {
                 if (c.id !== id) return c;
                 const { cupo: _, ...rest } = c;
@@ -10845,6 +11057,10 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
             />
             {usesSchedule && <CourtsAndDatesEditor tournament={tournament} onChange={update} />}
           </>
+        )}
+
+        {view === "cobros" && cobros && (
+          <CobrosPanel tournament={tournament} inscripciones={inscripciones} accessToken={cobros.accessToken} organizerId={cobros.organizerId} esDueno={cobros.esDueno} />
         )}
 
         {view === "inscripciones" && (
@@ -11675,6 +11891,7 @@ function SmashPointAppInner() {
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
+        cobros={session.role === "creador" ? null : { accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador" }}
       />
     );
   } else {
