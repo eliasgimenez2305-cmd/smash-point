@@ -5164,8 +5164,9 @@ function ChevronCircle({ color }) {
 const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
-/* Contacto al pie de las pantallas públicas */
-function ContactFooter() {
+/* Contacto al pie de las pantallas públicas, con el ingreso de organizadores y de empleados de
+   complejos (discreto, para que la portada sea del público) */
+function ContactFooter({ onGoLogin }) {
   return (
     <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-10 text-center" style={F.body}>
       <div className="rounded-2xl px-4 py-5" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -5175,13 +5176,20 @@ function ContactFooter() {
           {CONTACT_EMAIL}
         </a>
       </div>
+      {onGoLogin && (
+        <p className="mt-4 text-xs text-teal-600">
+          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">Ingreso organizadores</button>
+          {" · "}
+          <a href="#complejo" className="hover:text-lime-400 underline decoration-teal-800">Empleados de complejos</a>
+        </p>
+      )}
     </footer>
   );
 }
 
 /* Encabezado público: el logo al medio y debajo las pestañas Torneos · Complejos · Entrenamientos
-   junto al acceso de organizadores (solo el ícono, para que entre todo en una fila) */
-function SiteHeader({ tab, onTab, onGoLogin }) {
+   (el acceso de organizadores está al pie, en ContactFooter) */
+function SiteHeader({ tab, onTab }) {
   return (
     <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
       <div className="flex items-center justify-center gap-2">
@@ -5207,16 +5215,6 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={onGoLogin}
-          aria-label="Organizadores"
-          title="Acceso de organizadores"
-          className="flex items-center justify-center w-11 h-11 rounded-full shrink-0 transition hover:brightness-125"
-          style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
-        >
-          <PeopleIcon />
-        </button>
       </nav>
     </header>
   );
@@ -6380,10 +6378,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
+      <SiteHeader tab={tab} onTab={goTab} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
-      <ContactFooter />
+      <ContactFooter onGoLogin={onGoLogin} />
       {registering && (
         <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
       )}
@@ -8319,7 +8317,10 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
 }
 
 function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
-  const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos | reservas (solo si es dueño de un complejo habilitado)
+  // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
+  // Dentro de Torneos: Torneos, Eventos y Circuitos.
+  const [seccion, setSeccion] = useState("torneos"); // perfil | torneos | reservas
+  const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
   const [pedidosPendientes, setPedidosPendientes] = useState(0);
   const complejoIds = complejos.map((c) => c.id).join(",");
@@ -8330,83 +8331,106 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     load();
     const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
     return () => clearInterval(t);
-  }, [complejoIds, organizer.accessToken, tab]);
+  }, [complejoIds, organizer.accessToken, seccion]);
   const [creating, setCreating] = useState(false);
-  const [editingProfile, setEditingProfile] = useState(false);
+  const [perfilGuardado, setPerfilGuardado] = useState(false);
   const [profileName, setProfileName] = useState(organizer.name);
   const [profileLogo, setProfileLogo] = useState(organizer.logoUrl || "");
   const [profileCover, setProfileCover] = useState(organizer.coverUrl || "");
 
   const saveProfile = () => {
     onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
-    setEditingProfile(false);
+    setPerfilGuardado(true);
   };
+  const secciones = [["perfil", "Perfil"], ["torneos", "Torneos"], ...(complejos.length > 0 ? [["reservas", pedidosPendientes > 0 ? `Reservas (${pedidosPendientes})` : "Reservas"]] : [])];
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
   return (
     <div className="px-6 py-8 max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-2">
-        <div className="flex items-center gap-3">
+      <div className="flex justify-between items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           {organizer.logoUrl && <img src={organizer.logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700" />}
           <h1 className="text-xl" style={F.display}>PANEL — {organizer.name.toUpperCase()}</h1>
         </div>
         <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
       </div>
 
-      <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-xs text-teal-400 hover:text-lime-400 mb-6" style={F.body}>
-        {editingProfile ? "Ocultar" : "Editar nombre, logo y portada"}
-      </button>
-
-      {editingProfile && (
-        <div className="border border-teal-800 rounded-lg p-4 mb-6 flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Nombre del organizador</label>
-            <input value={profileName} onChange={(e) => setProfileName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
-          </div>
-          <div className="min-w-[220px]">
-            <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={organizer.accessToken} folder="logos" />
-          </div>
-          <div className="min-w-[220px]">
-            <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={setProfileCover} accessToken={organizer.accessToken} folder="covers" />
-          </div>
-          <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
-            Guardar
-          </button>
-        </div>
-      )}
-
-      <div className="flex gap-2 mb-6 overflow-x-auto">
-        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"], ...(complejos.length > 0 ? [["reservas", pedidosPendientes > 0 ? `Reservas (${pedidosPendientes})` : "Reservas"]] : [])].map(([key, label]) => (
+      <nav className="grid gap-1 p-1 rounded-full mt-4 mb-6" style={{ gridTemplateColumns: `repeat(${secciones.length}, minmax(0, 1fr))`, border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }} aria-label="Secciones del panel">
+        {secciones.map(([key, label]) => (
           <button
             key={key}
-            onClick={() => setTab(key)}
-            className={`shrink-0 px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
+            type="button"
+            onClick={() => { setSeccion(key); setPerfilGuardado(false); }}
+            aria-current={seccion === key ? "page" : undefined}
+            className="py-2 px-1 rounded-full text-sm font-semibold truncate transition"
+            style={seccion === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f" } : { ...F.body, color: "#cbd5e1" }}
           >
             {label}
           </button>
         ))}
-      </div>
+      </nav>
 
-      {tab === "reservas" && complejos.length > 0 ? (
+      {seccion === "perfil" ? (
+        <div className="space-y-6" style={F.body}>
+          <div className="border border-teal-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">Datos del organizador</h2>
+            <div>
+              <label className="block text-xs text-teal-400 mb-1" htmlFor="perfil-nombre">Nombre</label>
+              <input id="perfil-nombre" value={profileName} onChange={(e) => { setProfileName(e.target.value); setPerfilGuardado(false); }} className="w-full max-w-sm px-3 py-2 rounded border outline-none focus:border-lime-400" style={adminInput} />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ImageUploadField label="Logo" value={profileLogo} onChange={(v) => { setProfileLogo(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="logos" />
+              <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={(v) => { setProfileCover(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="covers" />
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+              {perfilGuardado && <span className="text-sm text-lime-400">Guardado ✓</span>}
+            </div>
+          </div>
+          {complejos.map((c) => (
+            <div key={c.id} className="border border-teal-800 rounded-lg p-4">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Colaboradores{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
+              <ColaboradoresConfig complejoId={c.id} accessToken={organizer.accessToken} />
+            </div>
+          ))}
+        </div>
+      ) : seccion === "reservas" && complejos.length > 0 ? (
         <ReservasPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} />
-      ) : tab === "eventos" ? (
-        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
-      ) : tab === "circuitos" ? (
-        <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
       ) : (
         <>
-          <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
-            + Crear torneo
-          </button>
-          {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
-
-          <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
-          <div className="space-y-2">
-            {tournaments.map((t) => (
-              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} />
+          <div className="flex gap-2 mb-6 overflow-x-auto">
+            {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={`shrink-0 px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+                style={F.body}
+              >
+                {label}
+              </button>
             ))}
-            {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
           </div>
+
+          {tab === "eventos" ? (
+            <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
+          ) : tab === "circuitos" ? (
+            <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
+          ) : (
+            <>
+              <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+                + Crear torneo
+              </button>
+              {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
+
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
+              <div className="space-y-2">
+                {tournaments.map((t) => (
+                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} />
+                ))}
+                {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
@@ -8424,7 +8448,7 @@ const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(ha
 function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
   const dueno = rol === "dueno";
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [view, setView] = useState("agenda"); // agenda | canchas | colaboradores (estas dos, solo el dueño)
+  const [view, setView] = useState("agenda"); // agenda | canchas (solo el dueño)
   const [canchas, setCanchas] = useState(null);
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
@@ -8457,13 +8481,10 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
         <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
         {tab("agenda", "Agenda")}
         {dueno && tab("canchas", "Canchas y precios")}
-        {dueno && tab("colaboradores", "Colaboradores")}
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
       {canchas === null ? (
         !error && <p className="text-sm opacity-60">Cargando…</p>
-      ) : dueno && view === "colaboradores" ? (
-        <ColaboradoresConfig complejoId={complejoId} accessToken={accessToken} />
       ) : !dueno && activas.length === 0 ? (
         <p className="text-sm text-teal-300">El complejo todavía no cargó sus canchas.</p>
       ) : view === "canchas" || activas.length === 0 ? (
@@ -10851,6 +10872,12 @@ function SmashPointAppInner() {
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
   const [route, setRoute] = useState(() => (window.location.hash === "#complejo" ? "colaborador" : "public-home"));
+  // El link "Empleados de complejos" del pie lleva a #complejo: abre el panel del colaborador
+  useEffect(() => {
+    const onHash = () => { if (window.location.hash === "#complejo") { setRoute("colaborador"); window.scrollTo(0, 0); } };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
   const [saveNotice, setSaveNotice] = useState(null);
@@ -11371,7 +11398,7 @@ function SmashPointAppInner() {
         // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
           <AdBanner ads={ads} />
-          <ContactFooter />
+          <ContactFooter onGoLogin={() => setRoute("login")} />
         </div>
       )}
       {/* Aviso de guardado: choque con otra persona o falta de conexión */}
