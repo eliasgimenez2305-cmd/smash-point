@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina } from "./reservas.js";
+import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
 
 const cancha1 = { id: "c1", apertura: "14:00:00", cierre: "22:00:00", precio_60: 10000, precio_90: 14000, precio_120: null };
 const nocturna = { id: "c2", apertura: "18:00", cierre: "01:00", precio_90: 15000 };
@@ -90,6 +90,13 @@ test("períodos de la caja", () => {
   assert.deepEqual(rangoPeriodo("mes", "2026-10-14"), { desde: "2026-10-01", hasta: "2026-10-31" });
   assert.deepEqual(rangoPeriodo("mes", "2026-02-10"), { desde: "2026-02-01", hasta: "2026-02-28" });
   assert.equal(fechaArgentina("2026-10-15T02:00:00Z"), "2026-10-14");
+});
+
+test("meses de la caja de la plataforma", () => {
+  assert.equal(sumarMeses("2026-12", 1), "2027-01");
+  assert.equal(sumarMeses("2026-01", -1), "2025-12");
+  assert.equal(sumarMeses("2026-10", 0), "2026-10");
+  assert.equal(etiquetaMes("2026-10"), "Octubre 2026");
 });
 
 test("precios escritos a mano", () => {

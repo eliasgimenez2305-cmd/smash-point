@@ -148,6 +148,19 @@ export function rangoPeriodo(tipo, hoy) {
   return { desde, hasta: sumarDias(siguiente.toISOString().slice(0, 10), -1) };
 }
 
+/* Meses "AAAA-MM": sumarMeses("2026-12", 1) → "2027-01" */
+export function sumarMeses(periodo, n) {
+  const [a, m] = periodo.split("-").map(Number);
+  const total = a * 12 + (m - 1) + n;
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
+}
+
+const MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+/* "2026-10" → "Octubre 2026" */
+export function etiquetaMes(periodo) {
+  return `${MESES[Number(periodo.slice(5, 7)) - 1]} ${periodo.slice(0, 4)}`;
+}
+
 /* Fecha (día de Argentina) de un instante guardado: "2026-10-15T02:00:00Z" → "2026-10-14" */
 export function fechaArgentina(iso) {
   return hoyArgentina(new Date(iso));

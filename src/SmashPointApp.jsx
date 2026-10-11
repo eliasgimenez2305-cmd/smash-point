@@ -8,7 +8,7 @@ import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -7873,7 +7873,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
       </div>
 
       <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
+        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["caja", "Caja"], ["respaldo", "Respaldo"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -7885,7 +7885,9 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
         ))}
       </div>
 
-      {tab === "publicidad" ? (
+      {tab === "caja" ? (
+        <CajaPlataforma accessToken={creator.accessToken} ads={ads} organizers={organizers} coaches={coaches} venues={venues} />
+      ) : tab === "publicidad" ? (
         <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
         <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} events={events} onRestore={onRestoreBackup} />
@@ -11165,7 +11167,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                 {movimientos.map((m) => (
                   <li key={m.key} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
-                    <span className="flex-1 min-w-[10rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
+                    <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
                     <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
                     {m.origen === "manual" && (borrando === m.id ? (
                       <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
@@ -11178,6 +11180,331 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
             )}
             <p className="text-[11px] text-teal-600 mt-2">Las inscripciones se cuentan por el día en que se cobraron; los turnos, por el día del turno (los confirmados con medio de pago registrado).</p>
           </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Caja de la plataforma (ver 20261020_caja_plataforma.sql): solo el creador ---------- */
+
+const TIPOS_CLIENTE = [["publicidad", "Publicidad"], ["organizador", "Organizador"], ["profe", "Profe"], ["complejo", "Complejo"], ["otro", "Otro"]];
+const tipoClienteLabel = (t) => TIPOS_CLIENTE.find(([k]) => k === t)?.[1] || t;
+
+/* Alta y edición de un cliente: se vincula con una publicidad, organizador, profe o complejo de la app */
+function ClienteForm({ inicial, opciones, clientes, onGuardar, onCancelar }) {
+  const [form, setForm] = useState(() => ({
+    tipo: inicial?.tipo || "publicidad", refId: inicial?.ref_id || "", nombre: inicial?.nombre || "",
+    telefono: inicial?.telefono ? formatArPhone(inicial.telefono) : "", cuota: inicial?.cuota_mensual != null ? String(Math.round(inicial.cuota_mensual)) : "",
+    desde: inicial?.desde || hoyArgentina().slice(0, 7), nota: inicial?.nota || "",
+  }));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Lo que ya es cliente no se ofrece de nuevo (salvo el que se está editando)
+  const usados = new Set(clientes.filter((c) => c.id !== inicial?.id && c.ref_id).map((c) => `${c.tipo}|${c.ref_id}`));
+  const lista = (opciones[form.tipo] || []).filter((o) => !usados.has(`${form.tipo}|${o.id}`));
+
+  const vincular = (refId) => {
+    const o = lista.find((x) => x.id === refId);
+    setForm((f) => ({ ...f, refId, nombre: o?.nombre || f.nombre, telefono: o?.telefono ? formatArPhone(o.telefono) : f.telefono }));
+  };
+  const guardar = async () => {
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!form.nombre.trim()) { setError("Poné el nombre."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    setBusy(true); setError("");
+    try {
+      await onGuardar({ tipo: form.tipo, ref_id: form.tipo === "otro" ? null : form.refId || null, nombre: form.nombre.trim(), telefono, cuota_mensual: leerPrecio(form.cuota), desde: form.desde || hoyArgentina().slice(0, 7), nota: form.nota.trim() || null });
+    } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded border text-sm";
+
+  return (
+    <div className="border border-teal-700 rounded-lg p-3 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Tipo</label>
+          <select value={form.tipo} onChange={(e) => setForm((f) => ({ ...f, tipo: e.target.value, refId: "" }))} className={campo} style={adminInput}>
+            {TIPOS_CLIENTE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </div>
+        {form.tipo !== "otro" && (
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">De la app</label>
+            <select value={form.refId} onChange={(e) => vincular(e.target.value)} className={campo} style={adminInput}>
+              <option value="">Elegir…</option>
+              {lista.map((o) => <option key={o.id} value={o.id}>{o.nombre}</option>)}
+            </select>
+          </div>
+        )}
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+          <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cuota mensual (vacío = sin cuota)</label>
+          <input inputMode="numeric" value={form.cuota} onChange={(e) => set("cuota", e.target.value)} placeholder="Ej: 20000" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Paga desde</label>
+          <input type="month" value={form.desde} onChange={(e) => set("desde", e.target.value)} className={campo} style={adminInput} />
+        </div>
+      </div>
+      <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} placeholder="Nota (opcional)" className={campo} style={adminInput} />
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : inicial ? "Guardar cambios" : "Agregar cliente"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], venues = [] }) {
+  const mesHoy = hoyArgentina().slice(0, 7);
+  const [mes, setMes] = useState(mesHoy);
+  const [clientes, setClientes] = useState(null);
+  const [movs, setMovs] = useState(null);
+  const [error, setError] = useState("");
+  const [vista, setVista] = useState("mes"); // mes | clientes
+  const [editando, setEditando] = useState(null); // "nuevo" | cliente
+  const [cobrando, setCobrando] = useState(null); // id de cliente con el formulario de cuota abierto
+  const [cargando, setCargando] = useState(null); // "ingreso" | "gasto" (cobro suelto o gasto)
+  const [form, setForm] = useState({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" });
+  const [busy, setBusy] = useState(false);
+  const [borrando, setBorrando] = useState(null);
+
+  const opciones = {
+    publicidad: ads.map((a) => ({ id: a.id, nombre: a.name })),
+    organizador: organizers.filter((o) => o.role !== "creador").map((o) => ({ id: o.id, nombre: o.name })),
+    profe: coaches.map((c) => ({ id: c.id, nombre: c.brandName ? `${c.name} (${c.brandName})` : c.name, telefono: normalizeArPhone(c.whatsapp) })),
+    complejo: venues.map((v) => ({ id: v.id, nombre: v.name, telefono: normalizeArPhone(v.whatsapp) })),
+  };
+
+  const load = useCallback(async () => {
+    const desde = `${mes}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    try {
+      const [cl, mv] = await Promise.all([
+        supabaseTable("plataforma_clientes?order=nombre.asc", { accessToken }),
+        supabaseTable(`plataforma_movimientos?or=(and(fecha.gte.${desde},fecha.lte.${hasta}),periodo.eq.${mes})&order=fecha.desc,created_at.desc`, { accessToken }),
+      ]);
+      setClientes(cl); setMovs(mv); setError("");
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [mes, accessToken]);
+  useEffect(() => { setMovs(null); load(); }, [load]);
+
+  const enMes = (m) => m.fecha.slice(0, 7) === mes;
+  const delMes = (movs || []).filter(enMes);
+  const suma = (l) => l.reduce((s, m) => s + Number(m.monto), 0);
+  // Cuotas del mes: clientes activos con cuota que ya empezaron a pagar
+  const cuotas = (clientes || []).filter((c) => c.activo && c.cuota_mensual != null && c.desde <= mes).map((c) => {
+    const pagado = suma((movs || []).filter((m) => m.tipo === "ingreso" && m.cliente_id === c.id && m.periodo === mes));
+    return { c, pagado, debe: Math.max(0, Number(c.cuota_mensual) - pagado) };
+  });
+  const ingresos = suma(delMes.filter((m) => m.tipo === "ingreso"));
+  const gastos = suma(delMes.filter((m) => m.tipo === "gasto"));
+  const porCobrar = cuotas.reduce((s, q) => s + q.debe, 0);
+
+  const guardarCliente = async (body) => {
+    if (editando === "nuevo") await supabaseTable("plataforma_clientes", { method: "POST", body, accessToken, prefer: "return=minimal" });
+    else await supabaseTable(`plataforma_clientes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+    setEditando(null);
+    await load();
+  };
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const abrirCuota = (q) => { setCobrando(q.c.id); setCargando(null); setForm({ ...form, monto: String(q.debe), fecha: hoyArgentina(), medio: "transferencia" }); };
+  const cobrarCuota = (q) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    run(async () => {
+      await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=minimal", body: { tipo: "ingreso", cliente_id: q.c.id, periodo: mes, concepto: `Cuota ${etiquetaMes(mes).toLowerCase()} · ${q.c.nombre}`, monto, medio: form.medio, fecha: form.fecha || hoyArgentina() } });
+      setCobrando(null);
+    });
+  };
+  const guardarSuelto = () => {
+    const monto = leerPrecio(form.monto);
+    const cliente = (clientes || []).find((c) => c.id === form.clienteId);
+    const concepto = [form.concepto.trim(), cliente?.nombre].filter(Boolean).join(" · ");
+    if (!concepto) { setError("Poné el concepto."); return; }
+    if (!monto) { setError("Poné el monto."); return; }
+    run(async () => {
+      await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=minimal", body: { tipo: cargando, cliente_id: cargando === "ingreso" ? form.clienteId || null : null, concepto, monto, medio: form.medio, fecha: form.fecha || hoyArgentina() } });
+      setCargando(null);
+    });
+  };
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Concepto", "Mes de cuota", "Medio", "Monto"], ...delMes.map((m) => [m.fecha, m.tipo === "gasto" ? "Gasto" : "Ingreso", m.concepto, m.periodo || "", medioCobroLabel(m.medio), String(m.tipo === "gasto" ? -m.monto : m.monto).replace(".", ",")])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-smash-point-${mes}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const medios = (
+    <div className="flex flex-wrap gap-2">
+      {MEDIOS_COBRO.map(([m, l]) => (
+        <button key={m} type="button" onClick={() => setForm((f) => ({ ...f, medio: m }))} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+      ))}
+    </div>
+  );
+  const tarjeta = (label, valor, color) => (
+    <div className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+      <p className="text-[11px] uppercase text-teal-400">{label}</p>
+      <p className="text-base font-semibold" style={{ color }}>{conSigno(valor)}</p>
+    </div>
+  );
+  const pill = (key, label) => (
+    <button type="button" onClick={() => setVista(key)} className={`px-3 py-1.5 rounded-full text-sm border ${vista === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap gap-2">{pill("mes", "Caja del mes")}{pill("clientes", `Clientes${clientes ? ` (${clientes.length})` : ""}`)}</div>
+      {error && <p className="text-red-400">{error}</p>}
+
+      {vista === "clientes" ? (
+        <div className="space-y-3">
+          {editando ? (
+            <ClienteForm inicial={editando === "nuevo" ? null : editando} opciones={opciones} clientes={clientes || []} onGuardar={guardarCliente} onCancelar={() => setEditando(null)} />
+          ) : (
+            <button type="button" onClick={() => setEditando("nuevo")} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cliente</button>
+          )}
+          {clientes === null ? <p className="opacity-60">Cargando…</p> : clientes.length === 0 ? <p className="text-teal-400">Todavía no cargaste clientes.</p> : (
+            <ul className="space-y-2">
+              {clientes.map((c) => (
+                <li key={c.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-2 ${c.activo ? "" : "opacity-60"}`}>
+                  <div className="flex-1 min-w-[12rem]">
+                    <p className="text-teal-100 font-semibold">{c.nombre} <span className="text-xs font-normal text-teal-500">· {tipoClienteLabel(c.tipo)}</span></p>
+                    <p className="text-xs text-teal-400">{c.cuota_mensual != null ? `${formatoPrecio(c.cuota_mensual)} por mes desde ${etiquetaMes(c.desde).toLowerCase()}` : "Sin cuota (cobros sueltos)"}{!c.activo && " · dado de baja"}{c.nota && ` · ${c.nota}`}</p>
+                  </div>
+                  <button type="button" onClick={() => run(() => supabaseTable(`plataforma_clientes?id=eq.${c.id}`, { method: "PATCH", body: { activo: !c.activo }, accessToken, prefer: "return=minimal" }))} className="text-xs text-teal-300 underline">{c.activo ? "Dar de baja" : "Reactivar"}</button>
+                  <button type="button" onClick={() => setEditando(c)} className="text-xs text-lime-400">Editar</button>
+                  {borrando === c.id ? (
+                    <span className="text-xs text-red-300">¿Borrar? (lo cobrado queda) <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`plataforma_clientes?id=eq.${c.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); setBorrando(null); })} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                  ) : (
+                    <button type="button" onClick={() => setBorrando(c.id)} className="text-xs text-red-400" aria-label="Borrar cliente">🗑</button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+            <span className="font-semibold text-teal-100">{etiquetaMes(mes)}</span>
+            <button type="button" onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes siguiente">›</button>
+            {mes !== mesHoy && <button type="button" onClick={() => setMes(mesHoy)} className="text-xs text-lime-400">Este mes</button>}
+          </div>
+          {movs === null || clientes === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {tarjeta("Cobrado", ingresos, BRAND.lime)}
+                {tarjeta("Por cobrar", porCobrar, "#fbbf24")}
+                {tarjeta("Gastos", gastos, "#f87171")}
+                {tarjeta("Resultado", ingresos - gastos, ingresos - gastos < 0 ? "#f87171" : BRAND.cyan)}
+              </div>
+
+              <div>
+                <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Cuotas de {etiquetaMes(mes).toLowerCase()}</p>
+                {cuotas.length === 0 ? (
+                  <p className="text-teal-400">No hay clientes con cuota este mes. Cargalos en "Clientes".</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {cuotas.map((q) => (
+                      <li key={q.c.id} className="rounded-lg border border-teal-900 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex-1 min-w-[10rem]">
+                            <p className="text-teal-100 font-semibold">{q.c.nombre}</p>
+                            <p className="text-xs text-teal-500">{tipoClienteLabel(q.c.tipo)} · {formatoPrecio(q.c.cuota_mensual)}</p>
+                          </div>
+                          <span className="text-xs font-semibold" style={{ color: q.debe === 0 ? BRAND.lime : q.pagado > 0 ? "#fbbf24" : "#f87171" }}>● {q.debe === 0 ? "Pagó" : `Debe ${formatoPrecio(q.debe)}`}</span>
+                          {q.debe > 0 && cobrando !== q.c.id && <button type="button" onClick={() => abrirCuota(q)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>}
+                        </div>
+                        {q.debe > 0 && q.c.telefono && cobrando !== q.c.id && (
+                          <a href={waLink(q.c.telefono, `Hola ${q.c.nombre}, te recordamos la cuota de Smash Point de ${etiquetaMes(mes).toLowerCase()}: ${formatoPrecio(q.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
+                        )}
+                        {cobrando === q.c.id && (
+                          <div className="mt-3 space-y-2">
+                            <div className="flex flex-wrap gap-2">
+                              <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                              <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha de cobro" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                            </div>
+                            {medios}
+                            <div className="flex gap-3 items-center">
+                              <button type="button" disabled={busy} onClick={() => cobrarCuota(q)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar cobro</button>
+                              <button type="button" onClick={() => setCobrando(null)} className="text-teal-400">Cancelar</button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => { setCargando("ingreso"); setCobrando(null); setForm({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">+ Cobro suelto</button>
+                <button type="button" onClick={() => { setCargando("gasto"); setCobrando(null); setForm({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" }); }} className="px-4 py-2 rounded-lg border border-red-400 text-red-300 font-semibold">+ Gasto</button>
+                {delMes.length > 0 && <button type="button" onClick={descargar} className="px-3 py-2 text-teal-300 underline">Descargar planilla</button>}
+              </div>
+              {cargando && (
+                <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+                  <p className="font-semibold text-teal-100">{cargando === "gasto" ? "Nuevo gasto" : "Cobro suelto"}</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder={cargando === "gasto" ? "Ej: dominio, hosting, mails" : "Ej: publicidad 3 meses, torneo especial"} aria-label="Concepto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    {cargando === "ingreso" && (
+                      <select value={form.clienteId} onChange={(e) => setForm({ ...form, clienteId: e.target.value })} aria-label="Cliente" className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                        <option value="">Sin cliente</option>
+                        {(clientes || []).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                      </select>
+                    )}
+                  </div>
+                  {medios}
+                  <div className="flex gap-3 items-center">
+                    <button type="button" disabled={busy} onClick={guardarSuelto} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+                    <button type="button" onClick={() => setCargando(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Movimientos de {etiquetaMes(mes).toLowerCase()} ({delMes.length})</p>
+                {delMes.length === 0 ? <p className="text-teal-400">No hay movimientos este mes.</p> : (
+                  <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                    {delMes.map((m) => (
+                      <li key={m.id} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                        <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{medioCobroLabel(m.medio)}{m.periodo && m.periodo !== mes && ` · cuota de ${etiquetaMes(m.periodo).toLowerCase()}`}</span></span>
+                        <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
+                        {borrando === m.id ? (
+                          <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`plataforma_movimientos?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); setBorrando(null); })} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                        ) : (
+                          <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-[11px] text-teal-600 mt-2">Lo cobrado y los gastos se cuentan por la fecha del movimiento. "Por cobrar" son las cuotas del mes que faltan, aunque se paguen otro mes.</p>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
