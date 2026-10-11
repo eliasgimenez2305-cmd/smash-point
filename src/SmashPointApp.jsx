@@ -5724,14 +5724,14 @@ function BuscadorTurnos({ venues, complejos, onElegir }) {
         ))}
       </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        <select value={hora} onChange={(e) => setHora(e.target.value)} className="px-3 py-2 rounded-lg border text-sm" style={adminInput} aria-label="Desde qué hora">
+        <select value={hora} onChange={(e) => setHora(e.target.value)} className={`px-3 py-1.5 rounded-full border text-sm outline-none focus:border-lime-400 ${hora ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`} style={{ ...F.body, backgroundColor: "rgba(8,18,24,0.7)", colorScheme: "dark" }} aria-label="Desde qué hora">
           <option value="">Cualquier hora</option>
           {Array.from({ length: 17 }, (_, i) => (i + 7) * 60).map((m) => <option key={m} value={m}>Desde las {etiquetaHora(m)}</option>)}
         </select>
         {duraciones.length > 1 && (
-          <div className="flex gap-1 p-1 rounded-lg border border-teal-800">
+          <div className="flex gap-1 p-1 rounded-full border border-teal-800" style={{ backgroundColor: "rgba(8,18,24,0.7)" }}>
             {duraciones.map((d) => (
-              <button key={d} type="button" onClick={() => setDuracion(d)} className={`px-3 py-1 rounded-md text-sm ${duracion === d ? "text-[#14181f] font-semibold" : "text-teal-300"}`} style={duracion === d ? { backgroundColor: BRAND.lime } : undefined}>{d} min</button>
+              <button key={d} type="button" onClick={() => setDuracion(d)} className={`px-3 py-0.5 rounded-full text-sm ${duracion === d ? "text-[#14181f] font-semibold" : "text-teal-300"}`} style={duracion === d ? { backgroundColor: BRAND.lime } : undefined}>{d} min</button>
             ))}
           </div>
         )}
