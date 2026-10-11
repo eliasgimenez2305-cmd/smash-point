@@ -7757,7 +7757,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
   );
 }
 
-function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, pendingCount = 0 }) {
+function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, pendingCount = 0, puedeEditar = true, puedeBorrar = true }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(t.name);
   const [date, setDate] = useState(t.date);
@@ -7873,11 +7873,11 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
           className="px-4 py-2 rounded font-semibold text-sm"
           style={{ backgroundColor: "#9fe022", color: "#14181f" }}
         >
-          Cargar parejas y grupos →
+          {puedeEditar ? "Cargar parejas y grupos →" : "Cargar resultados →"}
         </button>
         <div className="flex gap-3 items-center">
-          <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>
-          {!confirmingDelete ? (
+          {puedeEditar && <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>}
+          {!puedeBorrar ? null : !confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
             <span className="text-sm">
@@ -8319,7 +8319,12 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
 function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
-  const [seccion, setSeccion] = useState("torneos"); // perfil | torneos | reservas
+  // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
+  const colaborador = organizer.role === "colaborador";
+  const permisos = colaborador ? organizer.permisos : { agenda: true, resultados: true, torneos: true, canchas: true };
+  const verTorneos = permisos.resultados || permisos.torneos;
+  const verReservas = complejos.length > 0 && (permisos.agenda || permisos.canchas);
+  const [seccion, setSeccion] = useState(verTorneos ? "torneos" : "reservas"); // perfil | torneos | reservas
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
   const [pedidosPendientes, setPedidosPendientes] = useState(0);
@@ -8342,7 +8347,11 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
     setPerfilGuardado(true);
   };
-  const secciones = [["perfil", "Perfil"], ["torneos", "Torneos"], ...(complejos.length > 0 ? [["reservas", pedidosPendientes > 0 ? `Reservas (${pedidosPendientes})` : "Reservas"]] : [])];
+  const secciones = [
+    ...(colaborador ? [] : [["perfil", "Perfil"]]),
+    ...(verTorneos ? [["torneos", "Torneos"]] : []),
+    ...(verReservas ? [["reservas", pedidosPendientes > 0 && permisos.agenda ? `Reservas (${pedidosPendientes})` : "Reservas"]] : []),
+  ];
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
   return (
@@ -8350,7 +8359,10 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       <div className="flex justify-between items-center gap-3">
         <div className="flex items-center gap-3 min-w-0">
           {organizer.logoUrl && <img src={organizer.logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700" />}
-          <h1 className="text-xl" style={F.display}>PANEL — {organizer.name.toUpperCase()}</h1>
+          <div className="min-w-0">
+            <h1 className="text-xl" style={F.display}>PANEL — {organizer.name.toUpperCase()}</h1>
+            {colaborador && <p className="text-xs text-teal-500 break-all" style={F.body}>Colaborador: {organizer.email}</p>}
+          </div>
         </div>
         <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
       </div>
@@ -8370,7 +8382,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
         ))}
       </nav>
 
-      {seccion === "perfil" ? (
+      {seccion === "perfil" && !colaborador ? (
         <div className="space-y-6" style={F.body}>
           <div className="border border-teal-800 rounded-lg p-4 space-y-3">
             <h2 className="text-sm uppercase tracking-wide text-teal-400">Datos del organizador</h2>
@@ -8394,12 +8406,14 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
             </div>
           ))}
         </div>
-      ) : seccion === "reservas" && complejos.length > 0 ? (
-        <ReservasPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} />
+      ) : (seccion === "reservas" || !verTorneos) && verReservas ? (
+        <ReservasPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} rol={colaborador ? "colaborador" : "dueno"} permisos={permisos} />
+      ) : !verTorneos ? (
+        <p className="text-sm text-teal-300" style={F.body}>El dueño todavía no te dio permisos. Pedile que te habilite lo que necesitás.</p>
       ) : (
         <>
           <div className="flex gap-2 mb-6 overflow-x-auto">
-            {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
+            {(permisos.torneos ? [["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]] : [["torneos", "Torneos"]]).map(([key, label]) => (
               <button
                 key={key}
                 onClick={() => setTab(key)}
@@ -8411,23 +8425,25 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
             ))}
           </div>
 
-          {tab === "eventos" ? (
+          {tab === "eventos" && permisos.torneos ? (
             <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
-          ) : tab === "circuitos" ? (
+          ) : tab === "circuitos" && permisos.torneos ? (
             <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
           ) : (
             <>
-              <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
-                + Crear torneo
-              </button>
+              {permisos.torneos && (
+                <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+                  + Crear torneo
+                </button>
+              )}
               {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
 
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
               <div className="space-y-2">
                 {tournaments.map((t) => (
-                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} />
+                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
                 ))}
-                {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
+                {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>{colaborador ? "Todavía no hay torneos." : "Todavía no creaste torneos."}</p>}
               </div>
             </>
           )}
@@ -8445,10 +8461,12 @@ const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
 const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
 
 /* Pestaña "Reservas" del organizador que es dueño de un complejo: la agenda del día y sus canchas */
-function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
+function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos = { agenda: true, canchas: true } }) {
   const dueno = rol === "dueno";
+  const verAgenda = dueno || permisos.agenda;
+  const verCanchas = dueno || permisos.canchas;
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [view, setView] = useState("agenda"); // agenda | canchas (solo el dueño)
+  const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | canchas
   const [canchas, setCanchas] = useState(null);
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
@@ -8479,18 +8497,18 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
       )}
       <div className="flex flex-wrap items-center gap-2 mb-5">
         <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
-        {tab("agenda", "Agenda")}
-        {dueno && tab("canchas", "Canchas y precios")}
+        {verAgenda && tab("agenda", "Agenda")}
+        {verCanchas && tab("canchas", "Canchas y precios")}
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
       {canchas === null ? (
         !error && <p className="text-sm opacity-60">Cargando…</p>
-      ) : !dueno && activas.length === 0 ? (
+      ) : !verCanchas && activas.length === 0 ? (
         <p className="text-sm text-teal-300">El complejo todavía no cargó sus canchas.</p>
-      ) : view === "canchas" || activas.length === 0 ? (
+      ) : (view === "canchas" && verCanchas) || activas.length === 0 ? (
         <>
           {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
-          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} />
+          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
         </>
       ) : (
         <>
@@ -8502,8 +8520,16 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno" }) {
   );
 }
 
-/* Colaboradores del complejo (empleados): el dueño agrega su mail y ellos entran con un código
-   que les llega a ese mail. Manejan la agenda; canchas, precios y colaboradores son del dueño. */
+/* Permisos que el dueño le da a cada colaborador (ver 20261017_colaboradores_permisos.sql) */
+const PERMISOS_COLABORADOR = [
+  ["p_agenda", "Agenda de reservas", "Cargar, confirmar y cancelar turnos, bloquear horarios, \"no vino\" y cobros."],
+  ["p_resultados", "Cargar resultados", "Resultados, W.O. y partidos en curso de tus torneos, sin cambiar su armado."],
+  ["p_torneos", "Gestionar torneos", "Crear y editar torneos, eventos y circuitos, grupos, llaves, horarios e inscripciones."],
+  ["p_canchas", "Canchas y precios", "Horarios y precios de las canchas, y si reciben reservas online."],
+];
+
+/* Colaboradores del complejo (empleados): el dueño agrega su mail y elige qué puede hacer cada uno.
+   Ellos entran con un código que les llega a ese mail. */
 function ColaboradoresConfig({ complejoId, accessToken }) {
   const [lista, setLista] = useState(null);
   const [form, setForm] = useState({ email: "", nombre: "" });
@@ -8539,12 +8565,18 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
     finally { setBusy(false); }
   };
   const entrada = `${window.location.origin}${window.location.pathname}#complejo`;
+  const cambiarPermiso = async (c, campo, valor) => {
+    setLista((l) => l.map((x) => (x.email === c.email ? { ...x, [campo]: valor } : x)));
+    try {
+      await supabaseTable(`${base}&email=eq.${encodeURIComponent(c.email)}`, { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
+    } catch (e) { setError(reservaErrorText(e)); load(); }
+  };
 
   return (
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
         Tus empleados entran desde <span className="text-teal-100 break-all">{entrada}</span> con el mail que cargues acá: les llega un código, sin contraseña.
-        Manejan la agenda igual que vos: cargan, confirman y cancelan turnos, bloquean horarios, marcan "no vino" y registran cobros. No cambian canchas, horarios ni precios, ni ven esta lista, ni bloquean jugadores.
+        A cada uno le elegís qué puede hacer. Siempre quedan para vos: borrar torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
@@ -8565,15 +8597,30 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
       ) : (
         <ul className="space-y-2">
           {lista.map((c) => (
-            <li key={c.email} className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-2">
-              <div className="flex-1 min-w-[12rem]">
-                <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
-                {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+            <li key={c.email} className="border border-teal-800 rounded-lg p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex-1 min-w-[12rem]">
+                  <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
+                  {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+                </div>
+                {quitando === c.email ? (
+                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
+                ) : (
+                  <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+                )}
               </div>
-              {quitando === c.email ? (
-                <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
-              ) : (
-                <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+              {c.p_agenda !== undefined && (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {PERMISOS_COLABORADOR.map(([campo, titulo, ayuda]) => (
+                    <label key={campo} className="flex items-start gap-2 cursor-pointer">
+                      <input type="checkbox" className="mt-1" checked={!!c[campo]} onChange={(e) => cambiarPermiso(c, campo, e.target.checked)} />
+                      <span>
+                        <span className="text-teal-100">{titulo}</span>
+                        <span className="block text-xs text-teal-500">{ayuda}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
               )}
             </li>
           ))}
@@ -8583,32 +8630,29 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
   );
 }
 
-/* Panel del colaborador (empleado de un complejo): entra con el código por mail y ve la agenda de
-   los complejos donde lo agregaron. Se llega con #complejo en la dirección. */
-function ColaboradorHome({ jugadorApi, venues, onBack }) {
+/* Entrada del colaborador (empleado de un complejo): entra con el código por mail y, si está
+   habilitado en un complejo, pasa al panel con lo que el dueño le permitió (onEntrar). Si trabaja en
+   más de un complejo, elige cuál. Se llega con #complejo en la dirección. */
+function ColaboradorHome({ jugadorApi, venues, onBack, onEntrar }) {
   const { jugador } = jugadorApi;
   const [complejos, setComplejos] = useState(null);
   const [error, setError] = useState("");
   const [entrando, setEntrando] = useState(false);
   const jugadorId = jugador?.id;
   const { token } = jugadorApi;
+  const nombre = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
 
   useEffect(() => {
     if (!jugadorId) { setComplejos(null); return; }
     (async () => {
       try {
-        const ids = await supabaseRpc("mis_complejos_colaborador", {}, await token());
-        setComplejos((ids || []).map((id) => ({ id })));
+        const rows = (await supabaseRpc("mis_complejos_colaborador", {}, await token())) || [];
+        setComplejos(rows);
         setError("");
+        if (rows.length === 1) onEntrar(rows[0]); // trabaja en un solo complejo: directo a su panel
       } catch { setError("No se pudo cargar tu panel. Revisá la conexión."); }
     })();
-  }, [jugadorId, token]);
-  // La sesión vence a la hora: se renueva sola mientras el panel está abierto
-  useEffect(() => {
-    if (!jugadorId) return;
-    const t = setInterval(() => { token().catch(() => {}); }, 5 * 60000);
-    return () => clearInterval(t);
-  }, [jugadorId, token]);
+  }, [jugadorId, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="px-6 py-8 max-w-3xl mx-auto" style={F.body}>
@@ -8631,8 +8675,13 @@ function ColaboradorHome({ jugadorApi, venues, onBack }) {
         <p className="text-sm text-teal-300">Tu mail (<span className="text-teal-100">{jugador.email}</span>) no está habilitado en ningún complejo. Pedile al dueño que te agregue como colaborador.</p>
       ) : (
         <>
-          <p className="text-xs text-teal-500 mb-4">Entraste como {jugador.email}</p>
-          <ReservasPanel complejos={complejos} venues={venues} accessToken={jugador.accessToken} rol="colaborador" />
+          <p className="text-sm text-teal-300 mb-3">Elegí el complejo:</p>
+          <div className="space-y-2">
+            {complejos.map((c) => (
+              <button key={c.complejo_id} type="button" onClick={() => onEntrar(c)} className="w-full text-left px-4 py-3 rounded-lg font-semibold border border-teal-700 text-teal-100 hover:border-lime-400">{nombre(c.complejo_id)}</button>
+            ))}
+          </div>
+          <p className="text-xs text-teal-500 mt-4">Entraste como {jugador.email}</p>
         </>
       )}
       {entrando && <LoginJugadorModal jugadorApi={jugadorApi} conPerfil={false} titulo="Entrar al panel del complejo" onClose={() => setEntrando(false)} onDone={() => setEntrando(false)} />}
@@ -8641,11 +8690,11 @@ function ColaboradorHome({ jugadorApi, venues, onBack }) {
 }
 
 /* Canchas del complejo: nombre, horario, precio de cada duración y si recibe reservas online */
-function CanchasConfig({ complejoId, canchas, accessToken, onChanged }) {
+function CanchasConfig({ complejoId, canchas, accessToken, onChanged, puedeBorrar = true }) {
   const [adding, setAdding] = useState(false);
   return (
     <div className="space-y-3">
-      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} />)}
+      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
       {adding
         ? <CanchaForm initial={null} complejoId={complejoId} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
         : <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cancha</button>}
@@ -8653,7 +8702,7 @@ function CanchasConfig({ complejoId, canchas, accessToken, onChanged }) {
   );
 }
 
-function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel }) {
+function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
   const toForm = (c) => ({
     nombre: c?.nombre || `Cancha ${orden + 1}`,
     apertura: c ? etiquetaHora(horarioCancha(c).desde) : "14:00",
@@ -8756,7 +8805,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
       <div className="flex flex-wrap gap-3 items-center">
         <button type="button" disabled={busy} onClick={save} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{initial ? "Guardar cambios" : "Agregar cancha"}</button>
         <button type="button" disabled={busy} onClick={() => { setError(""); if (initial) setEditing(false); else onCancel(); }} className="text-sm text-teal-400">Cancelar</button>
-        {initial && (confirmDelete
+        {initial && puedeBorrar && (confirmDelete
           ? <span className="text-sm text-red-300 ml-auto">¿Borrar la cancha? <button type="button" disabled={busy} onClick={remove} className="font-semibold text-red-400 ml-1">Sí, borrar</button> <button type="button" onClick={() => setConfirmDelete(false)} className="text-teal-400 ml-2">No</button></span>
           : <button type="button" onClick={() => setConfirmDelete(true)} className="text-sm text-red-400 ml-auto">Borrar</button>)}
       </div>
@@ -10477,7 +10526,7 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
   );
 }
 
-function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion }) {
+function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
@@ -10485,9 +10534,11 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
   const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
   // Pestañas en el orden en que se organiza un torneo. El Súper 8 no tiene grupos, llave ni grilla
   // de horarios: sus partidos van en "Partidos".
-  const tabs = usesSchedule
+  // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
+  const allTabs = usesSchedule
     ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"]]
     : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"]];
+  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
@@ -10496,7 +10547,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
     if (tournament.categories.length === 0 || (usesSchedule && (tournament.playDates || []).length === 0)) return "config";
     return usesSchedule ? "horarios" : "inscripciones";
   });
-  const view = tabs.some(([key]) => key === chosenView) ? chosenView : "config";
+  const view = tabs.some(([key]) => key === chosenView) ? chosenView : tabs[0][0];
   // Avance y avisos para la tira de resumen y las marcas ✓ / ⚠ de las pestañas
   const alertsCount = useMemo(() => (usesSchedule ? scheduleAlerts(tournament, collectScheduleableMatches(tournament)).alerts.length : 0), [tournament, usesSchedule]);
   const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
@@ -11018,7 +11069,7 @@ function SmashPointAppInner() {
   // Recuerda en qué pantalla del panel estaba, para volver ahí al recargar
   useEffect(() => {
     const current = readStoredAuth();
-    if (session && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
+    if (session && session.role !== "colaborador" && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
   }, [session, route, selectedId]);
 
   const startSession = (org) => {
@@ -11027,10 +11078,53 @@ function SmashPointAppInner() {
     setRoute(org.role === "creador" ? "creator-home" : "admin-home");
   };
   const endSession = () => {
+    if (session?.role === "colaborador") {
+      // El colaborador entra con el código de jugador: se cierra esa sesión y vuelve a su entrada
+      jugadorApi.logout();
+      setSession(null);
+      setRoute("colaborador");
+      return;
+    }
     writeStoredAuth(null);
     setSession(null);
     setRoute("public-home");
   };
+
+  /* Colaborador de un complejo: trabaja en el panel en nombre del dueño (session.id es el del dueño,
+     así ve y crea los torneos a su nombre) con su propio token y sus permisos; la base controla qué
+     puede hacer (ver 20261017_colaboradores_permisos.sql). La sesión es la del código por mail
+     (useJugador): no usa la renovación de los organizadores (sin expiresAt ni refreshToken). */
+  const entrarComoColaborador = (c) => {
+    const j = jugadorApi.jugador;
+    if (!j) return;
+    const owner = organizers.find((o) => o.id === c.dueno_id);
+    setSession({
+      id: c.dueno_id,
+      name: owner?.name || venues.find((v) => v.id === c.complejo_id)?.name || "Complejo",
+      logoUrl: owner?.logoUrl || "",
+      coverUrl: owner?.coverUrl || "",
+      role: "colaborador",
+      accessToken: j.accessToken,
+      email: j.email,
+      complejoId: c.complejo_id,
+      permisos: { agenda: c.p_agenda, resultados: c.p_resultados, torneos: c.p_torneos, canchas: c.p_canchas },
+    });
+    setRoute("admin-home");
+  };
+  // El token del colaborador se renueva con el del jugador; si cierra esa sesión, sale del panel
+  useEffect(() => {
+    if (session?.role !== "colaborador") return;
+    const j = jugadorApi.jugador;
+    if (!j) { setSession(null); setRoute("colaborador"); return; }
+    if (j.accessToken !== session.accessToken) setSession((cur) => (cur ? { ...cur, accessToken: j.accessToken } : cur));
+  }, [jugadorApi.jugador, session]);
+  useEffect(() => {
+    if (session?.role !== "colaborador") return;
+    const t = setInterval(() => { jugadorApi.token().catch(() => {}); }, 5 * 60000);
+    const onVisible = () => { if (document.visibilityState === "visible") jugadorApi.token().catch(() => {}); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session?.role, jugadorApi]);
 
   const persistAds = useCallback(async (next) => {
     setAds(next);
@@ -11320,7 +11414,7 @@ function SmashPointAppInner() {
   } else if (route === "login") {
     content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} onColaborador={() => { window.location.hash = "complejo"; setRoute("colaborador"); }} />;
   } else if (route === "colaborador") {
-    content = <ColaboradorHome jugadorApi={jugadorApi} venues={venues} onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute("public-home"); }} />;
+    content = <ColaboradorHome jugadorApi={jugadorApi} venues={venues} onEntrar={entrarComoColaborador} onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute("public-home"); }} />;
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
@@ -11370,7 +11464,7 @@ function SmashPointAppInner() {
         events={events.filter((e) => e.organizerId === session.id)}
         onSaveEvent={saveEvent}
         onDeleteEvent={deleteEvent}
-        complejos={complejos.filter((c) => c.dueno_id === session.id && c.reservas_habilitadas)}
+        complejos={complejos.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id))}
         venues={venues}
       />
     );
@@ -11384,6 +11478,7 @@ function SmashPointAppInner() {
         onBack={() => setRoute("admin-home")}
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
+        soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
       />
     );
   } else {
