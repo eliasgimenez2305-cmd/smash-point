@@ -3,7 +3,7 @@ import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
-import { findNameDuplicates, splitPair } from "./names.js";
+import { findNameDuplicates, splitPair, nameMatch } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
@@ -331,7 +331,8 @@ const PEDIDO_ERRORES = {
   no_cancelable: "Esa reserva ya no se puede cancelar.",
   fuera_de_plazo: "Falta menos de 24 h para el turno: para cancelarlo, escribile al complejo.",
 };
-const pedidoErrorText = (e) => PEDIDO_ERRORES[e?.code] || "No se pudo completar. Revisá la conexión y probá de nuevo.";
+const PEDIDO_ERRORES_GENERICO = "No se pudo completar. Revisá la conexión y probá de nuevo.";
+const pedidoErrorText = (e) => PEDIDO_ERRORES[e?.code] || PEDIDO_ERRORES_GENERICO;
 
 /* Sesión del jugador, aparte de la del organizador: se guarda en el navegador para no tener que
    pedir el código cada vez, y se renueva sola antes de vencer */
@@ -10773,7 +10774,7 @@ function jugadoresDePareja(category, pair) {
 
 /* Pestaña "Cobros" de un torneo: quién pagó la inscripción y quién debe, por jugador. La usan el
    organizador y sus colaboradores con acceso a torneos; anular un pago es solo del organizador. */
-function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId, esDueno }) {
+function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId, esDueno, complejoIds = [] }) {
   const [pagos, setPagos] = useState(null);
   const [error, setError] = useState("");
   const [filtro, setFiltro] = useState("todos"); // todos | deben | pagaron
@@ -10782,13 +10783,26 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
   const [busy, setBusy] = useState(false);
   const [anulando, setAnulando] = useState(null);
   const [verHistorial, setVerHistorial] = useState(null);
+  // Cuentas de consumos del complejo y qué jugador está vinculado a cuál (null = no hay o no tiene permiso)
+  const [links, setLinks] = useState(null);
+  const [cuentas, setCuentas] = useState(null);
+  const [vinculando, setVinculando] = useState(null); // clave del jugador con el selector de cuenta abierto
+  const [cobrandoTodo, setCobrandoTodo] = useState(null); // clave del jugador cobrando inscripción + consumos
+  const complejosKey = complejoIds.join(",");
 
   const load = useCallback(async () => {
     try {
       setPagos(await supabaseTable(`pagos_inscripcion?torneo_id=eq.${encodeURIComponent(tournament.id)}&order=created_at.asc`, { accessToken }));
       setError("");
     } catch { setError("No se pudieron cargar los cobros. Revisá la conexión."); }
-  }, [tournament.id, accessToken]);
+    if (!complejosKey) return;
+    const ids = complejosKey.split(",");
+    const [ls, ...cs] = await Promise.all([
+      supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}`, { accessToken }).catch(() => null),
+      ...ids.map((cid) => supabaseRpc("cuentas_con_saldo", { p_complejo: cid }, accessToken).then((r) => (r || []).map((c) => ({ ...c, complejo_id: cid }))).catch(() => null)),
+    ]);
+    if (ls && cs.every(Boolean)) { setLinks(ls); setCuentas(cs.flat()); } else { setLinks(null); setCuentas(null); }
+  }, [tournament.id, accessToken, complejosKey]);
   useEffect(() => { load(); }, [load]);
 
   const clave = (catId, pairId, jugador) => `${catId}|${pairId}|${jugador}`;
@@ -10823,6 +10837,39 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
         body: { torneo_id: tournament.id, organizador_id: organizerId, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, monto, medio: form.medio },
       });
       setCobrando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const vincular = async (f, cuentaId, nuevaNombre = null) => {
+    setBusy(true); setError("");
+    try {
+      let cuenta = cuentas.find((c) => c.id === cuentaId);
+      if (nuevaNombre) {
+        [cuenta] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoIds[0], nombre: nuevaNombre }, accessToken, prefer: "return=representation" });
+      }
+      await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: cuenta.id, complejo_id: cuenta.complejo_id }, accessToken, prefer: "return=minimal" });
+      setVinculando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const desvincular = async (f) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}&categoria_id=eq.${encodeURIComponent(f.c.id)}&pareja_id=eq.${encodeURIComponent(f.pair.id)}&jugador=eq.${f.jugador}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  // Inscripción + consumos de la cuenta en un solo pago (primero la inscripción)
+  const cobrarTodo = async (cuenta) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
+      setCobrandoTodo(null);
       await load();
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
@@ -10889,6 +10936,58 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                     {f.debe > 0 && f.telefono && cobrando !== f.k && (
                       <a href={waLink(f.telefono, `Hola, te recordamos el pago de la inscripción de ${tournament.name} (${c.name}): ${formatoPrecio(f.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
                     )}
+                    {cuentas && links && (() => {
+                      const link = links.find((l) => l.categoria_id === c.id && l.pareja_id === f.pair.id && l.jugador === f.jugador);
+                      const cuenta = link && cuentas.find((x) => x.id === link.cuenta_id);
+                      if (cuenta) {
+                        const consumos = Math.max(0, saldoDe(cuenta));
+                        const todo = totalDe(cuenta);
+                        return (
+                          <div className="mt-2 text-xs">
+                            <p className="text-teal-300">🧾 Cuenta: <span className="text-teal-100">{cuenta.nombre}</span>{consumos > 0 ? <> · consumos <span className="text-amber-300">{formatoPrecio(consumos)}</span></> : " · sin consumos pendientes"} <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline ml-1">desvincular</button></p>
+                            {todo > 0 && cobrandoTodo !== f.k && cobrando !== f.k && (
+                              <button type="button" onClick={() => { setCobrandoTodo(f.k); setCobrando(null); setForm({ monto: String(todo), medio: "efectivo" }); setError(""); }} className="mt-2 px-3 py-1.5 rounded-lg font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(todo)}</button>
+                            )}
+                            {cobrandoTodo === f.k && (
+                              <div className="mt-2 space-y-2">
+                                <p className="text-teal-400">Inscripción{cuenta.debe_inscripciones > f.debe ? "es" : ""} {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
+                                <div className="flex flex-wrap gap-2 items-center">
+                                  <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                                  {MEDIOS_COBRO.map(([m, l]) => (
+                                    <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                                  ))}
+                                </div>
+                                <div className="flex gap-3 items-center">
+                                  <button type="button" disabled={busy} onClick={() => cobrarTodo(cuenta)} className="px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
+                                  <button type="button" onClick={() => setCobrandoTodo(null)} className="text-teal-400 text-sm">Cancelar</button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                      if (vinculando !== f.k) {
+                        return <button type="button" onClick={() => { setVinculando(f.k); setError(""); }} className="mt-1 text-xs text-teal-300 underline">🧾 Su cuenta de consumos</button>;
+                      }
+                      // Sugerencias: las cuentas cuyo nombre se parece al del jugador
+                      const sugeridas = cuentas.map((x) => ({ x, m: nameMatch(f.nombre, x.nombre) })).filter((o) => o.m).sort((a, b) => (a.m === "igual" ? -1 : 0) - (b.m === "igual" ? -1 : 0)).map((o) => o.x);
+                      return (
+                        <div className="mt-2 rounded-lg border border-teal-800 p-2 space-y-2 text-xs">
+                          <p className="text-teal-400">¿Cuál es la cuenta de {f.nombre}?</p>
+                          <div className="flex flex-wrap gap-2">
+                            {sugeridas.map((x) => <button key={x.id} type="button" disabled={busy} onClick={() => vincular(f, x.id)} className="px-2 py-1 rounded border border-lime-400 text-lime-400">{x.nombre}</button>)}
+                            <button type="button" disabled={busy} onClick={() => vincular(f, null, f.nombre)} className="px-2 py-1 rounded border border-dashed border-teal-600 text-teal-200">+ Crear "{f.nombre}"</button>
+                          </div>
+                          {cuentas.length > sugeridas.length && (
+                            <select defaultValue="" onChange={(e) => e.target.value && vincular(f, e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} aria-label="Otra cuenta">
+                              <option value="">Otra cuenta…</option>
+                              {cuentas.filter((x) => !sugeridas.includes(x)).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                            </select>
+                          )}
+                          <button type="button" onClick={() => setVinculando(null)} className="block text-teal-400">Cancelar</button>
+                        </div>
+                      );
+                    })()}
                     {cobrando === f.k && (
                       <div className="mt-3 space-y-2">
                         <div className="flex flex-wrap gap-2 items-center">
@@ -11522,6 +11621,8 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
 /* ---------- Consumos y cuentas del complejo (ver 20261021_consumos.sql) ---------- */
 
 const saldoDe = (c) => Number(c.consumido) - Number(c.pagado);
+// Lo que debe en total: consumos más las inscripciones de los jugadores vinculados a la cuenta
+const totalDe = (c) => Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0);
 const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null && p.stock <= p.aviso_stock;
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
@@ -11567,9 +11668,9 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno }) {
   const cuenta = (cuentas || []).find((c) => c.id === abierta);
   const texto = buscar.trim().toLowerCase();
   const lista = (cuentas || [])
-    .filter((c) => (!soloDeben || saldoDe(c) > 0) && (!texto || c.nombre.toLowerCase().includes(texto) || (c.telefono || "").includes(texto.replace(/\D/g, "") || "~")))
-    .sort((a, b) => (saldoDe(b) > 0) - (saldoDe(a) > 0) || (a.ultimo < b.ultimo ? 1 : -1));
-  const totalDeuda = (cuentas || []).reduce((s, c) => s + Math.max(0, saldoDe(c)), 0);
+    .filter((c) => (!soloDeben || totalDe(c) > 0) && (!texto || c.nombre.toLowerCase().includes(texto) || (c.telefono || "").includes(texto.replace(/\D/g, "") || "~")))
+    .sort((a, b) => (totalDe(b) > 0) - (totalDe(a) > 0) || (a.ultimo < b.ultimo ? 1 : -1));
+  const totalDeuda = (cuentas || []).reduce((s, c) => s + totalDe(c), 0);
   const avisos = (productos || []).filter(pocoStock);
   const pill = (key, label) => (
     <button type="button" onClick={() => { setVista(key); setAbierta(null); }} className={`px-3 py-1.5 rounded-full text-sm border ${vista === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
@@ -11623,7 +11724,7 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno }) {
           ) : (
             <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
               {lista.map((c) => {
-                const saldo = saldoDe(c);
+                const saldo = totalDe(c);
                 return (
                   <li key={c.id}>
                     <button type="button" onClick={() => setAbierta(c.id)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-white/5">
@@ -11655,7 +11756,11 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
   const [anulando, setAnulando] = useState(null);
+  const [inscripciones, setInscripciones] = useState([]); // jugadores de torneos vinculados a la cuenta
+  const [cobrandoTodo, setCobrandoTodo] = useState(false);
   const saldo = saldoDe(cuenta);
+  const debeInscripciones = inscripciones.reduce((s, i) => s + Number(i.debe), 0);
+  const total = Math.max(0, saldo) + debeInscripciones;
 
   const load = useCallback(async () => {
     try {
@@ -11664,6 +11769,7 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
         supabaseTable(`cuenta_pagos?cuenta_id=eq.${cuenta.id}&order=created_at.desc`, { accessToken }),
       ]);
       setMovs([...cs.map((c) => ({ ...c, tipo: "consumo" })), ...ps.map((p) => ({ ...p, tipo: "pago" }))].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+      setInscripciones((await supabaseRpc("inscripciones_de_cuenta", { p_cuenta: cuenta.id }, accessToken).catch(() => [])) || []);
       setError("");
     } catch { setError("No se pudo cargar la cuenta."); }
   }, [cuenta.id, accessToken]);
@@ -11677,7 +11783,7 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
 
   const run = async (fn, okMsg) => {
     setBusy(true); setError(""); setAviso("");
-    try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); } catch (e) { setError(reservaErrorText(e)); }
+    try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
   const anotar = () => {
@@ -11699,6 +11805,17 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
       setCobrando(false);
     }, `Cobrado: ${formatoPrecio(monto)}`);
   };
+  // Un solo pago: primero las inscripciones y el resto a los consumos (lo reparte la base)
+  const cobrarTodo = () => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    let detalle = "";
+    run(async () => {
+      const r = await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
+      detalle = [Number(r?.inscripciones) > 0 && `${formatoPrecio(r.inscripciones)} de inscripción`, Number(r?.consumos) > 0 && `${formatoPrecio(r.consumos)} de consumos`].filter(Boolean).join(" y ");
+      setCobrandoTodo(false);
+    }).then(() => { if (detalle) setAviso(`Cobrado ${formatoPrecio(monto)}: ${detalle}.`); });
+  };
   const anular = (m) => run(async () => {
     await supabaseTable(`${m.tipo === "pago" ? "cuenta_pagos" : "cuenta_consumos"}?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
     setAnulando(null);
@@ -11707,7 +11824,9 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
   // Detalle para el WhatsApp: lo consumido desde el último pago
   const ultimoPago = (movs || []).find((m) => m.tipo === "pago");
   const pendientes = (movs || []).filter((m) => m.tipo === "consumo" && (!ultimoPago || m.created_at > ultimoPago.created_at)).reverse();
-  const mensaje = `Hola ${cuenta.nombre}, te paso tu cuenta en ${complejoNombre}: ${pendientes.map((m) => `${m.cantidad} ${m.descripcion}`).join(", ")}${pendientes.length ? ". " : ""}Total a pagar: ${formatoPrecio(saldo)}. ¡Gracias!`;
+  const lineasInscripcion = inscripciones.filter((i) => Number(i.debe) > 0).map((i) => `inscripción ${i.torneo} (${i.categoria}) ${formatoPrecio(i.debe)}`);
+  const detalleWa = [...(saldo > 0 ? pendientes.map((m) => `${m.cantidad} ${m.descripcion}`) : []), ...lineasInscripcion];
+  const mensaje = `Hola ${cuenta.nombre}, te paso tu cuenta en ${complejoNombre}: ${detalleWa.join(", ")}${detalleWa.length ? ". " : ""}Total a pagar: ${formatoPrecio(total)}. ¡Gracias!`;
 
   return (
     <div className="space-y-4">
@@ -11717,8 +11836,20 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
           <p className="text-lg text-teal-100 font-semibold">{cuenta.nombre}</p>
           {cuenta.telefono && <p className="text-xs text-teal-500">{formatArPhone(cuenta.telefono)}</p>}
         </div>
-        <span className="text-lg font-semibold" style={{ color: saldo > 0 ? "#f87171" : BRAND.lime }}>{saldo > 0 ? `Debe ${formatoPrecio(saldo)}` : saldo < 0 ? `A favor ${formatoPrecio(-saldo)}` : "Al día"}</span>
+        <span className="text-lg font-semibold" style={{ color: total > 0 ? "#f87171" : BRAND.lime }}>{total > 0 ? `Debe ${formatoPrecio(total)}` : saldo < 0 ? `A favor ${formatoPrecio(-saldo)}` : "Al día"}</span>
       </div>
+      {debeInscripciones > 0 && (
+        <div className="rounded-lg border border-amber-400/40 p-3 space-y-1">
+          <p className="text-xs uppercase tracking-wide text-amber-300">También debe</p>
+          {inscripciones.filter((i) => Number(i.debe) > 0).map((i) => (
+            <p key={`${i.torneo_id}|${i.categoria_id}|${i.pareja_id}|${i.jugador}`} className="flex justify-between gap-2 text-teal-200">
+              <span>Inscripción {i.torneo} · {i.categoria} · {i.nombre}</span>
+              <span className="text-amber-300 shrink-0">{formatoPrecio(i.debe)}</span>
+            </p>
+          ))}
+          {saldo > 0 && <p className="flex justify-between gap-2 text-teal-200"><span>Consumos</span><span className="text-amber-300">{formatoPrecio(saldo)}</span></p>}
+        </div>
+      )}
       {error && <p className="text-red-400">{error}</p>}
       {aviso && <p className="text-lime-400">{aviso}</p>}
 
@@ -11760,11 +11891,13 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
       </div>
 
       <div className="flex flex-wrap gap-2 items-center">
-        {!cobrando && saldo > 0 && <button type="button" onClick={() => { setCobrando(true); setForm({ monto: String(saldo), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">Cobrar</button>}
-        {saldo > 0 && cuenta.telefono && <a href={waLink(cuenta.telefono, mensaje)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 text-lime-400 underline">Mandarle la cuenta por WhatsApp</a>}
+        {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); setForm({ monto: String(total), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
+        {!cobrando && !cobrandoTodo && saldo > 0 && <button type="button" onClick={() => { setCobrando(true); setForm({ monto: String(saldo), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">{debeInscripciones > 0 ? "Solo consumos" : "Cobrar"}</button>}
+        {total > 0 && cuenta.telefono && <a href={waLink(cuenta.telefono, mensaje)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 text-lime-400 underline">Mandarle la cuenta por WhatsApp</a>}
       </div>
-      {cobrando && (
+      {(cobrando || cobrandoTodo) && (
         <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+          {cobrandoTodo && <p className="text-xs text-teal-400">Primero se cancela la inscripción y lo que sobra va a los consumos.</p>}
           <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
           <div className="flex flex-wrap gap-2">
             {MEDIOS_COBRO.map(([m, l]) => (
@@ -11772,8 +11905,8 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
             ))}
           </div>
           <div className="flex gap-3 items-center">
-            <button type="button" disabled={busy} onClick={cobrar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar pago</button>
-            <button type="button" onClick={() => setCobrando(false)} className="text-teal-400">Cancelar</button>
+            <button type="button" disabled={busy} onClick={cobrandoTodo ? cobrarTodo : cobrar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar pago</button>
+            <button type="button" onClick={() => { setCobrando(false); setCobrandoTodo(false); }} className="text-teal-400">Cancelar</button>
           </div>
         </div>
       )}
@@ -12017,7 +12150,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
         )}
 
         {view === "cobros" && cobros && (
-          <CobrosPanel tournament={tournament} inscripciones={inscripciones} accessToken={cobros.accessToken} organizerId={cobros.organizerId} esDueno={cobros.esDueno} />
+          <CobrosPanel tournament={tournament} inscripciones={inscripciones} accessToken={cobros.accessToken} organizerId={cobros.organizerId} esDueno={cobros.esDueno} complejoIds={cobros.complejoIds} />
         )}
 
         {view === "inscripciones" && (
@@ -12848,7 +12981,10 @@ function SmashPointAppInner() {
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
-        cobros={session.role === "creador" ? null : { accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador" }}
+        cobros={session.role === "creador" ? null : {
+          accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
+          complejoIds: complejos.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
+        }}
       />
     );
   } else {

@@ -59,6 +59,7 @@ Pegar todo [`migrations/20261018_cobros_inscripciones.sql`](migrations/20261018_
 Después, todo [`migrations/20261019_caja.sql`](migrations/20261019_caja.sql) → **Run** → **Success**.
 Y por último [`migrations/20261020_caja_plataforma.sql`](migrations/20261020_caja_plataforma.sql) (la caja de Smash Point, solo para el creador) → **Run** → **Success**.
 Y [`migrations/20261021_consumos.sql`](migrations/20261021_consumos.sql) (consumos, cuentas y stock) → **Run** → **Success**.
+Y [`migrations/20261022_cobrar_todo.sql`](migrations/20261022_cobrar_todo.sql) (cobrar inscripción y consumos juntos) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 
@@ -73,6 +74,7 @@ select
   to_regclass('public.caja_movimientos') is not null as caja,
   to_regclass('public.plataforma_movimientos') is not null as caja_plataforma,
   to_regclass('public.cuenta_consumos') is not null as consumos,
+  to_regclass('public.cuenta_jugadores') is not null as cobrar_todo,
   (select count(*) from pg_proc where pronamespace = 'public'::regnamespace and proname in
     ('pedir_turno', 'disponibilidad_canchas', 'cancelar_mi_reserva', 'vencer_pedidos',
      'es_organizador', 'es_colaborador', 'colaborador_permiso', 'colaborador_de',
@@ -80,7 +82,7 @@ select
   (select string_agg(policyname, ', ') from pg_policies where schemaname = 'storage' and tablename = 'objects' and cmd = 'INSERT') as subir_imagenes;
 ```
 
-- [ ] Las nueve primeras columnas en `true`, **funciones = 10**.
+- [ ] Las diez primeras columnas en `true`, **funciones = 10**.
 - [ ] `subir_imagenes` dice **solo** `Solo organizadores suben imagenes`. Si aparece otra política,
       avisar antes de seguir.
 
