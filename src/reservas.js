@@ -134,6 +134,25 @@ export function fechasSemanales(fecha, semanas) {
   return Array.from({ length: Math.max(1, semanas) }, (_, i) => sumarDias(fecha, i * 7));
 }
 
+/* Período de la caja: { desde, hasta } (fechas incluidas). La semana va de lunes a domingo. */
+export function rangoPeriodo(tipo, hoy) {
+  if (tipo === "hoy") return { desde: hoy, hasta: hoy };
+  if (tipo === "semana") {
+    const dia = new Date(`${hoy}T12:00:00Z`).getUTCDay(); // 0 = domingo
+    const lunes = sumarDias(hoy, dia === 0 ? -6 : 1 - dia);
+    return { desde: lunes, hasta: sumarDias(lunes, 6) };
+  }
+  const desde = `${hoy.slice(0, 7)}-01`;
+  const siguiente = new Date(`${desde}T12:00:00Z`);
+  siguiente.setUTCMonth(siguiente.getUTCMonth() + 1);
+  return { desde, hasta: sumarDias(siguiente.toISOString().slice(0, 10), -1) };
+}
+
+/* Fecha (día de Argentina) de un instante guardado: "2026-10-15T02:00:00Z" → "2026-10-14" */
+export function fechaArgentina(iso) {
+  return hoyArgentina(new Date(iso));
+}
+
 /* Normaliza un precio escrito a mano ("12.000", "12000", "") → número o null */
 export function leerPrecio(texto) {
   const limpio = String(texto ?? "").replace(/[^\d]/g, "");

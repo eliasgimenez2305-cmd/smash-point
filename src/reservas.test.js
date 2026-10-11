@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde } from "./reservas.js";
+import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina } from "./reservas.js";
 
 const cancha1 = { id: "c1", apertura: "14:00:00", cierre: "22:00:00", precio_60: 10000, precio_90: 14000, precio_120: null };
 const nocturna = { id: "c2", apertura: "18:00", cierre: "01:00", precio_90: 15000 };
@@ -81,6 +81,15 @@ test("horarios libres en un complejo: alcanza con una cancha libre", () => {
   assert.deepEqual(iniciosLibres([cancha1], "2026-10-14", 90, [], { ahora: tarde }).map((l) => etiquetaHora(l.desde)), ["20:30"]);
   assert.equal(precioDesde([cancha1, c2], 90), 12000);
   assert.equal(precioDesde([cancha1], 120), null);
+});
+
+test("períodos de la caja", () => {
+  assert.deepEqual(rangoPeriodo("hoy", "2026-10-14"), { desde: "2026-10-14", hasta: "2026-10-14" });
+  assert.deepEqual(rangoPeriodo("semana", "2026-10-14"), { desde: "2026-10-12", hasta: "2026-10-18" }); // miércoles
+  assert.deepEqual(rangoPeriodo("semana", "2026-10-18"), { desde: "2026-10-12", hasta: "2026-10-18" }); // domingo
+  assert.deepEqual(rangoPeriodo("mes", "2026-10-14"), { desde: "2026-10-01", hasta: "2026-10-31" });
+  assert.deepEqual(rangoPeriodo("mes", "2026-02-10"), { desde: "2026-02-01", hasta: "2026-02-28" });
+  assert.equal(fechaArgentina("2026-10-15T02:00:00Z"), "2026-10-14");
 });
 
 test("precios escritos a mano", () => {

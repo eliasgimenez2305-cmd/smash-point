@@ -8,7 +8,7 @@ import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -8517,7 +8517,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
   const permisos = colaborador ? organizer.permisos : { agenda: true, resultados: true, torneos: true, canchas: true };
   const verTorneos = permisos.resultados || permisos.torneos;
   const verReservas = complejos.length > 0 && (permisos.agenda || permisos.canchas);
-  const [seccion, setSeccion] = useState(verTorneos ? "torneos" : "reservas"); // perfil | torneos | reservas
+  const [seccion, setSeccion] = useState(verTorneos ? "torneos" : "reservas"); // perfil | torneos | reservas | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
   const [pedidosPendientes, setPedidosPendientes] = useState(0);
@@ -8544,6 +8544,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     ...(colaborador ? [] : [["perfil", "Perfil"]]),
     ...(verTorneos ? [["torneos", "Torneos"]] : []),
     ...(verReservas ? [["reservas", pedidosPendientes > 0 && permisos.agenda ? `Reservas (${pedidosPendientes})` : "Reservas"]] : []),
+    ...(colaborador ? [] : [["caja", "Caja"]]),
   ];
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
@@ -8575,7 +8576,9 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
         ))}
       </nav>
 
-      {seccion === "perfil" && !colaborador ? (
+      {seccion === "caja" && !colaborador ? (
+        <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
+      ) : seccion === "perfil" && !colaborador ? (
         <div className="space-y-6" style={F.body}>
           <div className="border border-teal-800 rounded-lg p-4 space-y-3">
             <h2 className="text-sm uppercase tracking-wide text-teal-400">Datos del organizador</h2>
@@ -10920,6 +10923,262 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
             </ul>
           </div>
         ))
+      )}
+    </div>
+  );
+}
+
+/* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
+
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", manual: "Otros" };
+// $45.000 o −$45.000 (formatoPrecio no lleva signo)
+const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
+
+/* "Octubre 2026", "Semana del 12/10 al 18/10", "Miércoles 14/10" o "Del 01/10 al 15/10" */
+function etiquetaPeriodo(tipo, { desde, hasta }) {
+  if (tipo === "hoy") return etiquetaFecha(desde);
+  if (tipo === "mes") {
+    const mes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][Number(desde.slice(5, 7)) - 1];
+    return `${mes} ${desde.slice(0, 4)}`;
+  }
+  const dm = (f) => `${f.slice(8, 10)}/${f.slice(5, 7)}`;
+  return `${tipo === "semana" ? "Semana del" : "Del"} ${dm(desde)} al ${dm(hasta)}`;
+}
+
+/* Corre el período para atrás o para adelante (n = -1 o 1) */
+function moverPeriodo(tipo, rango, n) {
+  if (tipo === "hoy") return rangoPeriodo("hoy", sumarDias(rango.desde, n));
+  if (tipo === "semana") return rangoPeriodo("semana", sumarDias(rango.desde, 7 * n));
+  const d = new Date(`${rango.desde}T12:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + n);
+  return rangoPeriodo("mes", d.toISOString().slice(0, 10));
+}
+
+/* Nombre del jugador de un pago de inscripción, buscándolo en el torneo (si está entero) */
+function conceptoInscripcion(p, tournaments) {
+  const t = tournaments.find((x) => x.id === p.torneo_id);
+  const c = t?.categories?.find((x) => x.id === p.categoria_id);
+  const pair = c?.pairs?.find((x) => x.id === p.pareja_id);
+  const jugador = c && pair ? jugadoresDePareja(c, pair).find((j) => j.jugador === p.jugador)?.nombre : null;
+  return ["Inscripción", t?.name || "torneo borrado", c?.name, jugador].filter(Boolean).join(" · ");
+}
+
+function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
+  const hoy = hoyArgentina();
+  const [tipo, setTipo] = useState("mes"); // hoy | semana | mes | rango
+  const [rango, setRango] = useState(() => rangoPeriodo("mes", hoy));
+  const [datos, setDatos] = useState(null); // { pagos, turnos, manuales, canchas }
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(null); // "gasto" | "ingreso": formulario abierto
+  const [form, setForm] = useState({ fecha: hoy, concepto: "", monto: "", medio: "efectivo", torneoId: "" });
+  const [busy, setBusy] = useState(false);
+  const [borrando, setBorrando] = useState(null);
+  const accessToken = organizer.accessToken;
+  const complejoIds = complejos.map((c) => c.id).join(",");
+
+  const load = useCallback(async () => {
+    const { desde, hasta } = rango;
+    if (!desde || !hasta || hasta < desde) return;
+    try {
+      const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+      const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
+      const [pagos, manuales, turnos, canchas] = await Promise.all([
+        supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
+        supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
+        complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
+        complejoIds ? supabaseTable(`canchas?complejo_id=in.(${inList})&select=id,nombre`) : [],
+      ]);
+      setDatos({ pagos, manuales, turnos, canchas });
+      setError("");
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [rango, organizer.id, accessToken, complejoIds]);
+  useEffect(() => { setDatos(null); load(); }, [load]);
+
+  const elegirTipo = (t) => { setTipo(t); if (t !== "rango") setRango(rangoPeriodo(t, hoy)); };
+
+  // Todos los movimientos del período en una sola lista
+  const movimientos = datos ? [
+    ...datos.pagos.map((p) => ({ key: `p${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "inscripcion", concepto: conceptoInscripcion(p, tournaments), monto: Number(p.monto), medio: p.medio })),
+    ...datos.turnos.filter((r) => r.precio != null).map((r) => ({
+      key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: "turno", monto: Number(r.precio), medio: r.medio_pago,
+      concepto: ["Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
+    })),
+    ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
+  ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
+  const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
+  const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
+  const gastos = movimientos.filter((m) => m.tipo === "gasto");
+  const resultado = suma(ingresos) - suma(gastos);
+
+  const guardar = async () => {
+    const monto = leerPrecio(form.monto);
+    if (!form.concepto.trim()) { setError("Poné el concepto."); return; }
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("caja_movimientos", {
+        method: "POST", accessToken, prefer: "return=minimal",
+        body: { organizador_id: organizer.id, fecha: form.fecha || hoy, tipo: cargando, concepto: form.concepto.trim(), monto, medio: form.medio, torneo_id: form.torneoId || null },
+      });
+      setCargando(null);
+      setForm({ fecha: hoy, concepto: "", monto: "", medio: "efectivo", torneoId: "" });
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const borrar = async (id) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`caja_movimientos?id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setBorrando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  // Planilla para abrir en Excel o Google Sheets (separada por punto y coma, como la usa Excel en castellano)
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Origen", "Concepto", "Medio", "Monto"], ...movimientos.map((m) => [
+      m.fecha, m.tipo === "gasto" ? "Gasto" : "Ingreso", ORIGEN_CAJA[m.origen], m.concepto, medioCobroLabel(m.medio), String(m.tipo === "gasto" ? -m.monto : m.monto).replace(".", ","),
+    ])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-${rango.desde}-al-${rango.hasta}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const chip = (key, label) => (
+    <button key={key} type="button" onClick={() => elegirTipo(key)} className={`px-3 py-1.5 rounded-full text-sm border ${tipo === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+  const tarjeta = (label, valor, color) => (
+    <div className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+      <p className="text-[11px] uppercase text-teal-400">{label}</p>
+      <p className="text-base font-semibold" style={{ color }}>{conSigno(valor)}</p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap gap-2">{[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["rango", "Elegir fechas"]].map(([k, l]) => chip(k, l))}</div>
+      {tipo === "rango" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" value={rango.desde} onChange={(e) => setRango({ ...rango, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+          <span className="text-teal-400">al</span>
+          <input type="date" value={rango.hasta} onChange={(e) => setRango({ ...rango, hasta: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Hasta" />
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período anterior">‹</button>
+          <span className="font-semibold text-teal-100">{etiquetaPeriodo(tipo, rango)}</span>
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período siguiente">›</button>
+        </div>
+      )}
+
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2">
+            {tarjeta("Ingresos", suma(ingresos), BRAND.lime)}
+            {tarjeta("Gastos", suma(gastos), "#f87171")}
+            {tarjeta("Resultado", resultado, resultado < 0 ? "#f87171" : BRAND.cyan)}
+          </div>
+
+          <div className="rounded-lg border border-teal-900 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-teal-500 text-left">
+                  <th className="px-3 py-2 font-normal"></th>
+                  <th className="px-3 py-2 font-normal text-right">Ingresos</th>
+                  <th className="px-3 py-2 font-normal text-right">Gastos</th>
+                  <th className="px-3 py-2 font-normal text-right">Neto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(ORIGEN_CAJA).map(([o, label]) => {
+                  const ing = suma(ingresos.filter((m) => m.origen === o));
+                  const gas = suma(gastos.filter((m) => m.origen === o));
+                  return (ing > 0 || gas > 0) && (
+                    <tr key={o} className="border-t border-teal-900/60">
+                      <td className="px-3 py-1.5 text-teal-200">{label}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{ing ? formatoPrecio(ing) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{gas ? formatoPrecio(gas) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{conSigno(ing - gas)}</td>
+                    </tr>
+                  );
+                })}
+                {MEDIOS_COBRO.map(([medio, label], i) => {
+                  const ing = suma(ingresos.filter((m) => m.medio === medio));
+                  const gas = suma(gastos.filter((m) => m.medio === medio));
+                  return (ing > 0 || gas > 0) && (
+                    <tr key={medio} className={`border-t ${i === 0 ? "border-teal-700" : "border-teal-900/60"}`}>
+                      <td className="px-3 py-1.5 text-teal-300">{label}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{ing ? formatoPrecio(ing) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{gas ? formatoPrecio(gas) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right font-semibold" style={{ color: ing - gas < 0 ? "#f87171" : BRAND.lime }}>{conSigno(ing - gas)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => { setCargando("gasto"); setError(""); }} className="px-4 py-2 rounded-lg border border-red-400 text-red-300 font-semibold">+ Cargar gasto</button>
+            <button type="button" onClick={() => { setCargando("ingreso"); setError(""); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">+ Otro ingreso</button>
+            {movimientos.length > 0 && <button type="button" onClick={descargar} className="px-3 py-2 text-teal-300 underline">Descargar planilla</button>}
+          </div>
+
+          {cargando && (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{cargando === "gasto" ? "Nuevo gasto" : "Otro ingreso"}</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder={cargando === "gasto" ? "Ej: pelotas, premios, árbitro" : "Ej: sponsor, buffet"} aria-label="Concepto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <select value={form.torneoId} onChange={(e) => setForm({ ...form, torneoId: e.target.value })} aria-label="Torneo" className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                  <option value="">Sin torneo</option>
+                  {tournaments.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {MEDIOS_COBRO.map(([m, l]) => (
+                  <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                ))}
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+                <button type="button" onClick={() => setCargando(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Movimientos ({movimientos.length})</p>
+            {movimientos.length === 0 ? (
+              <p className="text-teal-400">No hay movimientos en este período.</p>
+            ) : (
+              <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                {movimientos.map((m) => (
+                  <li key={m.key} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                    <span className="flex-1 min-w-[10rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
+                    <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
+                    {m.origen === "manual" && (borrando === m.id ? (
+                      <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                    ) : (
+                      <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[11px] text-teal-600 mt-2">Las inscripciones se cuentan por el día en que se cobraron; los turnos, por el día del turno (los confirmados con medio de pago registrado).</p>
+          </div>
+        </>
       )}
     </div>
   );

@@ -53,6 +53,11 @@ Pegar todo [`migrations/20261017_colaboradores_permisos.sql`](migrations/2026101
 
 - [ ] **Success** (confirmar el aviso de "destructive operations" si aparece).
 
+## Paso 4b — Cobros de inscripciones y caja
+
+Pegar todo [`migrations/20261018_cobros_inscripciones.sql`](migrations/20261018_cobros_inscripciones.sql) → **Run** → **Success**.
+Después, todo [`migrations/20261019_caja.sql`](migrations/20261019_caja.sql) → **Run** → **Success**.
+
 ### Verificación (solo lectura, no cambia nada)
 
 ```sql
@@ -62,6 +67,8 @@ select
   to_regclass('public.reservas') is not null as reservas,
   to_regclass('public.jugadores') is not null as jugadores,
   to_regclass('public.colaboradores') is not null as colaboradores,
+  to_regclass('public.pagos_inscripcion') is not null as pagos,
+  to_regclass('public.caja_movimientos') is not null as caja,
   (select count(*) from pg_proc where pronamespace = 'public'::regnamespace and proname in
     ('pedir_turno', 'disponibilidad_canchas', 'cancelar_mi_reserva', 'vencer_pedidos',
      'es_organizador', 'es_colaborador', 'colaborador_permiso', 'colaborador_de',
@@ -69,7 +76,7 @@ select
   (select string_agg(policyname, ', ') from pg_policies where schemaname = 'storage' and tablename = 'objects' and cmd = 'INSERT') as subir_imagenes;
 ```
 
-- [ ] Las cinco primeras columnas en `true`, **funciones = 10**.
+- [ ] Las siete primeras columnas en `true`, **funciones = 10**.
 - [ ] `subir_imagenes` dice **solo** `Solo organizadores suben imagenes`. Si aparece otra política,
       avisar antes de seguir.
 
