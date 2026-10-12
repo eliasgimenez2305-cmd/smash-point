@@ -8563,6 +8563,7 @@ const PANEL_ICONOS = {
   caja: "M3 7h18v12H3zM3 11h18M7 15h3",
   perfil: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
   salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
+  cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
@@ -8848,6 +8849,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
   const verReservas = complejosReservas.length > 0 && (permisos.agenda || permisos.canchas);
   const verConsumos = complejosCantina.length > 0 && permisos.consumos;
   const verInicio = complejos.length > 0;
+  const verCajaDia = complejos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
   const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
@@ -8877,6 +8879,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     { titulo: "Operación", items: [
       ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
       ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
+      ...(verCajaDia ? [["cajadia", "Caja del día", "cajadia"]] : []),
     ] },
     { titulo: "Gestión", items: [
       ...(verConsumos ? [["productos", "Productos y stock", "productos"]] : []),
@@ -8906,6 +8909,8 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "cajadia" && verCajaDia ? (
+        <CajaDelDia complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "mostrador" && verConsumos ? (
         <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "productos" && verConsumos ? (
@@ -11410,7 +11415,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
 
 /* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
 
-const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", manual: "Otros" };
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", manual: "Otros" };
 // $45.000 o −$45.000 (formatoPrecio no lleva signo)
 const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
 
@@ -11453,6 +11458,8 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
   const [form, setForm] = useState({ fecha: hoy, concepto: "", monto: "", medio: "efectivo", torneoId: "" });
   const [busy, setBusy] = useState(false);
   const [borrando, setBorrando] = useState(null);
+  const [buscar, setBuscar] = useState("");
+  const [filtroOrigen, setFiltroOrigen] = useState("");
   const accessToken = organizer.accessToken;
   const complejoIds = complejos.map((c) => c.id).join(",");
 
@@ -11462,7 +11469,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     try {
       const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
       const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
-      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos] = await Promise.all([
+      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos] = await Promise.all([
         supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
         supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
         complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
@@ -11472,8 +11479,10 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
         // Mostrador: pagos de las ventas no anuladas y lo vendido con su costo (para la ganancia)
         complejoIds ? supabaseTable(`venta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,ventas!inner(numero,anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : [],
         complejoIds ? supabaseTable(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}`, { accessToken }).catch(() => []) : [],
+        // Gastos y otros ingresos cargados en las cajas del día (los retiros no son gasto: es plata que pasa al dueño)
+        complejoIds ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${inList})&tipo=in.(gasto,ingreso)&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,tipo,concepto,monto,created_at,hecho_por_email`, { accessToken }).catch(() => []) : [],
       ]);
-      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos });
+      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos });
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [rango, organizer.id, accessToken, complejoIds]);
@@ -11490,12 +11499,15 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     })),
     ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
+    ...datos.movTurnos.map((m) => ({ key: `d${m.id}`, fecha: fechaArgentina(m.created_at), tipo: m.tipo === "gasto" ? "gasto" : "ingreso", origen: "caja_dia", concepto: `${m.concepto}${m.hecho_por_email ? ` · ${m.hecho_por_email}` : ""}`, monto: Number(m.monto), medio: "efectivo" })),
     ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
   ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
   const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
   const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
   const gastos = movimientos.filter((m) => m.tipo === "gasto");
   const resultado = suma(ingresos) - suma(gastos);
+  const textoBuscar = buscar.trim().toLowerCase();
+  const visibles = movimientos.filter((m) => (!filtroOrigen || m.origen === filtroOrigen) && (!textoBuscar || m.concepto.toLowerCase().includes(textoBuscar)));
   // Ganancia de lo vendido en el mostrador (solo los productos con costo cargado)
   const conCosto = (datos?.vendidos || []).map((i) => ({ ...i, costo: [].concat(i.venta_items_costo || [])[0]?.costo_unitario })).filter((i) => i.costo != null);
   const ganancia = conCosto.reduce((g, i) => g + i.cantidad * (Number(i.precio_unitario) - Number(i.costo)), 0);
@@ -11571,10 +11583,10 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
         !error && <p className="opacity-60">Cargando…</p>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-2">
-            {tarjeta("Ingresos", suma(ingresos), BRAND.lime)}
-            {tarjeta("Gastos", suma(gastos), "#f87171")}
-            {tarjeta("Resultado", resultado, resultado < 0 ? "#f87171" : BRAND.cyan)}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={conSigno(suma(ingresos))} detalle={`${ingresos.length} movimiento${ingresos.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Gastos" tono="rojo" valor={conSigno(suma(gastos))} detalle={`${gastos.length} movimiento${gastos.length === 1 ? "" : "s"}`} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Resultado" tono={resultado < 0 ? "rojo" : "cyan"} valor={conSigno(resultado)} detalle="Ingresos − gastos" /></div>
           </div>
 
           <div className="rounded-lg border border-teal-900 overflow-hidden">
@@ -11651,12 +11663,52 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
           )}
 
           <div>
-            <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Movimientos ({movimientos.length})</p>
-            {movimientos.length === 0 ? (
-              <p className="text-teal-400">No hay movimientos en este período.</p>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <p className="text-xs uppercase tracking-wide text-teal-500 mr-auto">Movimientos ({visibles.length})</p>
+              <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar concepto" aria-label="Buscar concepto" className="w-full sm:w-48 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+              <select value={filtroOrigen} onChange={(e) => setFiltroOrigen(e.target.value)} aria-label="Origen" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todos los orígenes</option>
+                {Object.entries(ORIGEN_CAJA).filter(([o]) => movimientos.some((m) => m.origen === o)).map(([o, l]) => <option key={o} value={o}>{l}</option>)}
+              </select>
+            </div>
+            {visibles.length === 0 ? (
+              <p className="text-teal-400">{movimientos.length === 0 ? "No hay movimientos en este período." : "No hay movimientos con ese filtro."}</p>
             ) : (
-              <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
-                {movimientos.map((m) => (
+              <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Fecha</th>
+                      <th className="px-3 py-2.5 font-semibold">Origen</th>
+                      <th className="px-3 py-2.5 font-semibold">Concepto</th>
+                      <th className="px-3 py-2.5 font-semibold">Medio</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Importe</th>
+                      <th className="px-2 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibles.map((m) => (
+                      <tr key={m.key} className="border-t border-teal-900/70 hover:bg-white/5">
+                        <td className="px-3 py-2 text-teal-300 whitespace-nowrap">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</td>
+                        <td className="px-3 py-2"><span className="text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: m.tipo === "gasto" ? "#fca5a5" : BRAND.lime, backgroundColor: m.tipo === "gasto" ? "#f8717120" : "#9fe0221a" }}>{m.tipo === "gasto" ? "↑ " : "↓ "}{ORIGEN_CAJA[m.origen]}</span></td>
+                        <td className="px-3 py-2 text-slate-100">{m.concepto}</td>
+                        <td className="px-3 py-2 text-teal-300 whitespace-nowrap">{medioCobroLabel(m.medio)}</td>
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums whitespace-nowrap" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</td>
+                        <td className="px-2 py-2 text-right whitespace-nowrap">
+                          {m.origen === "manual" && (borrando === m.id ? (
+                            <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                          ) : (
+                            <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                          ))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                {visibles.map((m) => (
                   <li key={m.key} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
                     <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
@@ -11669,6 +11721,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                   </li>
                 ))}
               </ul>
+              </>
             )}
             <p className="text-[11px] text-teal-600 mt-2">Las inscripciones se cuentan por el día en que se cobraron; los turnos, por el día del turno (los confirmados con medio de pago registrado).</p>
           </div>
@@ -12012,6 +12065,307 @@ const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null &&
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
    stock. La usan el dueño y los colaboradores con permiso de consumos. */
+/* ---------- Caja del día: abrir y cerrar la caja de cada persona (ver 20261025_cierre_caja.sql) ---------- */
+
+const ORIGEN_TURNO_CAJA = { mostrador: "Mostrador", cuentas: "Cuentas", inscripciones: "Inscripciones", turnos: "Turnos" };
+const MOV_CAJA = { retiro: "Retiro de efectivo", gasto: "Gasto pagado con la caja", ingreso: "Otro ingreso en efectivo" };
+const CAJA_ERRORES = {
+  caja_ya_abierta: "Ya tenés una caja abierta.",
+  caja_cerrada: "Esa caja ya está cerrada.",
+  no_autorizado: "No tenés permiso para manejar esta caja.",
+  datos_invalidos: "Revisá los montos.",
+};
+const cajaErrorText = (e) => CAJA_ERRORES[e?.code] || reservaErrorText(e);
+/* id de quien está logueado (el "sub" del token); el empleado entra con su propia cuenta */
+function uidDeToken(token) {
+  try { return JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub || null; } catch { return null; }
+}
+const horaAr = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+const fechaHoraAr = (iso) => `${fechaArgentina(iso).slice(8, 10)}/${fechaArgentina(iso).slice(5, 7)} ${horaAr(iso)}`;
+
+function CajaDelDia({ complejos, venues, accessToken, esDueno }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [cajas, setCajas] = useState(null); // las del complejo que ve (las suyas; el dueño, todas)
+  const [error, setError] = useState("");
+  const [fondo, setFondo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [viendo, setViendo] = useState(null); // id de una caja de otro (solo el dueño)
+  const yo = uidDeToken(accessToken);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  const load = useCallback(async () => {
+    try {
+      setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=abierta_at.desc&limit=40`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setCajas(null); setViendo(null); load(); }, [load]);
+
+  const mia = (cajas || []).find((c) => c.usuario === yo && !c.cerrada_at);
+  const abiertasDeOtros = esDueno ? (cajas || []).filter((c) => c.usuario !== yo && !c.cerrada_at) : [];
+  const cerradas = (cajas || []).filter((c) => c.cerrada_at);
+  const abrir = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: leerPrecio(fondo) || 0 }, accessToken);
+      setFondo("");
+      await load();
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {cajas === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          {mia ? (
+            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia onChanged={load} />
+          ) : (
+            <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Tu caja está cerrada</h2>
+              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.</p>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="text-xs text-teal-400">Efectivo con el que arrancás (fondo)
+                  <input inputMode="numeric" value={fondo} onChange={(e) => setFondo(e.target.value)} placeholder="$0" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                </label>
+                <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
+              </div>
+            </section>
+          )}
+
+          {abiertasDeOtros.length > 0 && (
+            <section className="space-y-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Cajas abiertas de tus empleados</h2>
+              {abiertasDeOtros.map((c) => viendo === c.id ? (
+                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
+              ) : (
+                <button key={c.id} type="button" onClick={() => setViendo(c.id)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-teal-800 px-4 py-3 text-left hover:bg-white/5">
+                  <span className="min-w-0"><span className="block truncate text-slate-100">{c.usuario_email}</span><span className="block text-xs text-teal-500">Abierta desde {fechaHoraAr(c.abierta_at)} · fondo {formatoPrecio(c.fondo) || "$0"}</span></span>
+                  <span className="text-xs text-teal-300 shrink-0">Ver →</span>
+                </button>
+              ))}
+            </section>
+          )}
+
+          <section className="space-y-2">
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">{esDueno ? "Cierres" : "Tus cierres"}</h2>
+            {cerradas.length === 0 ? <p className="text-teal-400">Todavía no hay cajas cerradas.</p> : (
+              <>
+                {/* PC: tabla; celular: tarjetas */}
+                <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                        <th className="px-3 py-2.5 font-semibold">Cierre</th>
+                        {esDueno && <th className="px-3 py-2.5 font-semibold">Quién</th>}
+                        <th className="px-3 py-2.5 font-semibold text-right">Debía haber</th>
+                        <th className="px-3 py-2.5 font-semibold text-right">Contó</th>
+                        <th className="px-3 py-2.5 font-semibold text-right">Diferencia</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cerradas.map((c) => {
+                        const dif = Number(c.contado) - Number(c.esperado);
+                        return (
+                          <tr key={c.id} className="border-t border-teal-900/70 align-top">
+                            <td className="px-3 py-2.5 text-teal-200">{fechaHoraAr(c.cerrada_at)}<span className="block text-xs text-teal-500">desde {fechaHoraAr(c.abierta_at)}</span>{c.nota && <span className="block text-xs text-teal-400 italic">“{c.nota}”</span>}</td>
+                            {esDueno && <td className="px-3 py-2.5 text-teal-200 break-all">{c.usuario_email}</td>}
+                            <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.esperado) || "$0"}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.contado) || "$0"}</td>
+                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} /></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <ul className="sm:hidden space-y-2">
+                  {cerradas.map((c) => {
+                    const dif = Number(c.contado) - Number(c.esperado);
+                    return (
+                      <li key={c.id} className="rounded-xl border border-teal-800 px-4 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-teal-200">{fechaHoraAr(c.cerrada_at)}</span>
+                          <DiferenciaCaja dif={dif} />
+                        </div>
+                        {esDueno && <p className="text-xs text-teal-400 break-all">{c.usuario_email}</p>}
+                        <p className="text-xs text-teal-500">Debía haber {formatoPrecio(c.esperado) || "$0"} · contó {formatoPrecio(c.contado) || "$0"}</p>
+                        {c.nota && <p className="text-xs text-teal-400 italic">“{c.nota}”</p>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DiferenciaCaja({ dif }) {
+  const [texto, color, fondo] = dif === 0 ? ["Justo", BRAND.lime, "#9fe02222"] : dif > 0 ? [`Sobra ${formatoPrecio(dif)}`, "#22d3ee", "#22d3ee22"] : [`Falta ${formatoPrecio(-dif)}`, "#f87171", "#f8717122"];
+  return <span className="inline-block px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap" style={{ color, backgroundColor: fondo }}>{texto}</span>;
+}
+
+/* Una caja abierta: lo cobrado hasta ahora, movimientos y cierre */
+function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerrarVista }) {
+  const [resumen, setResumen] = useState(null);
+  const [movs, setMovs] = useState([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [mov, setMov] = useState(null); // { tipo, concepto, monto }
+  const [cierre, setCierre] = useState(null); // { contado, nota }
+  const [resultado, setResultado] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [r, m] = await Promise.all([
+        supabaseRpc("resumen_caja", { p_turno: caja.id }, accessToken),
+        supabaseTable(`caja_movimientos_turno?turno_id=eq.${caja.id}&order=created_at.asc`, { accessToken }),
+      ]);
+      setResumen(r); setMovs(m); setError("");
+    } catch (e) { setError(cajaErrorText(e)); }
+  }, [caja.id, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const mover = async () => {
+    const monto = leerPrecio(mov.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    if (!mov.concepto.trim()) { setError("Poné el concepto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("mover_caja", { p_turno: caja.id, p_tipo: mov.tipo, p_monto: monto, p_concepto: mov.concepto.trim() }, accessToken);
+      setMov(null);
+      await load();
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cerrar = async () => {
+    const contado = leerPrecio(cierre.contado);
+    if (contado == null) { setError("Poné cuánto efectivo contaste."); return; }
+    setBusy(true); setError("");
+    try {
+      setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  if (resultado) {
+    const dif = Number(resultado.diferencia);
+    return (
+      <section className="rounded-xl border p-4 space-y-3" style={{ borderColor: `${BRAND.lime}66`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <h2 className="text-sm uppercase tracking-wide" style={{ color: BRAND.lime }}>Caja cerrada ✓</h2>
+        <p className="text-teal-200">Debía haber {formatoPrecio(resultado.efectivo_esperado) || "$0"} en efectivo y se contaron {formatoPrecio(resultado.contado) || "$0"}.</p>
+        <DiferenciaCaja dif={dif} />
+        <div><button type="button" onClick={onChanged} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Listo</button></div>
+      </section>
+    );
+  }
+
+  const esperado = Number(resumen?.efectivo_esperado || 0);
+  const totalCobrado = Object.values(resumen?.por_medio || {}).reduce((s, n) => s + Number(n), 0);
+  const contadoNum = cierre ? leerPrecio(cierre.contado) : null;
+
+  return (
+    <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">{propia ? "Tu caja" : <span className="break-all normal-case">{caja.usuario_email}</span>}</h2>
+          <p className="text-xs text-teal-500">Abierta desde {fechaHoraAr(caja.abierta_at)} · fondo {formatoPrecio(caja.fondo) || "$0"}</p>
+        </div>
+        <div className="flex gap-3">
+          <button type="button" onClick={load} className="text-xs text-teal-300 hover:text-lime-400">Actualizar</button>
+          {onCerrarVista && <button type="button" onClick={onCerrarVista} className="text-xs text-teal-400">Ocultar</button>}
+        </div>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {!resumen ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className="grid gap-3 grid-cols-2">
+            <TarjetaResumen titulo="Efectivo en caja" tono="lime" valor={formatoPrecio(esperado) || "$0"} detalle="Lo que debería haber" />
+            <TarjetaResumen titulo="Cobrado" tono="cyan" valor={formatoPrecio(totalCobrado) || "$0"} detalle="Todos los medios" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ul className="rounded-lg border border-teal-900 divide-y divide-teal-900/70">
+              <li className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-teal-500">Por medio</li>
+              {MEDIOS_VENTA.filter(([m]) => Number(resumen.por_medio?.[m]) > 0).map(([m, l]) => (
+                <li key={m} className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">{l}</span><span className="tabular-nums">{formatoPrecio(resumen.por_medio[m])}</span></li>
+              ))}
+              {totalCobrado === 0 && <li className="px-3 py-1.5 text-teal-400">Todavía no cobraste nada.</li>}
+            </ul>
+            <ul className="rounded-lg border border-teal-900 divide-y divide-teal-900/70">
+              <li className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-teal-500">Efectivo</li>
+              <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Fondo</span><span className="tabular-nums">{formatoPrecio(resumen.fondo) || "$0"}</span></li>
+              <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Cobrado en efectivo</span><span className="tabular-nums">+{formatoPrecio(resumen.efectivo_cobrado) || "$0"}</span></li>
+              {Number(resumen.ingresos) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Otros ingresos</span><span className="tabular-nums">+{formatoPrecio(resumen.ingresos)}</span></li>}
+              {Number(resumen.retiros) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Retiros</span><span className="tabular-nums text-red-300">−{formatoPrecio(resumen.retiros)}</span></li>}
+              {Number(resumen.gastos) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Gastos</span><span className="tabular-nums text-red-300">−{formatoPrecio(resumen.gastos)}</span></li>}
+            </ul>
+          </div>
+          {Object.keys(resumen.por_origen || {}).length > 0 && (
+            <p className="text-xs text-teal-400">{Object.entries(resumen.por_origen).map(([o, n]) => `${ORIGEN_TURNO_CAJA[o] || o} ${formatoPrecio(n)}`).join(" · ")}</p>
+          )}
+
+          {movs.length > 0 && (
+            <ul className="text-xs space-y-1">
+              {movs.map((m) => (
+                <li key={m.id} className="flex justify-between gap-2"><span className="text-teal-300">{horaAr(m.created_at)} · {MOV_CAJA[m.tipo]}: {m.concepto}</span><span className={`tabular-nums shrink-0 ${m.tipo === "ingreso" ? "text-lime-400" : "text-red-300"}`}>{m.tipo === "ingreso" ? "+" : "−"}{formatoPrecio(m.monto)}</span></li>
+              ))}
+            </ul>
+          )}
+
+          {mov ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{MOV_CAJA[mov.tipo]}</p>
+              <div className="flex flex-wrap gap-2">
+                <input value={mov.concepto} onChange={(e) => setMov({ ...mov, concepto: e.target.value })} maxLength={80} placeholder={mov.tipo === "retiro" ? "Ej: se lo llevó el dueño" : mov.tipo === "gasto" ? "Ej: hielo, limpieza" : "Ej: cambio que trajo el dueño"} aria-label="Concepto" className="flex-1 min-w-[10rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input inputMode="numeric" value={mov.monto} onChange={(e) => setMov({ ...mov, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={mover} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setMov(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : !cierre && (
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setMov({ tipo: "retiro", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">− Retiro</button>
+              <button type="button" onClick={() => setMov({ tipo: "gasto", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-red-400/60 text-red-300">− Gasto</button>
+              <button type="button" onClick={() => setMov({ tipo: "ingreso", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-lime-400/60 text-lime-400">+ Ingreso</button>
+            </div>
+          )}
+
+          {cierre ? (
+            <div className="rounded-lg border p-3 space-y-3" style={{ borderColor: "#f59e0b88" }}>
+              <p className="font-semibold text-amber-300">Cerrar la caja</p>
+              <label className="block text-xs text-teal-400">Contá el efectivo que hay en la caja
+                <input inputMode="numeric" value={cierre.contado} onChange={(e) => setCierre({ ...cierre, contado: e.target.value })} placeholder="$" className="block mt-1 w-48 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+              </label>
+              {contadoNum != null && (
+                <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              )}
+              <input value={cierre.nota} onChange={(e) => setCierre({ ...cierre, nota: e.target.value })} maxLength={200} placeholder="Nota (opcional, ej: por qué falta)" aria-label="Nota" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy || contadoNum == null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
+                <button type="button" onClick={() => setCierre(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : !mov && (
+            <button type="button" onClick={() => { load(); setCierre({ contado: "", nota: "" }); }} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 /* ---------- Mostrador: venta al contado de la cantina (ver 20261024_mostrador.sql) ---------- */
 
 const MEDIOS_VENTA = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"], ["debito", "Débito"], ["credito", "Crédito"]];
@@ -12483,9 +12837,10 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = nu
         <CuentaDetalle cuenta={cuenta} complejoId={complejoId} complejoNombre={nombreComplejo(complejoId)} productos={productos} accessToken={accessToken} esDueno={esDueno} onBack={() => setAbierta(null)} onChanged={load} />
       ) : (
         <>
-          <div className="rounded-xl p-3 flex items-center justify-between" style={{ border: "1px solid #f8717155", backgroundColor: "rgba(8,18,24,0.7)" }}>
-            <span className="text-teal-300">Total que deben</span>
-            <span className="text-base font-semibold text-red-300">{formatoPrecio(totalDeuda) || "$0"}</span>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Deuda total" tono="rojo" valor={formatoPrecio(totalDeuda) || "$0"} detalle="Consumos e inscripciones" />
+            <TarjetaResumen titulo="Deben" tono="ambar" valor={`${cuentas.filter((c) => totalDe(c) > 0).length} de ${cuentas.length}`} detalle="Cuentas con saldo" onClick={() => setSoloDeben(true)} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Al día" tono="lime" valor={cuentas.length ? `${Math.round((cuentas.filter((c) => totalDe(c) <= 0).length / cuentas.length) * 100)}%` : "—"} detalle="De todas las cuentas" /></div>
           </div>
           <div className="flex flex-wrap gap-2 items-center">
             <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cuenta" className="flex-1 min-w-[12rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
