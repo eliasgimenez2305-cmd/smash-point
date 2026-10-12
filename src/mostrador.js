@@ -1,0 +1,48 @@
+/* Cuentas del mostrador (venta al contado de la cantina): total del ticket, descuento o recargo,
+   pago con varios medios y vuelto. La base vuelve a calcular todo al vender (ver
+   supabase/migrations/20261024_mostrador.sql); esto es lo que se muestra mientras se arma la venta. */
+
+/* Rubros sugeridos, en este orden; después, los que haya cargado el complejo */
+export const RUBROS_SUGERIDOS = ["Bebidas", "Comida", "Paletas", "Pelotas", "Accesorios", "Indumentaria"];
+
+export function rubrosDe(productos) {
+  const propios = [...new Set(productos.map((p) => (p.rubro || "").trim()).filter(Boolean))];
+  const orden = (r) => {
+    const i = RUBROS_SUGERIDOS.indexOf(r);
+    return i === -1 ? RUBROS_SUGERIDOS.length : i;
+  };
+  return propios.sort((a, b) => orden(a) - orden(b) || a.localeCompare(b, "es"));
+}
+
+/* items: [{ precio, cantidad }] */
+export function subtotalDe(items) {
+  return items.reduce((s, i) => s + Number(i.precio) * Number(i.cantidad), 0);
+}
+
+/* Descuento (negativo) o recargo (positivo) en pesos enteros. valor en % o en $. Nunca más que el subtotal. */
+export function ajusteDe(subtotal, { tipo = "descuento", modo = "%", valor = 0 } = {}) {
+  const v = Math.max(0, Number(valor) || 0);
+  const monto = Math.min(subtotal, Math.round(modo === "%" ? (subtotal * Math.min(v, 100)) / 100 : v));
+  return monto === 0 ? 0 : tipo === "recargo" ? monto : -monto;
+}
+
+/* pagos: [{ medio, monto }] */
+export function resumenPagos(total, pagos) {
+  const pagado = pagos.reduce((s, p) => s + (Number(p.monto) || 0), 0);
+  return { pagado, falta: Math.max(0, total - pagado), sobra: Math.max(0, pagado - total) };
+}
+
+/* Vuelto si paga en efectivo con un billete más grande (null si no alcanza o no se escribió) */
+export function vueltoDe(pagaCon, monto) {
+  const p = Number(pagaCon);
+  if (!p || p < monto) return null;
+  return p - monto;
+}
+
+/* Lo que se manda a vender(): productos del catálogo y algo suelto */
+export function itemsParaVender(carrito, sueltos) {
+  return [
+    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([producto_id, cantidad]) => ({ producto_id, cantidad })),
+    ...sueltos.map((s) => ({ descripcion: s.descripcion.trim(), precio: Number(s.precio), cantidad: s.cantidad || 1 })),
+  ];
+}

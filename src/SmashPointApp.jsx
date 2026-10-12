@@ -9,6 +9,7 @@ import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
+import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -8554,6 +8555,8 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
 /* Íconos del menú (trazos simples, toman el color del texto) */
 const PANEL_ICONOS = {
   inicio: "M3 11l9-7 9 7M5 10v10h5v-6h4v6h5V10",
+  mostrador: "M3 4h2l2.4 11h10.2L20 8H6.2M9 20a1 1 0 100-2 1 1 0 000 2zM17 20a1 1 0 100-2 1 1 0 000 2z",
+  productos: "M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5",
   reservas: "M4 6h16v14H4zM4 10h16M8 3v5M16 3v5",
   consumos: "M6 8h12l-1.5 12h-9zM9 8V6a3 3 0 016 0v2",
   torneos: "M8 4h8v5a4 4 0 01-8 0zM8 6H5a3 3 0 003 4M16 6h3a3 3 0 01-3 4M12 13v4M8 20h8",
@@ -8704,14 +8707,15 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       verPlata ? supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=eq.${hoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
-    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas]) => {
+      verPlata && idsTodos ? supabaseTable(`venta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto,ventas!inner(anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : nada,
+    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas, pagosVentas]) => {
       if (!vivo) return;
       const suma = (rows) => rows.reduce((s, r) => s + Number(r.monto ?? r.precio ?? 0), 0);
       setDatos({
         turnos, canchas,
         pocoStock: productos.filter(pocoStock),
         deudores: cuentas.map((c) => ({ ...c, saldo: Number(c.consumido) - Number(c.pagado) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
-        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(manuales.filter((m) => m.tipo === "ingreso")),
+        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(pagosVentas) + suma(manuales.filter((m) => m.tipo === "ingreso")),
         egresos: suma(manuales.filter((m) => m.tipo === "gasto")),
       });
       setError("");
@@ -8734,7 +8738,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       {error && <p className="text-sm text-red-400">{error}</p>}
 
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
-        {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, consumos, inscripciones" onClick={() => onIr("caja")} />}
+        {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, mostrador, cuentas, inscripciones" onClick={() => onIr("caja")} />}
         {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos cargados en Caja" onClick={() => onIr("caja")} />}
         {verAgenda && <TarjetaResumen titulo="Turnos de hoy" tono="cyan" valor={cargando ? "…" : String(datos?.turnos.filter((r) => r.estado === "confirmada").length || 0)} detalle={pedidosPendientes > 0 ? `${pedidosPendientes} pedido${pedidosPendientes === 1 ? "" : "s"} por confirmar` : "Sin pedidos pendientes"} onClick={() => onIr("reservas")} />}
         {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("consumos")} />}
@@ -8768,7 +8772,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
           <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
             <div className="flex items-center justify-between gap-2 mb-3">
               <h2 className="text-sm uppercase tracking-wide text-teal-400">Cantina</h2>
-              <button type="button" onClick={() => onIr("consumos")} className="text-xs text-teal-300 hover:text-lime-400">Ver cuentas →</button>
+              <button type="button" onClick={() => onIr("mostrador")} className="text-xs text-teal-300 hover:text-lime-400">Ir al mostrador →</button>
             </div>
             {!datos ? <p className="text-sm opacity-60">{cargando ? "Cargando…" : ""}</p> : (
               <div className="space-y-4">
@@ -8872,9 +8876,10 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     { titulo: "", items: verInicio ? [["inicio", "Inicio", "inicio"]] : [] },
     { titulo: "Operación", items: [
       ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
-      ...(verConsumos ? [["consumos", "Cantina", "consumos"]] : []),
+      ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
     ] },
     { titulo: "Gestión", items: [
+      ...(verConsumos ? [["productos", "Productos y stock", "productos"]] : []),
       ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
       ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
     ] },
@@ -8901,8 +8906,12 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "mostrador" && verConsumos ? (
+        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+      ) : seccion === "productos" && verConsumos ? (
+        <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "consumos" && verConsumos ? (
-        <ConsumosPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+        <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "caja" && !colaborador ? (
         <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
       ) : seccion === "perfil" && !colaborador ? (
@@ -9049,7 +9058,7 @@ const PERMISOS_COLABORADOR = [
   ["p_resultados", "Cargar resultados", "Resultados, W.O. y partidos en curso de tus torneos, sin cambiar su armado."],
   ["p_torneos", "Gestionar torneos", "Crear y editar torneos, eventos y circuitos, grupos, llaves, horarios e inscripciones."],
   ["p_canchas", "Canchas y precios", "Horarios y precios de las canchas, y si reciben reservas online."],
-  ["p_consumos", "Consumos", "Anotar consumos (agua, bebidas…) a las cuentas, cobrarlas y reponer stock."],
+  ["p_consumos", "Cantina", "Vender en el mostrador, anotar consumos a las cuentas, cobrarlas y reponer stock."],
 ];
 
 /* Colaboradores del complejo (empleados): el dueño agrega su mail y elige qué puede hacer cada uno.
@@ -11077,7 +11086,7 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onP
 /* ---------- Cobro de inscripciones (ver 20261018_cobros_inscripciones.sql) ---------- */
 
 const MEDIOS_COBRO = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"]];
-const medioCobroLabel = (m) => MEDIOS_COBRO.find(([k]) => k === m)?.[1] || m;
+const medioCobroLabel = (m) => MEDIOS_VENTA.find(([k]) => k === m)?.[1] || m;
 
 /* Precio por jugador de una categoría: el suyo o, si no tiene, el del torneo (null = sin precio) */
 function precioJugador(tournament, category) {
@@ -11401,7 +11410,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
 
 /* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
 
-const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", consumo: "Consumos", manual: "Otros" };
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", manual: "Otros" };
 // $45.000 o −$45.000 (formatoPrecio no lleva signo)
 const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
 
@@ -11453,15 +11462,18 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     try {
       const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
       const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
-      const [pagos, manuales, turnos, canchas, consumos] = await Promise.all([
+      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos] = await Promise.all([
         supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
         supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
         complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
         complejoIds ? supabaseTable(`canchas?complejo_id=in.(${inList})&select=id,nombre`) : [],
         // Pagos de las cuentas de consumos (si la base todavía no tiene la tabla, nada)
         complejoIds ? supabaseTable(`cuenta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,cuentas(nombre)`, { accessToken }).catch(() => []) : [],
+        // Mostrador: pagos de las ventas no anuladas y lo vendido con su costo (para la ganancia)
+        complejoIds ? supabaseTable(`venta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,ventas!inner(numero,anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : [],
+        complejoIds ? supabaseTable(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}`, { accessToken }).catch(() => []) : [],
       ]);
-      setDatos({ pagos, manuales, turnos, canchas, consumos });
+      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos });
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [rango, organizer.id, accessToken, complejoIds]);
@@ -11476,13 +11488,17 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
       key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: "turno", monto: Number(r.precio), medio: r.medio_pago,
       concepto: ["Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
     })),
-    ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Consumos · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
+    ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
+    ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
   ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
   const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
   const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
   const gastos = movimientos.filter((m) => m.tipo === "gasto");
   const resultado = suma(ingresos) - suma(gastos);
+  // Ganancia de lo vendido en el mostrador (solo los productos con costo cargado)
+  const conCosto = (datos?.vendidos || []).map((i) => ({ ...i, costo: [].concat(i.venta_items_costo || [])[0]?.costo_unitario })).filter((i) => i.costo != null);
+  const ganancia = conCosto.reduce((g, i) => g + i.cantidad * (Number(i.precio_unitario) - Number(i.costo)), 0);
 
   const guardar = async () => {
     const monto = leerPrecio(form.monto);
@@ -11584,7 +11600,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                     </tr>
                   );
                 })}
-                {MEDIOS_COBRO.map(([medio, label], i) => {
+                {MEDIOS_VENTA.map(([medio, label], i) => {
                   const ing = suma(ingresos.filter((m) => m.medio === medio));
                   const gas = suma(gastos.filter((m) => m.medio === medio));
                   return (ing > 0 || gas > 0) && (
@@ -11599,6 +11615,10 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
               </tbody>
             </table>
           </div>
+
+          {conCosto.length > 0 && (
+            <p className="text-teal-300">Ganancia en productos vendidos: <span className="font-semibold" style={{ color: ganancia < 0 ? "#f87171" : BRAND.lime }}>{conSigno(ganancia)}</span> <span className="text-xs text-teal-500">(precio de lista menos costo, de los productos con costo cargado)</span></p>
+          )}
 
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => { setCargando("gasto"); setError(""); }} className="px-4 py-2 rounded-lg border border-red-400 text-red-300 font-semibold">+ Cargar gasto</button>
@@ -11992,9 +12012,410 @@ const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null &&
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
    stock. La usan el dueño y los colaboradores con permiso de consumos. */
-function ConsumosPanel({ complejos, venues, accessToken, esDueno }) {
+/* ---------- Mostrador: venta al contado de la cantina (ver 20261024_mostrador.sql) ---------- */
+
+const MEDIOS_VENTA = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"], ["debito", "Débito"], ["credito", "Crédito"]];
+const VENTA_ERRORES = {
+  falta_pagar: "Falta cobrar una parte: elegí a qué cuenta va el saldo.",
+  pago_de_mas: "Los pagos suman más que el total.",
+  ajuste_invalido: "El descuento no puede ser mayor que el total.",
+  cuenta_invalida: "Esa cuenta no es de este complejo.",
+  producto_invalido: "Un producto ya no existe: recargá la pantalla.",
+  no_autorizado: "No tenés permiso para vender en este complejo.",
+};
+const ventaErrorText = (e) => VENTA_ERRORES[e?.code] || reservaErrorText(e);
+
+function MostradorPanel({ complejos, venues, accessToken, esDueno }) {
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [vista, setVista] = useState("cuentas"); // cuentas | productos
+  const [productos, setProductos] = useState(null);
+  const [error, setError] = useState("");
+  const [rubro, setRubro] = useState("");
+  const [buscar, setBuscar] = useState("");
+  const [carrito, setCarrito] = useState({}); // productoId -> cantidad
+  const [sueltos, setSueltos] = useState([]); // [{ descripcion, precio }]
+  const [suelto, setSuelto] = useState(null); // formulario de "algo suelto"
+  const [cobrando, setCobrando] = useState(false);
+  const [aviso, setAviso] = useState("");
+  const [version, setVersion] = useState(0); // sube con cada venta, para recargar "Ventas de hoy"
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  const load = useCallback(async () => {
+    try {
+      setProductos(await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&activo=eq.true&order=orden.asc,nombre.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los productos. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setProductos(null); setCarrito({}); setSueltos([]); load(); }, [load]);
+
+  const rubros = productos ? rubrosDe(productos) : [];
+  const texto = buscar.trim().toLowerCase();
+  const visibles = (productos || []).filter((p) => (!rubro || p.rubro === rubro) && (!texto || p.nombre.toLowerCase().includes(texto)));
+  const renglones = [
+    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ key: id, p: (productos || []).find((x) => x.id === id), cantidad: n })).filter((r) => r.p)
+      .map((r) => ({ ...r, descripcion: r.p.nombre, precio: Number(r.p.precio) })),
+    ...sueltos.map((s, i) => ({ key: `s${i}`, suelto: i, descripcion: s.descripcion, precio: Number(s.precio), cantidad: 1 })),
+  ];
+  const subtotal = subtotalDe(renglones);
+  const cantidadTotal = renglones.reduce((s, r) => s + r.cantidad, 0);
+  const sumar = (id, d) => setCarrito((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
+  const quitar = (r) => (r.suelto != null ? setSueltos((l) => l.filter((_, i) => i !== r.suelto)) : setCarrito((c) => ({ ...c, [r.key]: 0 })));
+  const agregarSuelto = () => {
+    const precio = leerPrecio(suelto.precio);
+    if (!suelto.descripcion.trim() || precio == null) return;
+    setSueltos((l) => [...l, { descripcion: suelto.descripcion.trim().slice(0, 60), precio }]);
+    setSuelto(null);
+  };
+  const vendido = (r) => {
+    setCobrando(false); setCarrito({}); setSueltos([]);
+    setAviso(`Venta #${r.numero} registrada: ${formatoPrecio(r.total)}${Number(r.a_cuenta) > 0 ? ` (${formatoPrecio(r.a_cuenta)} a cuenta)` : ""}.`);
+    setVersion((v) => v + 1);
+    load();
+  };
+
+  const ticket = (
+    <div className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.75)" }}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">Ticket</h2>
+        {renglones.length > 0 && <button type="button" onClick={() => { setCarrito({}); setSueltos([]); }} className="text-xs text-teal-400 hover:text-red-300">Vaciar</button>}
+      </div>
+      {renglones.length === 0 ? <p className="text-teal-400">Tocá los productos para sumarlos.</p> : (
+        <ul className="divide-y divide-teal-900">
+          {renglones.map((r) => (
+            <li key={r.key} className="flex items-center gap-2 py-2">
+              <span className="flex-1 min-w-0">
+                <span className="block truncate text-slate-100">{r.descripcion}</span>
+                <span className="block text-xs text-teal-500">{formatoPrecio(r.precio)}{r.cantidad > 1 ? ` × ${r.cantidad}` : ""}</span>
+              </span>
+              {r.suelto == null && (
+                <span className="flex items-center gap-1 shrink-0">
+                  <button type="button" onClick={() => sumar(r.key, -1)} className="w-8 h-8 rounded-lg border border-teal-700 text-teal-200" aria-label={`Uno menos de ${r.descripcion}`}>−</button>
+                  <span className="w-6 text-center tabular-nums">{r.cantidad}</span>
+                  <button type="button" onClick={() => sumar(r.key, 1)} className="w-8 h-8 rounded-lg border border-teal-700 text-teal-200" aria-label={`Uno más de ${r.descripcion}`}>+</button>
+                </span>
+              )}
+              <span className="w-20 text-right font-semibold tabular-nums shrink-0">{formatoPrecio(r.precio * r.cantidad)}</span>
+              {r.suelto != null && <button type="button" onClick={() => quitar(r)} className="text-teal-500 hover:text-red-300 px-1" aria-label={`Quitar ${r.descripcion}`}>✕</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {suelto ? (
+        <div className="flex flex-wrap gap-2">
+          <input value={suelto.descripcion} onChange={(e) => setSuelto({ ...suelto, descripcion: e.target.value })} maxLength={60} placeholder="Qué es (ej: Encordado)" aria-label="Descripción" className="flex-1 min-w-[9rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+          <input inputMode="numeric" value={suelto.precio} onChange={(e) => setSuelto({ ...suelto, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} onKeyDown={(e) => { if (e.key === "Enter") agregarSuelto(); }} />
+          <button type="button" onClick={agregarSuelto} className="px-3 py-2 rounded-lg border border-lime-400 text-lime-400">Sumar</button>
+          <button type="button" onClick={() => setSuelto(null)} className="text-teal-400">Cancelar</button>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setSuelto({ descripcion: "", precio: "" })} className="text-sm text-teal-300 hover:text-lime-400">+ Algo que no está en la lista</button>
+      )}
+      <div className="flex items-center justify-between border-t border-teal-800 pt-3">
+        <span className="text-teal-300">Total</span>
+        <span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal) || "$0"}</span>
+      </div>
+      <button type="button" disabled={renglones.length === 0} onClick={() => { setCobrando(true); setAviso(""); }} className="w-full py-3 rounded-lg font-bold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4 text-sm pb-24 lg:pb-0" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+
+      {productos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem] items-start">
+          <div className="space-y-3 min-w-0">
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar producto" aria-label="Buscar producto" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
+            {rubros.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {[["", "Todos"], ...rubros.map((r) => [r, r])].map(([k, l]) => (
+                  <button key={k || "todos"} type="button" onClick={() => setRubro(k)} className={`px-3 py-1.5 rounded-full border ${rubro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                ))}
+              </div>
+            )}
+            {productos.length === 0 ? (
+              <p className="text-teal-300">Todavía no hay productos a la venta. {esDueno ? "Cargalos en Productos y stock." : "Pedile al dueño que los cargue."}</p>
+            ) : visibles.length === 0 ? <p className="text-teal-400">No hay productos con ese filtro.</p> : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+                {visibles.map((p) => {
+                  const n = carrito[p.id] || 0;
+                  const sinStock = p.stock != null && p.stock - n <= 0;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => sumar(p.id, 1)}
+                      className="relative text-left rounded-xl border p-3 min-h-[5.5rem] flex flex-col justify-between hover:brightness-125 transition"
+                      style={{ borderColor: n > 0 ? BRAND.lime : "#134e4a", backgroundColor: n > 0 ? `${BRAND.lime}14` : "rgba(8,18,24,0.6)" }}
+                    >
+                      <span className="block text-slate-100 font-semibold leading-snug line-clamp-2 pr-6">{p.nombre}</span>
+                      <span className="flex items-end justify-between gap-1 mt-2">
+                        <span className="font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio)}</span>
+                        {p.stock != null && <span className={`text-[11px] ${sinStock ? "text-red-300" : pocoStock(p) ? "text-amber-300" : "text-teal-500"}`}>{sinStock ? "sin stock" : `quedan ${p.stock - n}`}</span>}
+                      </span>
+                      {n > 0 && <span className="absolute top-2 right-2 min-w-[1.5rem] h-6 px-1.5 rounded-full text-xs font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{n}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {/* En el celular el ticket queda abajo de los productos; en la PC, a la derecha */}
+          <div id="ticket-mostrador" className="min-w-0">{ticket}</div>
+        </div>
+      )}
+
+      {/* Celular: barra fija con el total, para no tener que bajar hasta el ticket */}
+      {renglones.length > 0 && !cobrando && (
+        <div className="lg:hidden fixed bottom-0 inset-x-0 z-30 px-4 py-3 border-t border-teal-800 flex items-center gap-3" style={{ backgroundColor: "#071319" }}>
+          <button type="button" onClick={() => document.getElementById("ticket-mostrador")?.scrollIntoView({ behavior: "smooth" })} className="flex-1 min-w-0 text-left">
+            <span className="block text-xs text-teal-400">{cantidadTotal} producto{cantidadTotal === 1 ? "" : "s"} · ver ticket</span>
+            <span className="block text-lg font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal)}</span>
+          </button>
+          <button type="button" onClick={() => { setCobrando(true); setAviso(""); }} className="px-6 py-3 rounded-lg font-bold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>
+        </div>
+      )}
+
+      {cobrando && (
+        <CobrarVenta
+          complejoId={complejoId} accessToken={accessToken} subtotal={subtotal}
+          items={itemsParaVender(carrito, sueltos)}
+          onClose={() => setCobrando(false)} onVendido={vendido}
+        />
+      )}
+
+      <VentasDelDia complejoId={complejoId} accessToken={accessToken} esDueno={esDueno} version={version} onChanged={load} />
+    </div>
+  );
+}
+
+/* Cobrar el ticket: descuento o recargo, uno o varios medios de pago, vuelto, y lo que falte a
+   cuenta de alguien (seña, cuotas) */
+function CobrarVenta({ complejoId, accessToken, subtotal, items, onClose, onVendido }) {
+  const [ajusteForm, setAjusteForm] = useState({ tipo: "descuento", modo: "%", valor: "" });
+  const ajuste = ajusteDe(subtotal, { ...ajusteForm, valor: leerPrecio(ajusteForm.valor) || 0 });
+  const total = subtotal + ajuste;
+  const [pagos, setPagos] = useState([{ medio: "efectivo", monto: String(subtotal) }]);
+  const [tocoMonto, setTocoMonto] = useState(false); // si no tocó el monto, sigue al total (al poner un descuento)
+  const [pagaCon, setPagaCon] = useState("");
+  const [cuentas, setCuentas] = useState(null);
+  const [cuentaId, setCuentaId] = useState("");
+  const [buscarCuenta, setBuscarCuenta] = useState("");
+  const [nuevaCuenta, setNuevaCuenta] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => { if (!tocoMonto && pagos.length === 1) setPagos([{ ...pagos[0], monto: String(total) }]); }, [total]); // eslint-disable-line react-hooks/exhaustive-deps
+  const montos = pagos.map((p) => ({ ...p, monto: leerPrecio(p.monto) || 0 }));
+  const { pagado, falta, sobra } = resumenPagos(total, montos);
+  const efectivo = montos.find((p) => p.medio === "efectivo");
+  const vuelto = efectivo ? vueltoDe(leerPrecio(pagaCon), efectivo.monto) : null;
+  useEffect(() => {
+    if (falta > 0 && cuentas === null) {
+      supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).then((r) => setCuentas(r || [])).catch(() => setCuentas([]));
+    }
+  }, [falta, cuentas, complejoId, accessToken]);
+
+  const setPago = (i, cambio) => { setTocoMonto(true); setPagos((l) => l.map((p, j) => (j === i ? { ...p, ...cambio } : p))); };
+  const otroMedio = () => {
+    const usado = new Set(pagos.map((p) => p.medio));
+    const medio = MEDIOS_VENTA.map(([m]) => m).find((m) => !usado.has(m)) || "transferencia";
+    setTocoMonto(true);
+    setPagos((l) => [...l, { medio, monto: falta > 0 ? String(falta) : "" }]);
+  };
+  const texto = buscarCuenta.trim().toLowerCase();
+  const sugeridas = (cuentas || []).filter((c) => !texto || c.nombre.toLowerCase().includes(texto)).slice(0, 6);
+  const cuentaElegida = (cuentas || []).find((c) => c.id === cuentaId);
+  const puedeConfirmar = total >= 0 && sobra === 0 && (falta === 0 || cuentaId || (nuevaCuenta && buscarCuenta.trim()));
+
+  const confirmar = async () => {
+    setBusy(true); setError("");
+    try {
+      let cuenta = falta > 0 ? cuentaId || null : null;
+      if (falta > 0 && !cuenta) {
+        const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: buscarCuenta.trim().slice(0, 80) }, accessToken, prefer: "return=representation" });
+        cuenta = c.id;
+      }
+      const r = await supabaseRpc("vender", {
+        p_complejo: complejoId, p_items: items,
+        p_pagos: montos.filter((p) => p.monto > 0).map((p) => ({ medio: p.medio, monto: p.monto })),
+        p_ajuste: ajuste, p_cuenta: cuenta,
+      }, accessToken);
+      onVendido(r);
+    } catch (e) { setError(ventaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const chip = (activo) => `px-3 py-1.5 rounded-lg border ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`;
+
+  return (
+    <Modal title="Cobrar" onClose={onClose}>
+      <div className="space-y-4 text-sm" style={F.body}>
+        <div className="space-y-2">
+          <div className="flex justify-between text-teal-300"><span>Subtotal</span><span className="tabular-nums">{formatoPrecio(subtotal)}</span></div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className={chip(ajusteForm.tipo === "descuento")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "descuento" })}>Descuento</button>
+            <button type="button" className={chip(ajusteForm.tipo === "recargo")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "recargo" })}>Recargo</button>
+            <input inputMode="numeric" value={ajusteForm.valor} onChange={(e) => setAjusteForm({ ...ajusteForm, valor: e.target.value })} placeholder="0" aria-label="Valor del ajuste" className="w-20 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+            <button type="button" className={chip(ajusteForm.modo === "%")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "%" })}>%</button>
+            <button type="button" className={chip(ajusteForm.modo === "$")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "$" })}>$</button>
+          </div>
+          {ajuste !== 0 && <div className="flex justify-between text-teal-300"><span>{ajuste < 0 ? "Descuento" : "Recargo"}</span><span className="tabular-nums">{conSigno(ajuste)}</span></div>}
+          <div className="flex justify-between items-baseline border-t border-teal-800 pt-2">
+            <span className="text-teal-200">Total</span>
+            <span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(total) || "$0"}</span>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs uppercase tracking-wide text-teal-400">Cómo paga</p>
+          {pagos.map((p, i) => (
+            <div key={i} className="rounded-lg border border-teal-800 p-2 space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" className={`${chip(p.medio === m)} text-xs`} onClick={() => setPago(i, { medio: m })}>{l}</button>)}
+              </div>
+              <div className="flex items-center gap-2">
+                <input inputMode="numeric" value={p.monto} onChange={(e) => setPago(i, { monto: e.target.value })} aria-label="Monto" className="flex-1 min-w-0 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                {pagos.length > 1 && <button type="button" onClick={() => { setTocoMonto(true); setPagos((l) => l.filter((_, j) => j !== i)); }} className="text-teal-500 hover:text-red-300 px-2" aria-label="Quitar este pago">✕</button>}
+              </div>
+            </div>
+          ))}
+          <button type="button" onClick={otroMedio} className="text-teal-300 hover:text-lime-400">+ Pagar una parte con otro medio</button>
+          {efectivo && efectivo.monto > 0 && (
+            <div className="flex flex-wrap items-center gap-2 text-teal-300">
+              <span>Paga en efectivo con</span>
+              <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$" aria-label="Paga con" className="w-28 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+              {vuelto != null && <span className="font-semibold text-slate-100">Vuelto: {formatoPrecio(vuelto) || "$0"}</span>}
+            </div>
+          )}
+          {sobra > 0 && <p className="text-red-300">Los pagos suman {formatoPrecio(sobra)} de más.</p>}
+        </div>
+
+        {falta > 0 && (
+          <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b88" }}>
+            <p className="text-amber-300 font-semibold">Faltan {formatoPrecio(falta)}: quedan a cuenta de…</p>
+            <p className="text-xs text-teal-400">Sirve para una seña o para pagar en cuotas: el saldo se anota en su cuenta y se cobra desde Cuentas.</p>
+            {cuentaElegida ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-100">{cuentaElegida.nombre}</span>
+                <button type="button" onClick={() => setCuentaId("")} className="text-teal-400 text-xs underline">Cambiar</button>
+              </div>
+            ) : (
+              <>
+                <input value={buscarCuenta} onChange={(e) => { setBuscarCuenta(e.target.value); setNuevaCuenta(false); }} placeholder="Nombre de la persona" aria-label="Buscar cuenta" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                {cuentas === null ? <p className="opacity-60">Cargando cuentas…</p> : (
+                  <div className="flex flex-wrap gap-2">
+                    {sugeridas.map((c) => <button key={c.id} type="button" onClick={() => setCuentaId(c.id)} className="px-3 py-1.5 rounded-lg border border-teal-700 text-teal-200">{c.nombre}</button>)}
+                    {buscarCuenta.trim() && !nuevaCuenta && <button type="button" onClick={() => setNuevaCuenta(true)} className="px-3 py-1.5 rounded-lg border border-lime-400 text-lime-400">+ Cuenta nueva: {buscarCuenta.trim()}</button>}
+                    {nuevaCuenta && <span className="px-3 py-1.5 text-lime-400">Se crea la cuenta de {buscarCuenta.trim()}</span>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {error && <p className="text-red-400">{error}</p>}
+        <button type="button" disabled={busy || !puedeConfirmar} onClick={confirmar} className="w-full py-3 rounded-lg font-bold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : falta > 0 ? `Cobrar ${formatoPrecio(pagado) || "$0"} y anotar ${formatoPrecio(falta)}` : `Confirmar venta de ${formatoPrecio(total) || "$0"}`}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Ventas del día en el mostrador. El dueño ve quién vendió y puede anular. */
+function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) {
+  const [fecha, setFecha] = useState(hoyArgentina());
+  const [ventas, setVentas] = useState(null);
+  const [error, setError] = useState("");
+  const [anulando, setAnulando] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    try {
+      setVentas(await supabaseTable(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&created_at=gte.${enAr(fecha)}&created_at=lt.${enAr(sumarDias(fecha, 1))}&order=created_at.desc&select=*,venta_items(descripcion,cantidad,precio_unitario),venta_pagos(medio,monto),cuentas(nombre)`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las ventas."); }
+  }, [complejoId, accessToken, fecha]);
+  useEffect(() => { load(); }, [load, version]);
+
+  const anular = async (v) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("anular_venta", { p_venta: v.id }, accessToken);
+      setAnulando(null);
+      await load(); onChanged();
+    } catch (e) { setError(ventaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const validas = (ventas || []).filter((v) => !v.anulada);
+  const total = validas.reduce((s, v) => s + Number(v.total), 0);
+  const porMedio = MEDIOS_VENTA.map(([m, l]) => [l, validas.flatMap((v) => v.venta_pagos).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, n]) => n > 0);
+  const aCuenta = validas.reduce((s, v) => s + Number(v.a_cuenta), 0);
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  return (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">Ventas {fecha === hoyArgentina() ? "de hoy" : `del ${etiquetaFecha(fecha).toLowerCase()}`}</h2>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => setFecha(sumarDias(fecha, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Día anterior">‹</button>
+          <button type="button" disabled={fecha >= hoyArgentina()} onClick={() => setFecha(sumarDias(fecha, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300 disabled:opacity-30" aria-label="Día siguiente">›</button>
+        </div>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {ventas === null ? (!error && <p className="opacity-60">Cargando…</p>) : ventas.length === 0 ? <p className="text-teal-400">Sin ventas.</p> : (
+        <>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <span className="font-semibold" style={{ color: BRAND.lime }}>Total {formatoPrecio(total)}</span>
+            {porMedio.map(([l, n]) => <span key={l} className="text-teal-300">{l} {formatoPrecio(n)}</span>)}
+            {aCuenta > 0 && <span className="text-amber-300">A cuenta {formatoPrecio(aCuenta)}</span>}
+          </div>
+          <ul className="divide-y divide-teal-900">
+            {ventas.map((v) => (
+              <li key={v.id} className={`py-2 ${v.anulada ? "opacity-50" : ""}`}>
+                <div className="flex items-start gap-3">
+                  <span className="w-12 shrink-0 tabular-nums text-teal-400">{hora(v.created_at)}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className={`block text-slate-100 ${v.anulada ? "line-through" : ""}`}>{v.venta_items.map((i) => `${i.cantidad > 1 ? `${i.cantidad} ` : ""}${i.descripcion}`).join(", ")}</span>
+                    <span className="block text-xs text-teal-500">
+                      #{v.numero} · {v.venta_pagos.map((p) => `${medioCobroLabel(p.medio)} ${formatoPrecio(p.monto)}`).join(" + ") || "sin pago"}
+                      {Number(v.a_cuenta) > 0 && ` · ${formatoPrecio(v.a_cuenta)} a cuenta de ${v.cuentas?.nombre || "una cuenta"}`}
+                      {Number(v.ajuste) !== 0 && ` · ${Number(v.ajuste) < 0 ? "descuento" : "recargo"} ${formatoPrecio(Math.abs(v.ajuste))}`}
+                      {esDueno && v.vendido_por_email && ` · ${v.vendido_por_email}`}
+                      {v.anulada && " · ANULADA"}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums">{formatoPrecio(v.total)}</span>
+                </div>
+                {esDueno && !v.anulada && (anulando === v.id ? (
+                  <p className="mt-1 text-xs text-right">
+                    <span className="text-teal-300">¿Anular? Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}. </span>
+                    <button type="button" disabled={busy} onClick={() => anular(v)} className="text-red-400 font-semibold mr-2">Anular</button>
+                    <button type="button" onClick={() => setAnulando(null)} className="text-teal-400">No</button>
+                  </p>
+                ) : (
+                  <p className="mt-1 text-right"><button type="button" onClick={() => setAnulando(v.id)} className="text-xs text-teal-500 hover:text-red-300">Anular</button></p>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+/* Cuentas (fiado) y Productos y stock. vistaFija: cada una es una sección del menú */
+function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = null }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [vista, setVista] = useState(vistaFija || "cuentas"); // cuentas | productos
   const [productos, setProductos] = useState(null);
   const [cuentas, setCuentas] = useState(null);
   const [error, setError] = useState("");
@@ -12048,7 +12469,7 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno }) {
           {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
         </select>
       )}
-      <div className="flex flex-wrap gap-2">{pill("cuentas", "Cuentas")}{pill("productos", "Productos y stock")}</div>
+      {!vistaFija && <div className="flex flex-wrap gap-2">{pill("cuentas", "Cuentas")}{pill("productos", "Productos y stock")}</div>}
       {error && <p className="text-red-400">{error}</p>}
       {avisos.length > 0 && (
         <p className="text-xs text-amber-300">⚠ Queda poco: {avisos.map((p) => `${p.nombre} (${p.stock})`).join(", ")}</p>
@@ -12325,26 +12746,49 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
   const [reponer, setReponer] = useState({}); // productoId -> cantidad escrita
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [rubro, setRubro] = useState("");
+  // Costos: los ve y los carga solo el dueño (tabla aparte, ver 20261024_mostrador.sql)
+  const [costos, setCostos] = useState({}); // productoId -> costo
+  const loadCostos = useCallback(async () => {
+    if (!esDueno) return;
+    try {
+      const rows = await supabaseTable(`producto_costos?complejo_id=eq.${encodeURIComponent(complejoId)}&select=producto_id,costo`, { accessToken });
+      setCostos(Object.fromEntries(rows.map((r) => [r.producto_id, Number(r.costo)])));
+    } catch { setCostos({}); }
+  }, [complejoId, accessToken, esDueno]);
+  useEffect(() => { loadCostos(); }, [loadCostos]);
 
+  const rubros = rubrosDe(productos);
+  const opcionesRubro = [...new Set([...RUBROS_SUGERIDOS, ...rubros])];
   const abrir = (p) => {
     setEditando(p || "nuevo");
-    setForm({ nombre: p?.nombre || "", precio: p ? String(Math.round(p.precio)) : "", stock: p?.stock != null ? String(p.stock) : "", aviso: p?.aviso_stock != null ? String(p.aviso_stock) : "", activo: p ? p.activo : true });
+    setForm({
+      nombre: p?.nombre || "", rubro: p?.rubro || rubro || "", precio: p ? String(Math.round(p.precio)) : "",
+      costo: p && costos[p.id] != null ? String(Math.round(costos[p.id])) : "",
+      stock: p?.stock != null ? String(p.stock) : "", aviso: p?.aviso_stock != null ? String(p.aviso_stock) : "", activo: p ? p.activo : true,
+    });
     setError("");
   };
   const run = async (fn) => {
     setBusy(true); setError("");
-    try { await fn(); await onChanged(); } catch (e) { setError(reservaErrorText(e)); }
+    try { await fn(); await onChanged(); await loadCostos(); } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
   const guardar = () => {
     const precio = leerPrecio(form.precio);
+    const costo = form.costo.trim() === "" ? null : leerPrecio(form.costo);
     if (!form.nombre.trim()) { setError("Poné el nombre."); return; }
     if (precio == null) { setError("Poné el precio."); return; }
     const entero = (t) => (String(t).trim() === "" ? null : parseInt(String(t).replace(/[^\d-]/g, ""), 10));
-    const body = { nombre: form.nombre.trim(), precio, stock: entero(form.stock), aviso_stock: entero(form.aviso), activo: form.activo };
+    const body = { nombre: form.nombre.trim(), rubro: form.rubro.trim() || null, precio, stock: entero(form.stock), aviso_stock: entero(form.aviso), activo: form.activo };
     run(async () => {
-      if (editando === "nuevo") await supabaseTable("productos", { method: "POST", body: { ...body, complejo_id: complejoId, orden: productos.length }, accessToken, prefer: "return=minimal" });
-      else await supabaseTable(`productos?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      let id = editando?.id;
+      if (editando === "nuevo") {
+        const [p] = await supabaseTable("productos", { method: "POST", body: { ...body, complejo_id: complejoId, orden: productos.length }, accessToken, prefer: "return=representation" });
+        id = p.id;
+      } else await supabaseTable(`productos?id=eq.${id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      if (costo != null) await supabaseTable("producto_costos?on_conflict=producto_id", { method: "POST", body: { producto_id: id, complejo_id: complejoId, costo, updated_at: new Date().toISOString() }, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+      else if (costos[id] != null) await supabaseTable(`producto_costos?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
       setEditando(null);
     });
   };
@@ -12356,7 +12800,14 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       setReponer((r) => ({ ...r, [p.id]: "" }));
     });
   };
-  const campo = "px-3 py-2 rounded-lg border text-base";
+  const ganancia = (p) => {
+    const c = costos[p.id];
+    if (c == null) return null;
+    const g = Number(p.precio) - c;
+    return `costo ${formatoPrecio(c)} · gana ${conSigno(g)}${Number(p.precio) > 0 ? ` (${Math.round((g / Number(p.precio)) * 100)}%)` : ""}`;
+  };
+  const visibles = productos.filter((p) => !rubro || p.rubro === rubro);
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
 
   return (
     <div className="space-y-3">
@@ -12364,26 +12815,53 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       {esDueno && !editando && <button type="button" onClick={() => abrir(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar producto</button>}
       {editando && (
         <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+          <p className="text-xs text-teal-400">Cada modelo, talle o color va como un producto aparte (ej: "Grip blanco" y "Grip negro"), así cada uno lleva su stock.</p>
           <div className="grid gap-2 grid-cols-2">
-            <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={40} placeholder="Nombre (ej: Agua)" aria-label="Nombre" className={`col-span-2 ${campo}`} style={adminInput} autoFocus />
-            <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className={campo} style={adminInput} />
-            <input inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="Stock (vacío = sin control)" aria-label="Stock" className={campo} style={adminInput} />
-            <input inputMode="numeric" value={form.aviso} onChange={(e) => setForm({ ...form, aviso: e.target.value })} placeholder="Avisar cuando queden…" aria-label="Avisar con" className={campo} style={adminInput} />
+            <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} placeholder="Nombre (ej: Agua 500 o Paleta Bullpadel Vertex)" aria-label="Nombre" className={`col-span-2 ${campo}`} style={adminInput} autoFocus />
+            <input list="rubros-productos" value={form.rubro} onChange={(e) => setForm({ ...form, rubro: e.target.value })} maxLength={30} placeholder="Rubro (ej: Bebidas, Paletas)" aria-label="Rubro" className={`col-span-2 ${campo}`} style={adminInput} />
+            <datalist id="rubros-productos">{opcionesRubro.map((r) => <option key={r} value={r} />)}</datalist>
+            <label className="text-xs text-teal-400">Precio de venta
+              <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="$" aria-label="Precio" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
+            <label className="text-xs text-teal-400">Costo (solo lo ves vos)
+              <input inputMode="numeric" value={form.costo} onChange={(e) => setForm({ ...form, costo: e.target.value })} placeholder="$ (opcional)" aria-label="Costo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
+            <label className="text-xs text-teal-400">Stock
+              <input inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="Vacío = sin control" aria-label="Stock" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
+            <label className="text-xs text-teal-400">Avisar cuando queden
+              <input inputMode="numeric" value={form.aviso} onChange={(e) => setForm({ ...form, aviso: e.target.value })} placeholder="Ej: 5" aria-label="Avisar con" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
             <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={form.activo} onChange={(e) => setForm({ ...form, activo: e.target.checked })} /> A la venta</label>
           </div>
+          {(() => {
+            const pr = leerPrecio(form.precio); const co = form.costo.trim() ? leerPrecio(form.costo) : null;
+            return pr != null && co != null && <p className="text-xs text-teal-300">Ganancia por unidad: {conSigno(pr - co)}{pr > 0 ? ` (${Math.round(((pr - co) / pr) * 100)}%)` : ""}</p>;
+          })()}
           <div className="flex gap-3 items-center">
             <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{editando === "nuevo" ? "Agregar" : "Guardar"}</button>
             <button type="button" onClick={() => setEditando(null)} className="text-teal-400">Cancelar</button>
           </div>
         </div>
       )}
+      {rubros.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {[["", "Todos"], ...rubros.map((r) => [r, r])].map(([k, l]) => (
+            <button key={k || "todos"} type="button" onClick={() => setRubro(k)} className={`px-3 py-1.5 rounded-full border text-sm ${rubro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      )}
       {productos.length === 0 ? <p className="text-teal-400">Todavía no hay productos.</p> : (
         <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
-          {productos.map((p) => (
+          {visibles.map((p) => (
             <li key={p.id} className={`px-3 py-2 flex flex-wrap items-center gap-2 ${p.activo ? "" : "opacity-60"}`}>
               <span className="flex-1 min-w-[8rem]">
                 <span className="block text-teal-100 font-semibold">{p.nombre}{!p.activo && <span className="text-xs text-teal-500 font-normal"> · no está a la venta</span>}</span>
-                <span className="block text-xs text-teal-400">{formatoPrecio(p.precio)} · {p.stock == null ? "sin control de stock" : <span className={pocoStock(p) ? "text-amber-300" : ""}>quedan {p.stock}</span>}</span>
+                <span className="block text-xs text-teal-400">
+                  {p.rubro && !rubro && <span className="text-teal-500">{p.rubro} · </span>}
+                  {formatoPrecio(p.precio)} · {p.stock == null ? "sin control de stock" : <span className={pocoStock(p) ? "text-amber-300" : ""}>quedan {p.stock}</span>}
+                </span>
+                {esDueno && ganancia(p) && <span className="block text-xs text-teal-500">{ganancia(p)}</span>}
               </span>
               <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
               <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
