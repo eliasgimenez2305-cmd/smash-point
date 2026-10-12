@@ -8,6 +8,7 @@ import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
+import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -7953,7 +7954,14 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
   );
 }
 
-function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, pendingCount = 0, puedeEditar = true, puedeBorrar = true }) {
+function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, accessToken, pendingCount = 0, puedeEditar = true, puedeBorrar = true }) {
+  // Duplicar para la fecha siguiente: nombre y fecha (por defecto, una semana después)
+  const [duplicando, setDuplicando] = useState(null); // { name, date }
+  const crearCopia = () => {
+    if (!duplicando.name.trim() || !duplicando.date) return;
+    onDuplicate(duplicarTorneo(t, { name: duplicando.name.trim(), date: duplicando.date, estado: STATUS.PROXIMO, nuevoId: uid }));
+    setDuplicando(null);
+  };
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(t.name);
   const [date, setDate] = useState(t.date);
@@ -8073,6 +8081,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
         </button>
         <div className="flex gap-3 items-center">
           {puedeEditar && <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>}
+          {puedeEditar && onDuplicate && !duplicando && <button type="button" onClick={() => setDuplicando({ name: nombreSiguiente(t.name), date: t.date ? sumarDias(t.date, 7) : hoyArgentina() })} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Duplicar</button>}
           {!puedeBorrar ? null : !confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
@@ -8083,6 +8092,19 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
           )}
         </div>
       </div>
+      {duplicando && (
+        <div className="mt-3 rounded-lg border border-teal-700 p-3 space-y-2 text-sm" style={F.body}>
+          <p className="text-teal-200">Se copia todo el armado (tipo, categorías, cupos, precios, sedes, días y horarios, circuito y portada), sin parejas ni resultados. Las inscripciones quedan cerradas hasta que las abras.</p>
+          <div className="flex flex-wrap gap-2">
+            <input value={duplicando.name} onChange={(e) => setDuplicando({ ...duplicando, name: e.target.value })} aria-label="Nombre de la copia" className="flex-1 min-w-[12rem] px-3 py-2 rounded border" style={adminInput} />
+            <input type="date" value={duplicando.date} onChange={(e) => setDuplicando({ ...duplicando, date: e.target.value })} aria-label="Fecha de la copia" className="px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={!duplicando.name.trim() || !duplicando.date} onClick={crearCopia} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Crear copia</button>
+            <button type="button" onClick={() => setDuplicando(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -8512,7 +8534,7 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
+function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
   // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
@@ -8644,7 +8666,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
               <div className="space-y-2">
                 {tournaments.map((t) => (
-                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
+                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} onDuplicate={onDuplicate} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
                 ))}
                 {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>{colaborador ? "Todavía no hay torneos." : "Todavía no creaste torneos."}</p>}
               </div>
@@ -13157,6 +13179,7 @@ function SmashPointAppInner() {
         tournaments={myTournaments}
         circuits={myCircuits}
         onCreate={createTournament}
+        onDuplicate={(t) => saver.save(t)}
         onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
         onLogout={endSession}
         onUpdate={updateTournament}
