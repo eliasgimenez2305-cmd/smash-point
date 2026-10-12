@@ -10,6 +10,7 @@ import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from 
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre } from "./clientes.js";
+import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
@@ -8568,6 +8569,7 @@ const PANEL_ICONOS = {
   salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
   cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
   clientes: "M9 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 6.5M18 14a6.5 6.5 0 013.5 6",
+  reportes: "M4 20V10M10 20V4M16 20v-7M22 20H2",
   compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
@@ -8893,6 +8895,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ...(verConsumos && !colaborador ? [["compras", "Compras", "compras"]] : []),
       ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
       ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
+      ...(colaborador || complejos.length === 0 ? [] : [["reportes", "Reportes", "reportes"]]),
     ] },
     { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
   ].filter((g) => g.items.length > 0);
@@ -8918,6 +8921,8 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "reportes" && !colaborador && complejos.length > 0 ? (
+        <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} venues={venues} />
       ) : seccion === "clientes" && verClientes ? (
         <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
       ) : seccion === "compras" && verConsumos && !colaborador ? (
@@ -12388,6 +12393,177 @@ function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+/* ---------- Reportes (solo el dueño): ocupación, ingresos y gastos mes a mes, productos ---------- */
+
+const DIAS_CORTOS = [[1, "Lun"], [2, "Mar"], [3, "Mié"], [4, "Jue"], [5, "Vie"], [6, "Sáb"], [0, "Dom"]];
+
+function ReportesPanel({ organizer, complejos, complejosReservas, complejosCantina, venues }) {
+  const accessToken = organizer.accessToken;
+  const hoy = hoyArgentina();
+  const [mes, setMes] = useState(hoy.slice(0, 7));
+  const [datos, setDatos] = useState(null);
+  const [error, setError] = useState("");
+  const lista = (cs) => cs.map((c) => encodeURIComponent(c.id)).join(",");
+  const idsTodos = lista(complejos);
+  const idsReservas = lista(complejosReservas);
+  const idsCantina = lista(complejosCantina);
+
+  useEffect(() => {
+    let vivo = true;
+    setDatos(null);
+    const desde6 = `${sumarMeses(mes, -5)}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    const creado = `created_at=gte.${enAr(desde6)}&created_at=lt.${enAr(sumarDias(hasta, 1))}`;
+    const nada = Promise.resolve([]);
+    const suave = (pr) => pr.catch(() => []);
+    Promise.all([
+      idsReservas ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&activa=eq.true&order=orden.asc`) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&fecha=gte.${mes}-01&fecha=lte.${hasta}&estado=eq.confirmada&select=tipo,estado,cancha_id,fecha,inicio,fin&order=fecha.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio&order=fecha.asc`, accessToken)) : nada,
+      idsCantina ? suave(traerTodo(`venta_pagos?complejo_id=in.(${idsCantina})&${creado}&select=monto,created_at,ventas!inner(anulada)&ventas.anulada=is.false&order=created_at.asc`, accessToken)) : nada,
+      idsTodos ? suave(traerTodo(`cuenta_pagos?complejo_id=in.(${idsTodos})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      suave(traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)),
+      suave(traerTodo(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,tipo,monto&order=fecha.asc`, accessToken)),
+      idsTodos ? suave(traerTodo(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=gte.${desde6}&pagada_at=lte.${hasta}&select=pagada_at,total&order=pagada_at.asc`, accessToken)) : nada,
+      idsTodos ? suave(traerTodo(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${creado}&select=tipo,monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
+    ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos]) => {
+      if (!vivo) return;
+      const f = (iso) => fechaArgentina(iso);
+      const ing = {
+        Turnos: sumarPorMes(turnosCobrados.map((r) => ({ fecha: r.fecha, monto: r.precio }))),
+        Mostrador: sumarPorMes(ventas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Cuentas: sumarPorMes(cuentas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Inscripciones: sumarPorMes(inscripciones.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Otros: sumarPorMes([...manuales.filter((m) => m.tipo === "ingreso"), ...movTurnos.filter((m) => m.tipo === "ingreso").map((m) => ({ fecha: f(m.created_at), monto: m.monto }))]),
+      };
+      const gas = sumarPorMes([
+        ...manuales.filter((m) => m.tipo === "gasto"),
+        ...compras.map((c) => ({ fecha: c.pagada_at, monto: c.total })),
+        ...movTurnos.filter((m) => m.tipo === "gasto").map((m) => ({ fecha: f(m.created_at), monto: m.monto })),
+      ]);
+      setDatos({
+        ocupacion: canchas.length ? ocupacionMes({ canchas, reservas: reservasMes, mes }) : null,
+        ing, gas,
+        productos: rankingProductos(vendidos.map((i) => ({ ...i, costo_unitario: [].concat(i.venta_items_costo || [])[0]?.costo_unitario }))),
+      });
+      setError("");
+    }).catch(() => { if (vivo) setError("No se pudieron cargar los reportes. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [mes, organizer.id, accessToken, idsTodos, idsReservas, idsCantina]);
+
+  const meses = Array.from({ length: 6 }, (_, i) => sumarMeses(mes, i - 5));
+  const ingresoDe = (m) => (datos ? Object.values(datos.ing).reduce((s, x) => s + (x[m] || 0), 0) : 0);
+  const gastoDe = (m) => (datos ? datos.gas[m] || 0 : 0);
+  const maximo = Math.max(1, ...meses.map((m) => Math.max(ingresoDe(m), gastoDe(m))));
+  const anterior = ingresoDe(sumarMeses(mes, -1));
+  const variacion = anterior ? Math.round(((ingresoDe(mes) - anterior) / anterior) * 100) : null;
+  const corto = (m) => etiquetaMes(m).slice(0, 3);
+  const colorPct = (p) => (p == null ? "transparent" : `rgba(159, 224, 34, ${0.08 + (p / 100) * 0.8})`);
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+        <span className="font-semibold text-teal-100">{etiquetaMes(mes)}</span>
+        <button type="button" disabled={mes >= hoy.slice(0, 7)} onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300 disabled:opacity-30" aria-label="Mes siguiente">›</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {datos.ocupacion && <TarjetaResumen titulo="Ocupación" tono="lime" valor={`${datos.ocupacion.pctTotal}%`} detalle="De las horas abiertas" />}
+            {datos.ocupacion && <TarjetaResumen titulo="Horas jugadas" tono="cyan" valor={String(Math.round(datos.ocupacion.horasOcupadas))} detalle="Turnos confirmados" />}
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={formatoPrecio(ingresoDe(mes)) || "$0"} detalle={variacion == null ? "Sin mes anterior" : `${variacion >= 0 ? "▲" : "▼"} ${Math.abs(variacion)}% vs ${corto(sumarMeses(mes, -1)).toLowerCase()}`} />
+            <TarjetaResumen titulo="Resultado" tono={ingresoDe(mes) - gastoDe(mes) < 0 ? "rojo" : "cyan"} valor={conSigno(ingresoDe(mes) - gastoDe(mes))} detalle={`Gastos ${formatoPrecio(gastoDe(mes)) || "$0"}`} />
+          </div>
+
+          {datos.ocupacion && (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+              <section className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <h2 className="text-sm uppercase tracking-wide text-teal-400">Ocupación por cancha</h2>
+                {datos.ocupacion.porCancha.map((c) => (
+                  <div key={c.id}>
+                    <div className="flex justify-between text-teal-200"><span>{c.nombre}</span><span className="tabular-nums">{c.pct}% · {Math.round(c.horasOcupadas)} h</span></div>
+                    <div className="h-2.5 rounded-full mt-1" style={{ backgroundColor: "#134e4a" }}><div className="h-2.5 rounded-full" style={{ width: `${Math.min(100, c.pct)}%`, backgroundColor: BRAND.lime }} /></div>
+                  </div>
+                ))}
+              </section>
+              <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-1">Qué horarios se llenan</h2>
+                <p className="text-xs text-teal-500 mb-3">% ocupado por día y hora en el mes. Los claros son los horarios para promocionar.</p>
+                <div className="overflow-x-auto">
+                  <table className="text-[11px] border-separate" style={{ borderSpacing: 2 }}>
+                    <thead><tr><th></th>{DIAS_CORTOS.map(([, l]) => <th key={l} className="px-1 text-teal-400 font-normal">{l}</th>)}</tr></thead>
+                    <tbody>
+                      {datos.ocupacion.horas.map((h) => (
+                        <tr key={h}>
+                          <td className="pr-1 text-teal-500 tabular-nums text-right">{String(h % 24).padStart(2, "0")}h</td>
+                          {DIAS_CORTOS.map(([d]) => {
+                            const p = datos.ocupacion.pct(d, h);
+                            return <td key={d} title={p == null ? "Cerrado" : `${p}%`} className="w-10 h-6 rounded text-center tabular-nums" style={{ backgroundColor: colorPct(p), color: p != null && p >= 55 ? "#14181f" : "#cbd5e1" }}>{p == null ? "" : p}</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Últimos 6 meses</h2>
+              <span className="flex gap-3 text-xs"><span className="text-lime-400">■ Ingresos</span><span className="text-red-300">■ Gastos</span></span>
+            </div>
+            <div className="flex items-end gap-2 sm:gap-4 h-40">
+              {meses.map((m) => (
+                <div key={m} className="flex-1 min-w-0 flex flex-col items-center h-full">
+                  <div className="flex-1 w-full flex items-end justify-center gap-0.5 sm:gap-1">
+                    <div title={formatoPrecio(ingresoDe(m))} className="w-1/2 max-w-[1.5rem] rounded-t" style={{ height: `${(ingresoDe(m) / maximo) * 100}%`, backgroundColor: BRAND.lime, opacity: m === mes ? 1 : 0.6 }} />
+                    <div title={formatoPrecio(gastoDe(m))} className="w-1/2 max-w-[1.5rem] rounded-t" style={{ height: `${(gastoDe(m) / maximo) * 100}%`, backgroundColor: "#f87171", opacity: m === mes ? 1 : 0.6 }} />
+                  </div>
+                  <span className={`text-[11px] mt-1 ${m === mes ? "text-slate-100 font-semibold" : "text-teal-500"}`}>{corto(m)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead><tr className="text-teal-500 text-left"><th className="py-1 pr-2 font-normal"></th>{meses.map((m) => <th key={m} className="py-1 px-1 font-normal text-right">{corto(m)}</th>)}</tr></thead>
+                <tbody>
+                  {Object.entries(datos.ing).filter(([, x]) => meses.some((m) => x[m])).map(([k, x]) => (
+                    <tr key={k} className="border-t border-teal-900/60"><td className="py-1 pr-2 text-teal-200">{k}</td>{meses.map((m) => <td key={m} className="py-1 px-1 text-right tabular-nums">{x[m] ? formatoPrecio(x[m]) : "—"}</td>)}</tr>
+                  ))}
+                  <tr className="border-t border-teal-700"><td className="py-1 pr-2 text-red-300">Gastos</td>{meses.map((m) => <td key={m} className="py-1 px-1 text-right tabular-nums text-red-300">{gastoDe(m) ? formatoPrecio(gastoDe(m)) : "—"}</td>)}</tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {datos.productos.length > 0 && (
+            <section className="rounded-xl border border-teal-800 p-4 space-y-2" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+              <ul className="divide-y divide-teal-900/70">
+                {datos.productos.slice(0, 12).map((x, i) => (
+                  <li key={x.descripcion} className="py-1.5 flex items-center gap-3">
+                    <span className="w-5 text-teal-500 tabular-nums">{i + 1}</span>
+                    <span className="flex-1 min-w-0 truncate text-slate-100">{x.descripcion}</span>
+                    <span className="text-teal-400 tabular-nums shrink-0">{x.cantidad} u.</span>
+                    <span className="w-24 text-right tabular-nums shrink-0">{formatoPrecio(x.facturado)}</span>
+                    <span className={`w-24 text-right tabular-nums shrink-0 hidden sm:inline ${x.conCosto ? "text-lime-400" : "text-teal-600"}`}>{x.conCosto ? `+${formatoPrecio(x.ganancia)}` : "sin costo"}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </>
+      )}
     </div>
   );
 }
