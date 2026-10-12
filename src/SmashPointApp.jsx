@@ -8577,7 +8577,7 @@ function PanelIcono({ nombre, className = "w-5 h-5" }) {
 
 /* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
    botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
-function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, titulo, children }) {
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, titulo, anchoCompleto = false, children }) {
   const [abierto, setAbierto] = useState(false);
   useEffect(() => {
     if (!abierto) return;
@@ -8650,8 +8650,8 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
           </aside>
         </div>
       )}
-      <main className="px-4 sm:px-6 lg:px-10 py-6 lg:py-8 max-w-5xl">
-        <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>
+      <main className={`px-4 sm:px-6 lg:px-10 py-6 lg:py-8 ${anchoCompleto ? "" : "max-w-5xl"}`}>
+        {titulo && <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>}
         {children}
       </main>
     </div>
@@ -8834,7 +8834,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
+function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
   // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
@@ -8897,12 +8897,13 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       logoUrl={organizer.logoUrl}
       subtitulo={colaborador ? `Empleado · ${organizer.email}` : complejos.length > 0 ? "Panel del complejo" : "Panel del organizador"}
       grupos={grupos}
-      activa={seccion}
-      onElegir={(key) => { setSeccion(key); setPerfilGuardado(false); }}
+      activa={torneoAbierto ? "torneos" : seccion}
+      onElegir={(key) => { if (torneoAbierto) onCerrarTorneo(); setSeccion(key); setPerfilGuardado(false); }}
       onLogout={onLogout}
-      titulo={tituloSeccion}
+      titulo={torneoAbierto ? null : tituloSeccion}
+      anchoCompleto={!!torneoAbierto}
     >
-      {seccion === "inicio" && verInicio ? (
+      {torneoAbierto ? torneoAbierto : seccion === "inicio" && verInicio ? (
         <InicioPanel
           organizer={organizer} colaborador={colaborador} permisos={permisos}
           complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina}
@@ -8920,8 +8921,8 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
       ) : seccion === "caja" && !colaborador ? (
         <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
       ) : seccion === "perfil" && !colaborador ? (
-        <div className="space-y-6" style={F.body}>
-          <div className="border border-teal-800 rounded-lg p-4 space-y-3">
+        <div className="grid gap-6 lg:grid-cols-2 items-start" style={F.body}>
+          <div className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
             <h2 className="text-sm uppercase tracking-wide text-teal-400">Datos del organizador</h2>
             <div>
               <label className="block text-xs text-teal-400 mb-1" htmlFor="perfil-nombre">Nombre</label>
@@ -8937,8 +8938,8 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
             </div>
           </div>
           {complejos.map((c) => (
-            <div key={c.id} className="border border-teal-800 rounded-lg p-4">
-              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Colaboradores{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
+            <div key={c.id} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Empleados{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
               <ColaboradoresConfig complejoId={c.id} accessToken={organizer.accessToken} />
             </div>
           ))}
@@ -8968,6 +8969,11 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
             <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
           ) : (
             <>
+              <div className="grid grid-cols-3 gap-3 mb-6">
+                <TarjetaResumen titulo="En curso" tono="lime" valor={String(tournaments.filter((t) => tournamentStatusOf(t) === STATUS.EN_CURSO).length)} />
+                <TarjetaResumen titulo="Próximos" tono="cyan" valor={String(tournaments.filter((t) => tournamentStatusOf(t) === STATUS.PROXIMO).length)} />
+                <TarjetaResumen titulo="Por aprobar" tono="ambar" valor={String((inscripciones || []).filter((i) => i.estado === "pendiente" && tournaments.some((t) => t.id === i.torneo_id)).length)} detalle="Inscripciones" />
+              </div>
               {permisos.torneos && (
                 <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
                   + Crear torneo
@@ -9424,15 +9430,30 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
 
+      {reservas !== null && (() => {
+        const turnos = lista.filter((r) => r.tipo === "turno" && r.estado === "confirmada");
+        const cobrados = turnos.filter((r) => r.medio_pago && r.precio != null);
+        const porCobrar = turnos.filter((r) => !r.medio_pago && !r.no_vino && r.precio != null);
+        const pedidos = lista.filter((r) => r.estado === "pendiente").length;
+        return (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+            <TarjetaResumen titulo="Turnos" tono="cyan" valor={String(turnos.length)} detalle={pedidos > 0 ? `+ ${pedidos} pedido${pedidos === 1 ? "" : "s"}` : "Confirmados"} />
+            <TarjetaResumen titulo="Cobrado" tono="lime" valor={formatoPrecio(cobrados.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${cobrados.length} turno${cobrados.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Por cobrar" tono="ambar" valor={formatoPrecio(porCobrar.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${porCobrar.length} turno${porCobrar.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Bloqueos" tono="gris" valor={String(lista.filter((r) => r.tipo === "bloqueo" && r.estado === "confirmada").length)} detalle="Horarios cerrados" />
+          </div>
+        );
+      })()}
+
       {reservas === null ? (
         !error && <p className="text-sm opacity-60">Cargando…</p>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-teal-900">
+        <div className="overflow-x-auto rounded-xl border border-teal-800">
           <table className="w-full border-collapse text-xs" style={{ minWidth: 80 + canchas.length * 120 }}>
             <thead>
-              <tr>
-                <th className="sticky left-0 z-10 w-14 px-2 py-2 text-left text-teal-500 font-normal" style={{ backgroundColor: "#0b1c24" }}>Hora</th>
-                {canchas.map((c) => <th key={c.id} className="px-2 py-2 text-left text-teal-200 font-semibold">{c.nombre}</th>)}
+              <tr style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                <th className="sticky left-0 z-10 w-14 px-2 py-2.5 text-left text-teal-300 font-semibold uppercase tracking-wider text-[11px]" style={{ backgroundColor: "#16332a" }}>Hora</th>
+                {canchas.map((c) => <th key={c.id} className="px-2 py-2.5 text-left text-slate-100 font-semibold uppercase tracking-wider text-[11px]">{c.nombre}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -13367,7 +13388,7 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
   );
 }
 
-function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
+function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
@@ -13433,7 +13454,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
   return (
     <CourtNamesContext.Provider value={tournament}>
       {/* La planilla de Horarios necesita más ancho (y Sin horario al costado) */}
-      <div className={`px-6 py-8 mx-auto ${view === "horarios" ? "max-w-7xl" : "max-w-4xl"}`}>
+      <div className={`${enPanel ? "" : "px-6 py-8 mx-auto"} ${view === "horarios" ? "max-w-7xl" : "max-w-4xl"}`}>
         <button onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-2" style={F.body}>← Mis torneos</button>
         <div className="flex justify-between items-center flex-wrap gap-3 mb-1">
           <h1 className="text-xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
@@ -14303,9 +14324,27 @@ function SmashPointAppInner() {
         onLogout={endSession}
       />
     );
-  } else if (route === "admin-home" && session) {
+  } else if ((route === "admin-home" || route === "admin-tournament") && session) {
+    // El torneo abierto va adentro del panel (con el menú al costado); al elegir otra sección se cierra
+    const torneoAbierto = route !== "admin-tournament" || !selected ? null : selected._light ? <LoadingTournament /> : (
+      <AdminTournament
+        enPanel
+        tournament={selected}
+        update={updateTournament}
+        onBack={() => setRoute("admin-home")}
+        inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
+        onResolveInscripcion={resolveInscripcion}
+        soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
+        cobros={session.role === "creador" ? null : {
+          accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
+          complejoIds: complejos.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
+        }}
+      />
+    );
     content = (
       <AdminHome
+        torneoAbierto={torneoAbierto}
+        onCerrarTorneo={() => setRoute("admin-home")}
         organizer={{ ...session, coverUrl: session.coverUrl ?? organizers.find((o) => o.id === session.id)?.coverUrl ?? "" }}
         tournaments={myTournaments}
         circuits={myCircuits}
@@ -14325,23 +14364,6 @@ function SmashPointAppInner() {
         onDeleteEvent={deleteEvent}
         complejos={complejos.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id))}
         venues={venues}
-      />
-    );
-  } else if (route === "admin-tournament" && selected?._light) {
-    content = <LoadingTournament />;
-  } else if (route === "admin-tournament" && selected) {
-    content = (
-      <AdminTournament
-        tournament={selected}
-        update={updateTournament}
-        onBack={() => setRoute("admin-home")}
-        inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
-        onResolveInscripcion={resolveInscripcion}
-        soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
-        cobros={session.role === "creador" ? null : {
-          accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
-          complejoIds: complejos.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
-        }}
       />
     );
   } else {
