@@ -12076,6 +12076,144 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
   );
 }
 
+/* ---------- Avisos de horarios por WhatsApp (solo torneos clásicos) ---------- */
+
+/* Firma corta de un mensaje: si cambia, cambió algo de los horarios de esa pareja */
+function firmaTexto(texto) {
+  let h = 5381;
+  for (let i = 0; i < texto.length; i++) h = ((h << 5) + h + texto.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+
+/* A quién ya se le avisó y con qué mensaje (en este navegador): { [parejaId]: firma } */
+const avisosKey = (torneoId) => `sp:avisos:${torneoId}`;
+function leerAvisos(torneoId) {
+  try { return JSON.parse(localStorage.getItem(avisosKey(torneoId)) || "{}"); } catch { return {}; }
+}
+function guardarAvisos(torneoId, avisos) {
+  try { localStorage.setItem(avisosKey(torneoId), JSON.stringify(avisos)); } catch {}
+}
+
+/* Mensaje de una pareja con sus próximos partidos (los que tienen día y hora y todavía no se jugaron) */
+function mensajeHorarios(tournament, category, pair, partidos, pairsById) {
+  const lineas = partidos.map((m) => {
+    const rivalId = m.pairA === pair.id ? m.pairB : m.pairA;
+    const rival = pairsById[rivalId]?.name || (m.placeholder ? "a definir" : "a definir");
+    return `• ${formatDateShort(m.schedule.date)} · ${formatHour(m.schedule.time)}${m.schedule.court ? ` · ${courtName(tournament, m.schedule.court)}` : ""} · vs ${rival} (${m.label})`;
+  });
+  return `Hola ${pair.name}! 🎾 Tus horarios en ${tournament.name} (${category.name}):\n${lineas.join("\n")}\n¡Los esperamos! Si hay algún cambio, les avisamos por acá.`;
+}
+
+function AvisosPanel({ tournament, inscripciones = [] }) {
+  const [avisos, setAvisos] = useState(() => leerAvisos(tournament.id));
+  const [filtro, setFiltro] = useState("pendientes"); // pendientes | todas
+  const [categoriaId, setCategoriaId] = useState("todas");
+  const [telefonos, setTelefonos] = useState({}); // WhatsApp escrito a mano para parejas cargadas sin inscripción (no se guarda)
+  const [copiado, setCopiado] = useState(null);
+
+  // Partidos con día y hora que todavía no se jugaron (sin llaves en borrador)
+  const partidos = collectScheduleableMatches(tournament).filter((m) => m.schedule?.date && m.schedule?.time && !m.draft && !m.walkover && !m.retired && !(m.sets || []).length);
+  const filas = tournament.categories.flatMap((c) => {
+    const pairsById = Object.fromEntries((c.pairs || []).map((p) => [p.id, p]));
+    return (c.pairs || []).map((pair) => {
+      const suyos = partidos.filter((m) => m.categoryId === c.id && (m.pairA === pair.id || m.pairB === pair.id))
+        .sort((a, b) => `${a.schedule.date} ${a.schedule.time}`.localeCompare(`${b.schedule.date} ${b.schedule.time}`));
+      const mensaje = suyos.length ? mensajeHorarios(tournament, c, pair, suyos, pairsById) : null;
+      const firma = mensaje ? firmaTexto(mensaje) : null;
+      const enviado = avisos[pair.id];
+      const estado = !mensaje ? "sin_horario" : !enviado ? "sin_avisar" : enviado === firma ? "avisado" : "cambio";
+      const telefono = inscripciones.find((i) => i.id === pair.inscripcionId)?.telefono || normalizeArPhone(telefonos[pair.id]) || null;
+      return { c, pair, suyos, mensaje, firma, estado, telefono };
+    });
+  });
+  const conHorario = filas.filter((f) => f.estado !== "sin_horario");
+  const avisadas = conHorario.filter((f) => f.estado === "avisado").length;
+  const cambios = conHorario.filter((f) => f.estado === "cambio").length;
+  const visibles = filas.filter((f) => (categoriaId === "todas" || f.c.id === categoriaId) && (filtro === "todas" || f.estado === "sin_avisar" || f.estado === "cambio"));
+
+  const marcar = (f) => {
+    const next = { ...avisos, [f.pair.id]: f.firma };
+    setAvisos(next);
+    guardarAvisos(tournament.id, next);
+  };
+  const copiar = async (f) => {
+    try { await navigator.clipboard.writeText(f.mensaje); setCopiado(f.pair.id); setTimeout(() => setCopiado(null), 2000); } catch {}
+    marcar(f);
+  };
+  const desmarcar = (f) => {
+    const { [f.pair.id]: _, ...rest } = avisos;
+    setAvisos(rest);
+    guardarAvisos(tournament.id, rest);
+  };
+  const ESTADOS = { sin_avisar: ["Sin avisar", "#fbbf24"], avisado: ["Avisado ✓", BRAND.lime], cambio: ["Cambió el horario: volver a avisar", "#f87171"], sin_horario: ["Todavía sin horarios", "#64748b"] };
+  const pill = (activo, onClick, label) => (
+    <button type="button" onClick={onClick} className={`shrink-0 px-3 py-1 rounded-full text-sm border ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  if (partidos.length === 0) {
+    return <p className="text-sm text-teal-300" style={F.body}>Todavía no hay partidos con día y hora. Armá los horarios en la pestaña Horarios y volvé acá para avisarle a cada pareja.</p>;
+  }
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="rounded-xl p-3 flex flex-wrap gap-x-6 gap-y-1" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <span className="text-teal-200"><span className="text-lime-400 font-semibold">{avisadas}</span> de {conHorario.length} parejas avisadas</span>
+        {cambios > 0 && <span className="text-red-300 font-semibold">{cambios} con horarios cambiados</span>}
+      </div>
+      <p className="text-xs text-teal-500">El mensaje lleva los próximos partidos de cada pareja. Al tocar WhatsApp o Copiar queda marcada como avisada; si después le cambiás un horario, vuelve a aparecer para avisarle de nuevo. Lo marcado se guarda en este celular o compu.</p>
+      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+        {pill(filtro === "pendientes", () => setFiltro("pendientes"), "Por avisar")}
+        {pill(filtro === "todas", () => setFiltro("todas"), "Todas")}
+        {tournament.categories.length > 1 && <>
+          <span className="w-px bg-teal-800 shrink-0" />
+          {pill(categoriaId === "todas", () => setCategoriaId("todas"), "Todas las categorías")}
+          {tournament.categories.map((c) => pill(categoriaId === c.id, () => setCategoriaId(c.id), c.name))}
+        </>}
+      </div>
+      {visibles.length === 0 ? (
+        <p className="text-lime-400">{filtro === "pendientes" ? "¡Listo! No queda nadie por avisar." : "No hay parejas."}</p>
+      ) : (
+        <ul className="space-y-2">
+          {visibles.map((f) => {
+            const [label, color] = ESTADOS[f.estado];
+            return (
+              <li key={f.pair.id} className="rounded-lg border border-teal-900 p-3 space-y-2">
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="flex-1 min-w-[10rem]">
+                    <p className="text-teal-100 font-semibold">{f.pair.name}</p>
+                    <p className="text-xs text-teal-500">{f.c.name}{f.telefono ? ` · ${formatArPhone(f.telefono)}` : ""}</p>
+                  </div>
+                  <span className="text-xs font-semibold" style={{ color }}>● {label}</span>
+                </div>
+                {f.suyos.length > 0 && (
+                  <ul className="text-xs text-teal-300 space-y-0.5">
+                    {f.suyos.map((m) => {
+                      const rivalId = m.pairA === f.pair.id ? m.pairB : m.pairA;
+                      const rival = (f.c.pairs || []).find((p) => p.id === rivalId)?.name || "a definir";
+                      return <li key={m.key}>{formatDateShort(m.schedule.date)} · {formatHour(m.schedule.time)}{m.schedule.court ? ` · ${courtName(tournament, m.schedule.court)}` : ""} · vs {rival} <span className="text-teal-500">({m.label})</span></li>;
+                    })}
+                  </ul>
+                )}
+                {f.mensaje && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {f.telefono ? (
+                      <a href={waLink(f.telefono, f.mensaje)} target="_blank" rel="noopener noreferrer" onClick={() => marcar(f)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Avisar por WhatsApp</a>
+                    ) : (
+                      <input type="tel" value={telefonos[f.pair.id] || ""} onChange={(e) => setTelefonos({ ...telefonos, [f.pair.id]: e.target.value })} placeholder="WhatsApp (no se guarda)" aria-label={`WhatsApp de ${f.pair.name}`} className="w-48 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+                    )}
+                    <button type="button" onClick={() => copiar(f)} className="px-3 py-1.5 rounded-lg border border-teal-700 text-teal-200">{copiado === f.pair.id ? "¡Copiado!" : "Copiar mensaje"}</button>
+                    {f.estado === "avisado" && <button type="button" onClick={() => desmarcar(f)} className="text-xs text-teal-500 underline">marcar sin avisar</button>}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
@@ -12086,7 +12224,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
   // de horarios: sus partidos van en "Partidos".
   // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
   const allTabs = usesSchedule
-    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
     : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : [])];
   const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
@@ -12208,6 +12346,10 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
             />
             {usesSchedule && <CourtsAndDatesEditor tournament={tournament} onChange={update} />}
           </>
+        )}
+
+        {view === "avisos" && usesSchedule && (
+          <AvisosPanel tournament={tournament} inscripciones={inscripciones} />
         )}
 
         {view === "cobros" && cobros && (
