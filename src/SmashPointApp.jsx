@@ -8570,6 +8570,7 @@ const PANEL_ICONOS = {
   cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
   clientes: "M9 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 6.5M18 14a6.5 6.5 0 013.5 6",
   reportes: "M4 20V10M10 20V4M16 20v-7M22 20H2",
+  clases: "M2 9l10-5 10 5-10 5zM6 11v5c3 2 9 2 12 0v-5M22 9v6",
   compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
@@ -8713,7 +8714,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       // La plata de hoy (solo el dueño): lo mismo que suma la Caja, para el día
       verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata ? supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=eq.${hoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
-      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`venta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto,ventas!inner(anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : nada,
     ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas, pagosVentas]) => {
@@ -8887,6 +8888,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
     { titulo: "Operación", items: [
       ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
       ...(verClientes ? [["clientes", "Clientes", "clientes"]] : []),
+      ...(verReservas && permisos.agenda ? [["clases", "Clases", "clases"]] : []),
       ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
       ...(verCajaDia ? [["cajadia", "Caja del día", "cajadia"]] : []),
     ] },
@@ -8921,6 +8923,8 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "clases" && verReservas && permisos.agenda ? (
+        <ClasesPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "reportes" && !colaborador && complejos.length > 0 ? (
         <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} venues={venues} />
       ) : seccion === "clientes" && verClientes ? (
@@ -9483,6 +9487,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
 /* Colores de cada cosa en la agenda */
 function estiloReserva(r) {
   if (r.tipo === "bloqueo") return { backgroundColor: "rgba(148,163,184,0.18)", border: "1px dashed #94a3b8", color: "#cbd5e1" };
+  if (r.tipo === "clase") return { backgroundColor: "rgba(34,211,238,0.14)", border: `1px solid ${BRAND.cyan}`, color: BRAND.ink };
   if (r.estado === "pendiente") return { backgroundColor: "rgba(251,191,36,0.16)", border: "1px solid #fbbf24", color: "#fde68a" };
   if (r.no_vino) return { backgroundColor: "rgba(248,113,113,0.14)", border: "1px solid #f87171", color: "#fecaca" };
   return { backgroundColor: "rgba(159,224,34,0.14)", border: `1px solid ${BRAND.lime}`, color: BRAND.ink };
@@ -9600,7 +9605,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
                         <button type="button" onClick={() => setDetalleId(r.id)} className="w-full rounded px-2 py-1 text-left leading-tight overflow-hidden flex flex-col justify-start" style={{ ...estiloReserva(r), height: `calc(${x.span * 2.25}rem + ${x.span - 1}px - 4px)` }}>
                           <span className="block font-semibold truncate">{r.tipo === "bloqueo" ? `🔒 ${r.nota || "Bloqueado"}` : r.nombre}</span>
                           <span className="block opacity-80">{rangoLabel(desde, hasta)}</span>
-                          {r.tipo === "turno" && (
+                          {r.tipo !== "bloqueo" && (
                             <span className="block opacity-80">
                               {r.estado === "pendiente" ? "Pendiente" : r.no_vino ? "No vino" : r.medio_pago ? `✓ ${medioPagoLabel(r.medio_pago)}` : formatoPrecio(r.precio)}
                             </span>
@@ -11564,7 +11569,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
 
 /* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
 
-const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", compras: "Compras", fijo: "Gastos fijos", manual: "Otros" };
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", clases: "Clases", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", compras: "Compras", profes: "Pagos a profes", fijo: "Gastos fijos", manual: "Otros" };
 // $45.000 o −$45.000 (formatoPrecio no lleva signo)
 const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
 
@@ -11618,10 +11623,10 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     try {
       const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
       const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
-      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras] = await Promise.all([
+      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes] = await Promise.all([
         supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
         supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
-        complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
+        complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
         complejoIds ? supabaseTable(`canchas?complejo_id=in.(${inList})&select=id,nombre`) : [],
         // Pagos de las cuentas de consumos (si la base todavía no tiene la tabla, nada)
         complejoIds ? supabaseTable(`cuenta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,cuentas(nombre)`, { accessToken }).catch(() => []) : [],
@@ -11632,8 +11637,11 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
         complejoIds ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${inList})&tipo=in.(gasto,ingreso)&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,tipo,concepto,monto,created_at,hecho_por_email`, { accessToken }).catch(() => []) : [],
         // Compras a proveedores, el día que se pagaron
         complejoIds ? supabaseTable(`compras?complejo_id=in.(${inList})&anulada=is.false&pagada_at=gte.${desde}&pagada_at=lte.${hasta}&select=id,total,medio,pagada_at,proveedores(nombre)`, { accessToken }).catch(() => []) : [],
+        // Clases: cuotas de alumnos (ingreso) y pagos a los profes (gasto)
+        complejoIds ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,alumnos(nombre)`, { accessToken }).catch(() => []) : [],
+        complejoIds ? supabaseTable(`pagos_profes?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,profes_complejo(nombre)`, { accessToken }).catch(() => []) : [],
       ]);
-      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras });
+      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes });
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [rango, organizer.id, accessToken, complejoIds]);
@@ -11646,11 +11654,13 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     ...datos.pagos.map((p) => ({ key: `p${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "inscripcion", concepto: conceptoInscripcion(p, tournaments), monto: Number(p.monto), medio: p.medio })),
     ...datos.turnos.filter((r) => r.precio != null).map((r) => ({
       key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: "turno", monto: Number(r.precio), medio: r.medio_pago,
-      concepto: ["Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
+      concepto: [r.tipo === "clase" ? "Clase" : "Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
     })),
     ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.movTurnos.map((m) => ({ key: `d${m.id}`, fecha: fechaArgentina(m.created_at), tipo: m.tipo === "gasto" ? "gasto" : "ingreso", origen: "caja_dia", concepto: `${m.concepto}${m.hecho_por_email ? ` · ${m.hecho_por_email}` : ""}`, monto: Number(m.monto), medio: "efectivo" })),
+    ...datos.cuotas.map((x) => ({ key: `q${x.id}`, fecha: fechaArgentina(x.created_at), tipo: "ingreso", origen: "clases", concepto: `Cuota ${etiquetaMes(x.periodo).split(" ")[0].toLowerCase()} · ${x.alumnos?.nombre || "alumno"}`, monto: Number(x.monto), medio: x.medio })),
+    ...datos.pagosProfes.map((x) => ({ key: `pp${x.id}`, fecha: fechaArgentina(x.created_at), tipo: "gasto", origen: "profes", concepto: `Pago a ${x.profes_complejo?.nombre || "profe"} · ${etiquetaMes(x.periodo).split(" ")[0].toLowerCase()}`, monto: Number(x.monto), medio: x.medio })),
     ...datos.compras.map((x) => ({ key: `k${x.id}`, fecha: x.pagada_at, tipo: "gasto", origen: "compras", concepto: `Compra${x.proveedores?.nombre ? ` a ${x.proveedores.nombre}` : ""}`, monto: Number(x.total), medio: x.medio })),
     ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: m.gasto_fijo_id ? "fijo" : "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
   ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
@@ -12219,6 +12229,317 @@ const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null &&
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
    stock. La usan el dueño y los colaboradores con permiso de consumos. */
+/* ---------- Clases con profes (ver 20261028_clases.sql) ----------
+   Modo "alquila": el profe alquila la cancha; cada clase es una reserva con el precio del alquiler
+   y lo que no se cobró es lo que debe. Modo "complejo": el complejo cobra la cuota a cada alumno y le
+   paga al profe por clase dictada. */
+
+const MODOS_PROFE = { alquila: "Alquila la cancha", complejo: "Cobra el complejo" };
+
+function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [datos, setDatos] = useState(null); // { profes, canchas, clases, alumnos, cuotas, pagos }
+  const [error, setError] = useState("");
+  const [abierto, setAbierto] = useState(null); // id del profe
+  const [form, setForm] = useState(null); // alta o edición de profe
+  const [version, setVersion] = useState(0);
+  const mes = hoy.slice(0, 7);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+  const recargar = useCallback(() => setVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    let vivo = true;
+    const c = encodeURIComponent(complejoId);
+    Promise.all([
+      supabaseTable(`profes_complejo?complejo_id=eq.${c}&order=activo.desc,nombre.asc`, { accessToken }),
+      supabaseTable(`canchas?complejo_id=eq.${c}&activa=eq.true&order=orden.asc,created_at.asc`),
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id&order=fecha.asc`, accessToken),
+      supabaseTable(`alumnos?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
+      supabaseTable(`cuotas_alumnos?complejo_id=eq.${c}&periodo=eq.${mes}&select=alumno_id,monto,medio`, { accessToken }),
+      esDueno ? supabaseTable(`pagos_profes?complejo_id=eq.${c}&periodo=eq.${mes}&select=profe_id,monto`, { accessToken }) : Promise.resolve([]),
+    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos }); setError(""); } })
+      .catch(() => { if (vivo) setError("No se pudieron cargar las clases. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [complejoId, accessToken, esDueno, hoy, mes, version]);
+
+  const guardarProfe = async () => {
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!form.nombre.trim()) { setError("Poné el nombre del profe."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    const body = { nombre: form.nombre.trim(), telefono, modo: form.modo, precio_hora: form.modo === "alquila" ? leerPrecio(form.precio) : null, pago_clase: form.modo === "complejo" ? leerPrecio(form.precio) : null, activo: form.activo };
+    try {
+      if (form.id) await supabaseTable(`profes_complejo?id=eq.${form.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("profes_complejo", { method: "POST", body: { ...body, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
+      setForm(null); setError(""); recargar();
+    } catch (e) { setError(reservaErrorText(e)); }
+  };
+  const editar = (p) => setForm(p
+    ? { id: p.id, nombre: p.nombre, telefono: p.telefono ? formatArPhone(p.telefono) : "", modo: p.modo, precio: String(Math.round((p.modo === "alquila" ? p.precio_hora : p.pago_clase) || "")) || "", activo: p.activo }
+    : { nombre: "", telefono: "", modo: "alquila", precio: "", activo: true });
+
+  const resumen = (p) => {
+    const clases = datos.clases.filter((r) => r.profe_id === p.id);
+    if (p.modo === "alquila") {
+      const sinCobrar = clases.filter((r) => r.fecha <= hoy && !r.medio_pago && r.precio != null);
+      return { debe: sinCobrar.reduce((s, r) => s + Number(r.precio), 0), sinCobrar, proximas: clases.filter((r) => r.fecha > hoy).length };
+    }
+    const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id && a.activo);
+    const pagaron = alumnos.filter((a) => datos.cuotas.some((q) => q.alumno_id === a.id)).length;
+    const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && r.fecha <= hoy).length;
+    const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
+    return { alumnos: alumnos.length, pagaron, dictadas, aPagar: Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado), proximas: clases.filter((r) => r.fecha > hoy).length };
+  };
+  const profe = datos?.profes.find((p) => p.id === abierto);
+
+  if (profe) return <ProfeDetalle profe={profe} datos={datos} complejoId={complejoId} venueName={nombreComplejo(complejoId)} accessToken={accessToken} esDueno={esDueno} hoy={hoy} mes={mes} onBack={() => setAbierto(null)} onChanged={recargar} onEditar={() => { editar(profe); setAbierto(null); }} />;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          {form ? (
+            <section className="rounded-xl border border-teal-700 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">{form.id ? "Editar profe" : "Nuevo profe"}</h2>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(MODOS_PROFE).map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => setForm({ ...form, modo: k })} className={`px-3 py-2 rounded-lg border text-left ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                    <span className="block font-semibold">{l}</span>
+                    <span className="block text-xs opacity-80">{k === "alquila" ? "Te paga la cancha; los alumnos le pagan a él" : "Vos cobrás las cuotas y le pagás por clase"}</span>
+                  </button>
+                ))}
+              </div>
+              <label className="block text-xs text-teal-400">{form.modo === "alquila" ? "Lo que paga por hora de cancha" : "Lo que le pagás por clase dictada"}
+                <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="$" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </label>
+              {form.id && <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={form.activo} onChange={(e) => setForm({ ...form, activo: e.target.checked })} /> Activo</label>}
+              <div className="flex gap-3 items-center">
+                <button type="button" onClick={guardarProfe} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </section>
+          ) : esDueno && <button type="button" onClick={() => editar(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar profe</button>}
+
+          {datos.profes.length === 0 ? <p className="text-teal-400">{esDueno ? "Cargá los profes que dan clases en el complejo." : "Todavía no hay profes cargados."}</p> : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {datos.profes.map((p) => {
+                const r = resumen(p);
+                return (
+                  <button key={p.id} type="button" onClick={() => setAbierto(p.id)} className={`text-left rounded-xl border border-teal-800 p-4 hover:bg-white/5 ${p.activo ? "" : "opacity-50"}`} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                    <span className="flex items-start justify-between gap-2">
+                      <span className="font-semibold text-slate-100">{p.nombre}</span>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full shrink-0" style={{ color: p.modo === "alquila" ? BRAND.cyan : BRAND.lime, backgroundColor: p.modo === "alquila" ? "#22d3ee1f" : "#9fe0221a" }}>{MODOS_PROFE[p.modo]}</span>
+                    </span>
+                    <span className="block text-xs text-teal-400 mt-1">{r.proximas} clase{r.proximas === 1 ? "" : "s"} próxima{r.proximas === 1 ? "" : "s"}{p.modo === "complejo" ? ` · ${r.alumnos} alumno${r.alumnos === 1 ? "" : "s"}, pagaron ${r.pagaron}` : ""}</span>
+                    {p.modo === "alquila"
+                      ? <span className={`block mt-2 font-semibold ${r.debe > 0 ? "text-amber-300" : "text-teal-500"}`}>{r.debe > 0 ? `Debe ${formatoPrecio(r.debe)}` : "Al día"}</span>
+                      : esDueno && <span className={`block mt-2 font-semibold ${r.aPagar > 0 ? "text-amber-300" : "text-teal-500"}`}>{r.aPagar > 0 ? `Le debés ${formatoPrecio(r.aPagar)}` : "Pago del mes al día"}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esDueno, hoy, mes, onBack, onChanged, onEditar }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [cargar, setCargar] = useState(null); // { canchaId, fecha, desde, duracion, semanas }
+  const [cobrando, setCobrando] = useState(null); // alumno id o "profe" o "deuda"
+  const [alumnoForm, setAlumnoForm] = useState(null);
+  const nombreCancha = (id) => datos.canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const clases = datos.clases.filter((r) => r.profe_id === p.id);
+  const proximas = clases.filter((r) => r.fecha >= hoy).slice(0, 10);
+  const sinCobrar = clases.filter((r) => r.fecha <= hoy && !r.medio_pago && r.precio != null);
+  const debe = sinCobrar.reduce((s, r) => s + Number(r.precio), 0);
+  const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id);
+  const cuotaDe = (a) => datos.cuotas.find((q) => q.alumno_id === a.id);
+  const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && r.fecha <= hoy).length;
+  const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
+  const aPagar = Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado);
+  const horario = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id)}`;
+
+  const run = async (fn, ok) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); if (ok) setAviso(ok); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Esa cuota ya está cobrada este mes." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cancha = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const inicios = cancha ? iniciosPosibles(cancha, Number(cargar.duracion)) : [];
+  const cargarClases = async () => {
+    if (!cancha || cargar.desde === "" || !cargar.fecha) { setError("Elegí cancha, día y horario."); return; }
+    const desde = Number(cargar.desde);
+    const dur = Number(cargar.duracion);
+    const semanas = Number(cargar.semanas) || 1;
+    const serieId = semanas > 1 ? nuevoUuid() : null;
+    const precio = p.modo === "alquila" && p.precio_hora != null ? Math.round((Number(p.precio_hora) * dur) / 60) : null;
+    setBusy(true); setError(""); setAviso("");
+    const fallidas = [];
+    for (const f of fechasSemanales(cargar.fecha, semanas)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: cancha.id, tipo: "clase", fecha: f, inicio: instante(f, desde), fin: instante(f, desde + dur), estado: "confirmada", origen: "manual", nombre: `Clase · ${p.nombre}`.slice(0, 80), telefono: p.telefono, precio, profe_id: p.id, ...(serieId ? { serie_id: serieId } : {}) },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length) setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+    else { setAviso(`Listo: ${semanas === 1 ? "clase cargada" : `${semanas} clases cargadas`} en la agenda.`); setCargar(null); }
+    onChanged();
+  };
+  const cobrarDeuda = (medio) => run(() => supabaseTable(`reservas?id=in.(${sinCobrar.map((r) => r.id).join(",")})`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" }), `Cobrado ${formatoPrecio(debe)} a ${p.nombre}.`).then(() => setCobrando(null));
+  const cobrarCuota = (a, medio) => run(() => supabaseTable("cuotas_alumnos", { method: "POST", body: { complejo_id: complejoId, alumno_id: a.id, periodo: mes, monto: Number(a.cuota), medio }, accessToken, prefer: "return=minimal" }), `Cuota de ${a.nombre} cobrada.`).then(() => setCobrando(null));
+  const pagarProfe = (medio) => run(() => supabaseTable("pagos_profes", { method: "POST", body: { complejo_id: complejoId, profe_id: p.id, periodo: mes, monto: aPagar, medio, nota: `${dictadas} clases` }, accessToken, prefer: "return=minimal" }), `Le pagaste ${formatoPrecio(aPagar)} a ${p.nombre}.`).then(() => setCobrando(null));
+  const guardarAlumno = () => {
+    const telefono = alumnoForm.telefono.trim() ? normalizeArPhone(alumnoForm.telefono) : null;
+    if (!alumnoForm.nombre.trim() || leerPrecio(alumnoForm.cuota) == null) { setError("Poné el nombre y la cuota."); return; }
+    if (alumnoForm.telefono.trim() && !telefono) { setError("Revisá el WhatsApp."); return; }
+    run(async () => {
+      const body = { nombre: alumnoForm.nombre.trim(), telefono, cuota: leerPrecio(alumnoForm.cuota) };
+      if (alumnoForm.id) await supabaseTable(`alumnos?id=eq.${alumnoForm.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("alumnos", { method: "POST", body: { ...body, complejo_id: complejoId, profe_id: p.id }, accessToken, prefer: "return=minimal" });
+      setAlumnoForm(null);
+    });
+  };
+  const alternarAlumno = (a) => run(() => supabaseTable(`alumnos?id=eq.${a.id}`, { method: "PATCH", body: { activo: !a.activo }, accessToken, prefer: "return=minimal" }));
+  const medios = (onElegir, lista = MEDIOS_COBRO) => (
+    <span className="flex flex-wrap items-center gap-1">
+      {lista.map(([m, l]) => <button key={m} type="button" disabled={busy} onClick={() => onElegir(m)} className="px-2.5 py-1 rounded-lg border border-lime-400/70 text-lime-400 text-xs disabled:opacity-50">{l}</button>)}
+      <button type="button" onClick={() => setCobrando(null)} className="text-teal-400 text-xs ml-1">✕</button>
+    </span>
+  );
+  const seccion = "rounded-xl border border-teal-800 p-4 space-y-3 min-w-0";
+  const fondo = { backgroundColor: "rgba(8,18,24,0.6)" };
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Clases</button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl text-slate-100" style={F.display}>{p.nombre.toUpperCase()}</h2>
+          <p className="text-teal-300">{MODOS_PROFE[p.modo]} · {p.modo === "alquila" ? `${formatoPrecio(p.precio_hora) || "sin precio"} la hora` : `${formatoPrecio(p.pago_clase) || "sin precio"} por clase`}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {p.telefono && <a href={waLink(p.telefono, `Hola ${p.nombre.split(" ")[0]}! `)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">WhatsApp</a>}
+          {esDueno && <button type="button" onClick={onEditar} className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">Editar</button>}
+        </div>
+      </div>
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className={seccion} style={fondo}>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm uppercase tracking-wide text-teal-400">Próximas clases</h3>
+            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">+ Cargar clases</button>}
+          </div>
+          {cargar && (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <div className="grid gap-2 grid-cols-2">
+                <select value={cargar.canchaId} onChange={(e) => setCargar({ ...cargar, canchaId: e.target.value, desde: "" })} aria-label="Cancha" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  {datos.canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select>
+                <input type="date" value={cargar.fecha} min={hoy} onChange={(e) => setCargar({ ...cargar, fecha: e.target.value })} aria-label="Primer día" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+                <select value={cargar.desde} onChange={(e) => setCargar({ ...cargar, desde: e.target.value })} aria-label="Horario" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  <option value="">Horario…</option>
+                  {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+                </select>
+                <select value={cargar.duracion} onChange={(e) => setCargar({ ...cargar, duracion: e.target.value, desde: "" })} aria-label="Duración" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  {[60, 90, 120].map((d) => <option key={d} value={d}>{d} min</option>)}
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-teal-200">Repetir
+                <select value={cargar.semanas} onChange={(e) => setCargar({ ...cargar, semanas: e.target.value })} className="px-2 py-1 rounded border" style={adminInput}>
+                  {[1, 4, 8, 12, 16, 24].map((n) => <option key={n} value={n}>{n === 1 ? "solo ese día" : `${n} semanas`}</option>)}
+                </select>
+              </label>
+              {p.modo === "alquila" && p.precio_hora != null && <p className="text-xs text-teal-400">Cada clase: {formatoPrecio(Math.round((Number(p.precio_hora) * Number(cargar.duracion)) / 60))} de alquiler.</p>}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={cargarClases} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cargando…" : "Cargar en la agenda"}</button>
+                <button type="button" onClick={() => setCargar(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
+          {proximas.length === 0 ? <p className="text-teal-400">No tiene clases cargadas.</p> : (
+            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
+          )}
+          <p className="text-xs text-teal-500">Para cancelar una clase, tocála en la Agenda.</p>
+        </section>
+
+        {p.modo === "alquila" ? (
+          <section className={seccion} style={fondo}>
+            <h3 className="text-sm uppercase tracking-wide text-teal-400">Alquiler de cancha</h3>
+            <TarjetaResumen titulo="Debe" tono={debe > 0 ? "ambar" : "lime"} valor={formatoPrecio(debe) || "$0"} detalle={`${sinCobrar.length} clase${sinCobrar.length === 1 ? "" : "s"} sin cobrar`} />
+            {sinCobrar.length > 0 && (
+              <>
+                <ul className="text-xs text-teal-300 space-y-0.5">{sinCobrar.slice(-8).map((r) => <li key={r.id}>{horario(r)} · {formatoPrecio(r.precio)}</li>)}</ul>
+                {cobrando === "deuda" ? medios(cobrarDeuda, MEDIOS_PAGO.filter(([k]) => k)) : <button type="button" onClick={() => setCobrando("deuda")} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar {formatoPrecio(debe)}</button>}
+              </>
+            )}
+          </section>
+        ) : (
+          <section className={seccion} style={fondo}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm uppercase tracking-wide text-teal-400">Alumnos · cuotas de {etiquetaMes(mes).split(" ")[0].toLowerCase()}</h3>
+              {!alumnoForm && <button type="button" onClick={() => setAlumnoForm({ nombre: "", telefono: "", cuota: "" })} className="text-xs text-lime-400 font-semibold">+ Alumno</button>}
+            </div>
+            {alumnoForm && (
+              <div className="flex flex-wrap gap-2">
+                <input value={alumnoForm.nombre} onChange={(e) => setAlumnoForm({ ...alumnoForm, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del alumno" className="flex-1 min-w-[8rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={alumnoForm.telefono} onChange={(e) => setAlumnoForm({ ...alumnoForm, telefono: e.target.value })} placeholder="WhatsApp" aria-label="WhatsApp del alumno" className="w-36 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input inputMode="numeric" value={alumnoForm.cuota} onChange={(e) => setAlumnoForm({ ...alumnoForm, cuota: e.target.value })} placeholder="Cuota $" aria-label="Cuota mensual" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <button type="button" disabled={busy} onClick={guardarAlumno} className="px-3 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setAlumnoForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            )}
+            {alumnos.length === 0 ? <p className="text-teal-400">Todavía no tiene alumnos.</p> : (
+              <ul className="divide-y divide-teal-900/70">
+                {alumnos.map((a) => {
+                  const q = cuotaDe(a);
+                  return (
+                    <li key={a.id} className={`py-2 flex flex-wrap items-center gap-x-3 gap-y-1 ${a.activo ? "" : "opacity-50"}`}>
+                      <span className="flex-1 min-w-[8rem] text-slate-100">{a.nombre}<span className="block text-xs text-teal-500">{formatoPrecio(a.cuota)} por mes</span></span>
+                      {q ? <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagó · {medioCobroLabel(q.medio)}</span>
+                        : !a.activo ? <span className="text-xs text-teal-500">Pausado</span>
+                        : cobrando === a.id ? medios((m) => cobrarCuota(a, m))
+                        : <button type="button" onClick={() => setCobrando(a.id)} className="px-3 py-1 rounded-lg text-xs font-semibold border border-amber-400 text-amber-300">Cobrar cuota</button>}
+                      {!q && a.telefono && a.activo && <a href={waLink(a.telefono, `Hola ${a.nombre.split(" ")[0]}! Te recordamos la cuota de ${etiquetaMes(mes).split(" ")[0].toLowerCase()} de las clases con ${p.nombre} en ${venueName}: ${formatoPrecio(a.cuota)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-xs text-teal-300 underline">Recordar</a>}
+                      <button type="button" onClick={() => setAlumnoForm({ id: a.id, nombre: a.nombre, telefono: a.telefono ? formatArPhone(a.telefono) : "", cuota: String(Math.round(a.cuota)) })} className="text-xs text-teal-400 underline">Editar</button>
+                      <button type="button" disabled={busy} onClick={() => alternarAlumno(a)} className="text-xs text-teal-500 underline">{a.activo ? "Pausar" : "Reactivar"}</button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {esDueno && (
+              <div className="border-t border-teal-800 pt-3 space-y-2">
+                <p className="text-teal-200">Pago al profe: {dictadas} clase{dictadas === 1 ? "" : "s"} dictada{dictadas === 1 ? "" : "s"} este mes × {formatoPrecio(p.pago_clase) || "$0"}{pagado > 0 ? ` − ${formatoPrecio(pagado)} ya pagado` : ""}</p>
+                {aPagar > 0 ? (cobrando === "profe" ? medios(pagarProfe) : <button type="button" onClick={() => setCobrando("profe")} className="px-4 py-2 rounded-lg font-semibold border border-amber-400 text-amber-300">Pagarle {formatoPrecio(aPagar)}</button>) : <p className="text-xs text-teal-500">No le debés nada este mes.</p>}
+              </div>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Clientes: ficha de cada persona (turnos, cuenta, torneos) ---------- */
 
 /* Todas las filas de una consulta (la base devuelve de a 1000) */
@@ -12424,7 +12745,7 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
     Promise.all([
       idsReservas ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&activa=eq.true&order=orden.asc`) : nada,
       idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&fecha=gte.${mes}-01&fecha=lte.${hasta}&estado=eq.confirmada&select=tipo,estado,cancha_id,fecha,inicio,fin&order=fecha.asc`, accessToken)) : nada,
-      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio&order=fecha.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio&order=fecha.asc`, accessToken)) : nada,
       idsCantina ? suave(traerTodo(`venta_pagos?complejo_id=in.(${idsCantina})&${creado}&select=monto,created_at,ventas!inner(anulada)&ventas.anulada=is.false&order=created_at.asc`, accessToken)) : nada,
       idsTodos ? suave(traerTodo(`cuenta_pagos?complejo_id=in.(${idsTodos})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
       suave(traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)),
@@ -12432,7 +12753,9 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
       idsTodos ? suave(traerTodo(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=gte.${desde6}&pagada_at=lte.${hasta}&select=pagada_at,total&order=pagada_at.asc`, accessToken)) : nada,
       idsTodos ? suave(traerTodo(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${creado}&select=tipo,monto,created_at&order=created_at.asc`, accessToken)) : nada,
       idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
-    ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos]) => {
+      idsReservas ? suave(traerTodo(`cuotas_alumnos?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`pagos_profes?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+    ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos, cuotas, pagosProfes]) => {
       if (!vivo) return;
       const f = (iso) => fechaArgentina(iso);
       const ing = {
@@ -12440,12 +12763,14 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
         Mostrador: sumarPorMes(ventas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
         Cuentas: sumarPorMes(cuentas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
         Inscripciones: sumarPorMes(inscripciones.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Clases: sumarPorMes(cuotas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
         Otros: sumarPorMes([...manuales.filter((m) => m.tipo === "ingreso"), ...movTurnos.filter((m) => m.tipo === "ingreso").map((m) => ({ fecha: f(m.created_at), monto: m.monto }))]),
       };
       const gas = sumarPorMes([
         ...manuales.filter((m) => m.tipo === "gasto"),
         ...compras.map((c) => ({ fecha: c.pagada_at, monto: c.total })),
         ...movTurnos.filter((m) => m.tipo === "gasto").map((m) => ({ fecha: f(m.created_at), monto: m.monto })),
+        ...pagosProfes.map((m) => ({ fecha: f(m.created_at), monto: m.monto })),
       ]);
       setDatos({
         ocupacion: canchas.length ? ocupacionMes({ canchas, reservas: reservasMes, mes }) : null,

@@ -65,6 +65,7 @@ Y [`migrations/20261024_mostrador.sql`](migrations/20261024_mostrador.sql) (vent
 Y [`migrations/20261025_cierre_caja.sql`](migrations/20261025_cierre_caja.sql) (caja del día: abrir y cerrar con arqueo) → **Run** → **Success**.
 Y [`migrations/20261026_compras_gastos_fijos.sql`](migrations/20261026_compras_gastos_fijos.sql) (compras a proveedores y gastos fijos) → **Run** → **Success**.
 Y [`migrations/20261027_turnos_fijos.sql`](migrations/20261027_turnos_fijos.sql) (turnos fijos agrupados) → **Run** → **Success**.
+Y [`migrations/20261028_clases.sql`](migrations/20261028_clases.sql) (clases con profes, alumnos y cuotas) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 
@@ -84,6 +85,7 @@ select
   to_regclass('public.ventas') is not null as mostrador,
   to_regclass('public.caja_turnos') is not null as caja_del_dia,
   to_regclass('public.compras') is not null as compras,
+  to_regclass('public.profes_complejo') is not null as clases,
   (select count(*) from pg_proc where pronamespace = 'public'::regnamespace and proname in
     ('pedir_turno', 'disponibilidad_canchas', 'cancelar_mi_reserva', 'vencer_pedidos',
      'es_organizador', 'es_colaborador', 'colaborador_permiso', 'colaborador_de',
@@ -91,7 +93,7 @@ select
   (select string_agg(policyname, ', ') from pg_policies where schemaname = 'storage' and tablename = 'objects' and cmd = 'INSERT') as subir_imagenes;
 ```
 
-- [ ] Las catorce primeras columnas en `true`, **funciones = 10**.
+- [ ] Las quince primeras columnas en `true`, **funciones = 10**.
 - [ ] `subir_imagenes` dice **solo** `Solo organizadores suben imagenes`. Si aparece otra política,
       avisar antes de seguir.
 
