@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
+import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 const cancha1 = { id: "c1", apertura: "14:00:00", cierre: "22:00:00", precio_60: 10000, precio_90: 14000, precio_120: null };
 const nocturna = { id: "c2", apertura: "18:00", cierre: "01:00", precio_90: 15000 };
@@ -103,4 +103,20 @@ test("precios escritos a mano", () => {
   assert.equal(leerPrecio("12.000"), 12000);
   assert.equal(leerPrecio(""), null);
   assert.equal(leerPrecio("$ 9500"), 9500);
+});
+
+test("turnos fijos: agrupa por serie con la próxima y la última fecha", () => {
+  const rs = [
+    { id: "a", serie_id: "s1", fecha: "2026-10-27", inicio: "2026-10-27T21:00:00-03:00" },
+    { id: "b", serie_id: "s1", fecha: "2026-10-20", inicio: "2026-10-20T21:00:00-03:00" },
+    { id: "c", serie_id: "s2", fecha: "2026-10-15", inicio: "2026-10-15T19:00:00-03:00" },
+    { id: "d", fecha: "2026-10-15" },
+  ];
+  const g = agruparSeries(rs);
+  assert.equal(g.length, 2);
+  assert.equal(g[0].serieId, "s2");
+  assert.equal(g[1].proxima.id, "b");
+  assert.equal(g[1].ultima.id, "a");
+  assert.equal(g[1].cantidad, 2);
+  assert.deepEqual(g[1].fechas, ["2026-10-20", "2026-10-27"]);
 });

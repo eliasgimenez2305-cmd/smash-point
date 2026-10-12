@@ -10,11 +10,13 @@ import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from 
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender } from "./mostrador.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+/* uuid para la base (crypto.randomUUID no existe fuera de https/localhost, ej. el celular en la red local) */
+const nuevoUuid = () => "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16));
 
 const STORAGE_KEY_TOURNAMENTS = "sp:tournaments";
 const STORAGE_KEY_ADS = "sp:ads";
@@ -9013,7 +9015,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
   const verAgenda = dueno || permisos.agenda;
   const verCanchas = dueno || permisos.canchas;
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | canchas
+  const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | fijos | canchas
   const [canchas, setCanchas] = useState(null);
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
@@ -9045,6 +9047,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
       <div className="flex flex-wrap items-center gap-2 mb-5">
         <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
         {verAgenda && tab("agenda", "Agenda")}
+        {verAgenda && tab("fijos", "Turnos fijos")}
         {verCanchas && tab("canchas", "Canchas y precios")}
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
@@ -9052,6 +9055,8 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
         !error && <p className="text-sm opacity-60">Cargando…</p>
       ) : !verCanchas && activas.length === 0 ? (
         <p className="text-sm text-teal-300">El complejo todavía no cargó sus canchas.</p>
+      ) : view === "fijos" && verAgenda && activas.length > 0 ? (
+        <TurnosFijos complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} onChanged={changed} />
       ) : (view === "canchas" && verCanchas) || activas.length === 0 ? (
         <>
           {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
@@ -9062,6 +9067,109 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
           <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
           <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} />
         </>
+      )}
+    </div>
+  );
+}
+
+/* Turnos fijos del complejo: cada serie con su día y horario, cuántas fechas quedan cargadas, y
+   extender o dar de baja. Cada turno se cobra por separado en la agenda. */
+function TurnosFijos({ complejoId, canchas, venueName, accessToken, onChanged }) {
+  const hoy = hoyArgentina();
+  const [reservas, setReservas] = useState(null);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [accion, setAccion] = useState(null); // { serieId, tipo: "extender" | "baja", semanas, desde }
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre || "Cancha";
+
+  const load = useCallback(async () => {
+    try {
+      setReservas(await supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&serie_id=not.is.null&tipo=eq.turno&estado=eq.confirmada&fecha=gte.${hoy}&order=fecha.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los turnos fijos."); }
+  }, [complejoId, accessToken, hoy]);
+  useEffect(() => { load(); }, [load]);
+
+  const series = agruparSeries(reservas || []);
+  const extender = async (s, semanas) => {
+    const u = s.ultima;
+    const desde = minutoEnGrilla(u.fecha, u.inicio);
+    const dur = Math.round((Date.parse(u.fin) - Date.parse(u.inicio)) / 60000);
+    setBusy(true); setError(""); setAviso("");
+    const fallidas = [];
+    for (const f of fechasSemanales(sumarDias(u.fecha, 7), semanas)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: u.cancha_id, tipo: "turno", fecha: f, inicio: instante(f, desde), fin: instante(f, desde + dur), estado: "confirmada", origen: "manual", nombre: u.nombre, telefono: u.telefono, precio: u.precio, nota: u.nota, serie_id: s.serieId },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false); setAccion(null);
+    if (fallidas.length) setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+    else setAviso(`Listo: ${s.proxima.nombre} tiene ${semanas} semanas más.`);
+    await load(); onChanged();
+  };
+  const darDeBaja = async (s, desde) => {
+    setBusy(true); setError(""); setAviso("");
+    try {
+      await supabaseTable(`reservas?serie_id=eq.${s.serieId}&fecha=gte.${desde}&estado=eq.confirmada`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" });
+      setAviso(`Se dieron de baja los turnos de ${s.proxima.nombre} desde el ${etiquetaFecha(desde).toLowerCase()}.`);
+      setAccion(null);
+      await load(); onChanged();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const recordatorio = (s) => `Hola ${s.proxima.nombre}! Te recordamos tu turno fijo en ${venueName}: ${etiquetaFecha(s.proxima.fecha).split(" ")[0].toLowerCase()} a las ${etiquetaHora(minutoEnGrilla(s.proxima.fecha, s.proxima.inicio))} en ${nombreCancha(s.proxima.cancha_id)}. ¡Te esperamos! 🎾`;
+
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-300">Se cargan desde "+ Cargar turno" eligiendo cuántas semanas repetir. Acá ves cada turno fijo, lo extendés antes de que se termine o lo das de baja.</p>
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+      {reservas === null ? (!error && <p className="opacity-60">Cargando…</p>) : series.length === 0 ? <p className="text-teal-400">No hay turnos fijos de hoy en adelante.</p> : (
+        <ul className="space-y-2">
+          {series.map((s) => {
+            const p = s.proxima;
+            const desde = minutoEnGrilla(p.fecha, p.inicio);
+            const hasta = minutoEnGrilla(p.fecha, p.fin);
+            const seTermina = s.cantidad <= 2;
+            const ab = accion?.serieId === s.serieId ? accion : null;
+            return (
+              <li key={s.serieId} className="rounded-xl border px-4 py-3 space-y-2" style={{ borderColor: seTermina ? "#f59e0b66" : "#134e4a", backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-100">{p.nombre}</p>
+                    <p className="text-teal-300">{etiquetaFecha(p.fecha).split(" ")[0].replace(/([^s])$/, "$1s")} · {rangoLabel(desde, hasta)} · {nombreCancha(p.cancha_id)}{p.precio != null ? ` · ${formatoPrecio(p.precio)}` : ""}</p>
+                    <p className="text-xs text-teal-500">Próximo: {etiquetaFecha(p.fecha)} · cargado hasta el {etiquetaFecha(s.ultima.fecha).toLowerCase()} ({s.cantidad} turno{s.cantidad === 1 ? "" : "s"})</p>
+                  </div>
+                  {seTermina && <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: "#fbbf24", backgroundColor: "#f59e0b26" }}>Se termina pronto</span>}
+                </div>
+                {ab?.tipo === "extender" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-teal-200">Agregar</span>
+                    {[4, 8, 12, 24].map((n) => <button key={n} type="button" disabled={busy} onClick={() => extender(s, n)} className="px-3 py-1.5 rounded-lg border border-lime-400/70 text-lime-400 disabled:opacity-50">{n} semanas</button>)}
+                    <button type="button" onClick={() => setAccion(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                ) : ab?.tipo === "baja" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-red-300">Dar de baja desde</span>
+                    <input type="date" value={ab.desde} min={hoy} onChange={(e) => setAccion({ ...ab, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+                    <button type="button" disabled={busy || !ab.desde} onClick={() => darDeBaja(s, ab.desde)} className="px-3 py-1.5 rounded-lg border border-red-400 text-red-400 font-semibold disabled:opacity-50">Confirmar baja</button>
+                    <button type="button" onClick={() => setAccion(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <button type="button" onClick={() => setAccion({ serieId: s.serieId, tipo: "extender" })} className="text-lime-400 font-semibold">Extender</button>
+                    {p.telefono && <a href={waLink(p.telefono, recordatorio(s))} target="_blank" rel="noopener noreferrer" className="text-teal-300 underline">Recordarle por WhatsApp</a>}
+                    <button type="button" onClick={() => setAccion({ serieId: s.serieId, tipo: "baja", desde: p.fecha })} className="text-red-400">Dar de baja</button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
@@ -9556,6 +9664,7 @@ function NuevoTurnoModal({ complejoId, canchas, fecha, reservas, preset, accessT
     if (motivo === "superpuesto") { setError("Ese horario se pisa con otro turno o bloqueo."); return; }
     setBusy(true); setError("");
     const fallidas = [];
+    const serieId = Number(form.semanas) > 1 ? nuevoUuid() : null; // turno fijo
     for (const f of fechasSemanales(fecha, Number(form.semanas) || 1)) {
       try {
         await supabaseTable("reservas", {
@@ -9563,7 +9672,8 @@ function NuevoTurnoModal({ complejoId, canchas, fecha, reservas, preset, accessT
           body: {
             complejo_id: complejoId, cancha_id: cancha.id, tipo: "turno", fecha: f,
             inicio: instante(f, desde), fin: instante(f, desde + duracion), estado: "confirmada", origen: "manual",
-            nombre, telefono, precio: leerPrecio(form.precio), medio_pago: form.medio_pago || null, nota: form.nota.trim() || null,
+            nombre, telefono, precio: leerPrecio(form.precio), medio_pago: f === fecha ? form.medio_pago || null : null, nota: form.nota.trim() || null,
+            ...(serieId ? { serie_id: serieId } : {}),
           },
         });
       } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
@@ -9630,7 +9740,7 @@ function NuevoTurnoModal({ complejoId, canchas, fecha, reservas, preset, accessT
         <div className="flex items-center gap-2 text-teal-200">
           <label htmlFor="turno-semanas">Turno fijo: repetir</label>
           <select id="turno-semanas" value={form.semanas} onChange={(e) => set("semanas", e.target.value)} className="px-2 py-1 rounded border" style={adminInput}>
-            {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n === 1 ? "solo este día" : `${n} semanas`}</option>)}
+            {[1, 2, 3, 4, 6, 8, 12, 16, 24].map((n) => <option key={n} value={n}>{n === 1 ? "solo este día" : `${n} semanas`}</option>)}
           </select>
         </div>
         {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
@@ -9848,6 +9958,8 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
   const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  // Turno fijo: este y todos los que siguen de la serie
+  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
   const confirmar = () => patch({ estado: "confirmada" });
   const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
   const cobro = (medio) => patch({ medio_pago: medio });
@@ -9877,7 +9989,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
               {r.precio != null && <p>Precio: {formatoPrecio(r.precio)}</p>}
               {r.telefono && <p>WhatsApp: <a href={`https://wa.me/${r.telefono}`} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">{formatArPhone(r.telefono)}</a></p>}
               {r.nota && <p>Nota: {r.nota}</p>}
-              <p className="text-xs text-teal-500">{r.origen === "online" ? "Pedido online" : "Cargado por el complejo"}{r.estado === "pendiente" && " · esperando confirmación"}</p>
+              <p className="text-xs text-teal-500">{r.origen === "online" ? "Pedido online" : "Cargado por el complejo"}{r.serie_id && " · turno fijo (se repite todas las semanas)"}{r.estado === "pendiente" && " · esperando confirmación"}</p>
             </div>
             {r.estado === "pendiente" && (
               <div className="flex gap-2">
@@ -9903,7 +10015,8 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                 </label>
                 {confirmCancel ? (
                   <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
-                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
+                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
+                    {r.serie_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
                   </p>
                 ) : (

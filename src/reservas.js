@@ -177,3 +177,18 @@ export function formatoPrecio(n) {
   if (n == null || n === "") return "";
   return "$" + Math.round(Number(n)).toLocaleString("es-AR");
 }
+
+/* Turnos fijos: las reservas de cada serie (serie_id), ordenadas, con la primera y la última fecha.
+   Se usa con los turnos confirmados de hoy en adelante. */
+export function agruparSeries(reservas) {
+  const series = new Map();
+  for (const r of reservas) {
+    if (!r.serie_id) continue;
+    if (!series.has(r.serie_id)) series.set(r.serie_id, []);
+    series.get(r.serie_id).push(r);
+  }
+  return [...series.entries()].map(([serieId, lista]) => {
+    const orden = [...lista].sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0));
+    return { serieId, proxima: orden[0], ultima: orden[orden.length - 1], cantidad: orden.length, fechas: orden.map((r) => r.fecha) };
+  }).sort((a, b) => (a.proxima.fecha < b.proxima.fecha ? -1 : a.proxima.fecha > b.proxima.fecha ? 1 : a.proxima.inicio < b.proxima.inicio ? -1 : 1));
+}

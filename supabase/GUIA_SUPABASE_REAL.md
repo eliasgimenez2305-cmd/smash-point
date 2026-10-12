@@ -64,6 +64,7 @@ Y [`migrations/20261023_modulos_complejo.sql`](migrations/20261023_modulos_compl
 Y [`migrations/20261024_mostrador.sql`](migrations/20261024_mostrador.sql) (ventas del mostrador, rubros y costos) → **Run** → **Success**.
 Y [`migrations/20261025_cierre_caja.sql`](migrations/20261025_cierre_caja.sql) (caja del día: abrir y cerrar con arqueo) → **Run** → **Success**.
 Y [`migrations/20261026_compras_gastos_fijos.sql`](migrations/20261026_compras_gastos_fijos.sql) (compras a proveedores y gastos fijos) → **Run** → **Success**.
+Y [`migrations/20261027_turnos_fijos.sql`](migrations/20261027_turnos_fijos.sql) (turnos fijos agrupados) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 
