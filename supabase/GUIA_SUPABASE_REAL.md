@@ -63,6 +63,7 @@ Y [`migrations/20261022_cobrar_todo.sql`](migrations/20261022_cobrar_todo.sql) (
 Y [`migrations/20261023_modulos_complejo.sql`](migrations/20261023_modulos_complejo.sql) (qué módulos usa cada complejo: Torneos, Reservas, Cantina) → **Run** → **Success**.
 Y [`migrations/20261024_mostrador.sql`](migrations/20261024_mostrador.sql) (ventas del mostrador, rubros y costos) → **Run** → **Success**.
 Y [`migrations/20261025_cierre_caja.sql`](migrations/20261025_cierre_caja.sql) (caja del día: abrir y cerrar con arqueo) → **Run** → **Success**.
+Y [`migrations/20261026_compras_gastos_fijos.sql`](migrations/20261026_compras_gastos_fijos.sql) (compras a proveedores y gastos fijos) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 
@@ -81,6 +82,7 @@ select
   exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'complejos' and column_name = 'modulo_cantina') as modulos,
   to_regclass('public.ventas') is not null as mostrador,
   to_regclass('public.caja_turnos') is not null as caja_del_dia,
+  to_regclass('public.compras') is not null as compras,
   (select count(*) from pg_proc where pronamespace = 'public'::regnamespace and proname in
     ('pedir_turno', 'disponibilidad_canchas', 'cancelar_mi_reserva', 'vencer_pedidos',
      'es_organizador', 'es_colaborador', 'colaborador_permiso', 'colaborador_de',
@@ -88,7 +90,7 @@ select
   (select string_agg(policyname, ', ') from pg_policies where schemaname = 'storage' and tablename = 'objects' and cmd = 'INSERT') as subir_imagenes;
 ```
 
-- [ ] Las trece primeras columnas en `true`, **funciones = 10**.
+- [ ] Las catorce primeras columnas en `true`, **funciones = 10**.
 - [ ] `subir_imagenes` dice **solo** `Solo organizadores suben imagenes`. Si aparece otra política,
       avisar antes de seguir.
 

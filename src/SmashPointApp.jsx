@@ -8564,6 +8564,7 @@ const PANEL_ICONOS = {
   perfil: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
   salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
   cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
+  compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
@@ -8883,6 +8884,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
     ] },
     { titulo: "Gestión", items: [
       ...(verConsumos ? [["productos", "Productos y stock", "productos"]] : []),
+      ...(verConsumos && !colaborador ? [["compras", "Compras", "compras"]] : []),
       ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
       ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
     ] },
@@ -8910,6 +8912,8 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "compras" && verConsumos && !colaborador ? (
+        <ComprasPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} />
       ) : seccion === "cajadia" && verCajaDia ? (
         <CajaDelDia complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "mostrador" && verConsumos ? (
@@ -11436,7 +11440,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
 
 /* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
 
-const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", manual: "Otros" };
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", compras: "Compras", fijo: "Gastos fijos", manual: "Otros" };
 // $45.000 o −$45.000 (formatoPrecio no lleva signo)
 const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
 
@@ -11490,7 +11494,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     try {
       const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
       const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
-      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos] = await Promise.all([
+      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras] = await Promise.all([
         supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
         supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
         complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
@@ -11502,8 +11506,10 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
         complejoIds ? supabaseTable(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}`, { accessToken }).catch(() => []) : [],
         // Gastos y otros ingresos cargados en las cajas del día (los retiros no son gasto: es plata que pasa al dueño)
         complejoIds ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${inList})&tipo=in.(gasto,ingreso)&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,tipo,concepto,monto,created_at,hecho_por_email`, { accessToken }).catch(() => []) : [],
+        // Compras a proveedores, el día que se pagaron
+        complejoIds ? supabaseTable(`compras?complejo_id=in.(${inList})&anulada=is.false&pagada_at=gte.${desde}&pagada_at=lte.${hasta}&select=id,total,medio,pagada_at,proveedores(nombre)`, { accessToken }).catch(() => []) : [],
       ]);
-      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos });
+      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras });
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [rango, organizer.id, accessToken, complejoIds]);
@@ -11521,7 +11527,8 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.movTurnos.map((m) => ({ key: `d${m.id}`, fecha: fechaArgentina(m.created_at), tipo: m.tipo === "gasto" ? "gasto" : "ingreso", origen: "caja_dia", concepto: `${m.concepto}${m.hecho_por_email ? ` · ${m.hecho_por_email}` : ""}`, monto: Number(m.monto), medio: "efectivo" })),
-    ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
+    ...datos.compras.map((x) => ({ key: `k${x.id}`, fecha: x.pagada_at, tipo: "gasto", origen: "compras", concepto: `Compra${x.proveedores?.nombre ? ` a ${x.proveedores.nombre}` : ""}`, monto: Number(x.total), medio: x.medio })),
+    ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: m.gasto_fijo_id ? "fijo" : "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
   ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
   const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
   const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
@@ -11649,6 +11656,8 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
             </table>
           </div>
 
+          <GastosFijos organizer={organizer} mes={rango.hasta.slice(0, 7)} onChanged={load} />
+
           {conCosto.length > 0 && (
             <p className="text-teal-300">Ganancia en productos vendidos: <span className="font-semibold" style={{ color: ganancia < 0 ? "#f87171" : BRAND.lime }}>{conSigno(ganancia)}</span> <span className="text-xs text-teal-500">(precio de lista menos costo, de los productos con costo cargado)</span></p>
           )}
@@ -11717,7 +11726,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                         <td className="px-3 py-2 text-teal-300 whitespace-nowrap">{medioCobroLabel(m.medio)}</td>
                         <td className="px-3 py-2 text-right font-semibold tabular-nums whitespace-nowrap" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</td>
                         <td className="px-2 py-2 text-right whitespace-nowrap">
-                          {m.origen === "manual" && (borrando === m.id ? (
+                          {(m.origen === "manual" || m.origen === "fijo") && (borrando === m.id ? (
                             <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
                           ) : (
                             <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
@@ -11734,7 +11743,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                     <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
                     <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
                     <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
-                    {m.origen === "manual" && (borrando === m.id ? (
+                    {(m.origen === "manual" || m.origen === "fijo") && (borrando === m.id ? (
                       <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
                     ) : (
                       <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
@@ -12086,6 +12095,405 @@ const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null &&
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
    stock. La usan el dueño y los colaboradores con permiso de consumos. */
+/* ---------- Compras a proveedores (ver 20261026_compras_gastos_fijos.sql): solo el dueño ---------- */
+
+const COMPRA_ERRORES = {
+  no_autorizado: "Solo el dueño carga compras.",
+  proveedor_invalido: "Ese proveedor no es de este complejo.",
+  producto_invalido: "Un producto ya no existe: recargá la pantalla.",
+  compra_ya_pagada: "Esa compra ya estaba pagada.",
+  datos_invalidos: "Revisá cantidades y costos.",
+};
+const compraErrorText = (e) => COMPRA_ERRORES[e?.code] || reservaErrorText(e);
+
+function ComprasPanel({ complejos, venues, accessToken }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [mes, setMes] = useState(hoy.slice(0, 7));
+  const [datos, setDatos] = useState(null); // { compras, proveedores, productos, costos, deudas }
+  const [error, setError] = useState("");
+  const [nueva, setNueva] = useState(false);
+  const [pagando, setPagando] = useState(null); // { id, medio }
+  const [anulando, setAnulando] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [provForm, setProvForm] = useState(null); // { id?, nombre, telefono }
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+  const c = encodeURIComponent(complejoId);
+
+  const load = useCallback(async () => {
+    const desde = `${mes}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    try {
+      const [compras, proveedores, productos, costos, deudas] = await Promise.all([
+        supabaseTable(`compras?complejo_id=eq.${c}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc&select=*,compra_items(descripcion,cantidad,costo_unitario),proveedores(nombre)`, { accessToken }),
+        supabaseTable(`proveedores?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
+        supabaseTable(`productos?complejo_id=eq.${c}&order=rubro.asc.nullslast,nombre.asc`, { accessToken }),
+        supabaseTable(`producto_costos?complejo_id=eq.${c}&select=producto_id,costo`, { accessToken }),
+        // Lo que se le debe a cada proveedor (todas las compras sin pagar, de cualquier mes)
+        supabaseTable(`compras?complejo_id=eq.${c}&anulada=is.false&pagada_at=is.null&order=fecha.asc&select=id,fecha,total,proveedor_id,proveedores(nombre)`, { accessToken }),
+      ]);
+      setDatos({ compras, proveedores, productos, costos: Object.fromEntries(costos.map((x) => [x.producto_id, Number(x.costo)])), deudas });
+      setError("");
+    } catch { setError("No se pudieron cargar las compras. Revisá la conexión."); }
+  }, [c, mes, accessToken]);
+  useEffect(() => { setDatos(null); load(); }, [load]);
+
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); } catch (e) { setError(compraErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const pagar = () => run(async () => { await supabaseRpc("pagar_compra", { p_compra: pagando.id, p_medio: pagando.medio, p_fecha: hoy }, accessToken); setPagando(null); });
+  const anular = (id) => run(async () => { await supabaseRpc("anular_compra", { p_compra: id }, accessToken); setAnulando(null); });
+  const guardarProveedor = () => {
+    const telefono = provForm.telefono.trim() ? normalizeArPhone(provForm.telefono) : null;
+    if (!provForm.nombre.trim()) { setError("Poné el nombre del proveedor."); return; }
+    if (provForm.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    run(async () => {
+      const body = { nombre: provForm.nombre.trim(), telefono };
+      if (provForm.id) await supabaseTable(`proveedores?id=eq.${provForm.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("proveedores", { method: "POST", body: { ...body, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
+      setProvForm(null);
+    });
+  };
+
+  const validas = (datos?.compras || []).filter((x) => !x.anulada);
+  const totalMes = validas.reduce((s, x) => s + Number(x.total), 0);
+  const totalDeuda = (datos?.deudas || []).reduce((s, x) => s + Number(x.total), 0);
+  const deudaDe = (provId) => (datos?.deudas || []).filter((x) => x.proveedor_id === provId).reduce((s, x) => s + Number(x.total), 0);
+  const estado = (x) => x.anulada ? <span className="text-xs text-teal-500">Anulada</span>
+    : x.pagada_at ? <span className="text-xs px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagada · {medioCobroLabel(x.medio)}</span>
+    : <span className="text-xs px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: "#fbbf24", backgroundColor: "#f59e0b26" }}>A pagar</span>;
+  const acciones = (x) => !x.anulada && (
+    <span className="flex flex-wrap gap-x-3 gap-y-1 justify-end text-xs">
+      {!x.pagada_at && (pagando?.id === x.id ? (
+        <span className="flex flex-wrap items-center gap-1">
+          {MEDIOS_VENTA.slice(0, 3).map(([m, l]) => <button key={m} type="button" onClick={() => setPagando({ ...pagando, medio: m })} className={`px-2 py-1 rounded border ${pagando.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+          <button type="button" disabled={busy} onClick={pagar} className="px-2 py-1 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Pagar</button>
+          <button type="button" onClick={() => setPagando(null)} className="text-teal-400">✕</button>
+        </span>
+      ) : <button type="button" onClick={() => setPagando({ id: x.id, medio: "transferencia" })} className="text-lime-400 font-semibold">Marcar pagada</button>)}
+      {anulando === x.id ? (
+        <span className="text-red-300">¿Anular? Vuelve el stock. <button type="button" disabled={busy} onClick={() => anular(x.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setAnulando(null)} className="text-teal-400">No</button></span>
+      ) : <button type="button" onClick={() => setAnulando(x.id)} className="text-teal-500 hover:text-red-300">Anular</button>}
+    </span>
+  );
+  const renglones = (x) => x.compra_items.map((i) => `${i.cantidad} ${i.descripcion}`).join(", ");
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : nueva ? (
+        <NuevaCompra complejoId={complejoId} proveedores={datos.proveedores} productos={datos.productos} costos={datos.costos} accessToken={accessToken}
+          onCancel={() => setNueva(false)} onDone={() => { setNueva(false); load(); }} onProveedorNuevo={load} />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo={`Compras de ${etiquetaMes(mes).split(" ")[0].toLowerCase()}`} tono="cyan" valor={formatoPrecio(totalMes) || "$0"} detalle={`${validas.length} compra${validas.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="A pagar" tono={totalDeuda > 0 ? "ambar" : "lime"} valor={formatoPrecio(totalDeuda) || "$0"} detalle="A proveedores" />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Proveedores" tono="gris" valor={String(datos.proveedores.length)} /></div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" onClick={() => setNueva(true)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar compra</button>
+            <span className="flex items-center gap-2 ml-auto">
+              <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+              <span className="font-semibold text-teal-100 capitalize">{etiquetaMes(mes)}</span>
+              <button type="button" onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes siguiente">›</button>
+            </span>
+          </div>
+
+          {datos.compras.length === 0 ? <p className="text-teal-400">No hay compras cargadas este mes.</p> : (
+            <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Fecha</th>
+                      <th className="px-3 py-2.5 font-semibold">Proveedor</th>
+                      <th className="px-3 py-2.5 font-semibold">Qué se compró</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Total</th>
+                      <th className="px-3 py-2.5 font-semibold">Estado</th>
+                      <th className="px-3 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {datos.compras.map((x) => (
+                      <tr key={x.id} className={`border-t border-teal-900/70 align-top ${x.anulada ? "opacity-50" : ""}`}>
+                        <td className="px-3 py-2.5 text-teal-300 whitespace-nowrap">{x.fecha.slice(8, 10)}/{x.fecha.slice(5, 7)}</td>
+                        <td className="px-3 py-2.5 text-slate-100">{x.proveedores?.nombre || "—"}</td>
+                        <td className="px-3 py-2.5 text-teal-200">{renglones(x)}{x.nota && <span className="block text-xs text-teal-500 italic">{x.nota}</span>}</td>
+                        <td className="px-3 py-2.5 text-right font-semibold tabular-nums whitespace-nowrap">{formatoPrecio(x.total)}</td>
+                        <td className="px-3 py-2.5">{estado(x)}</td>
+                        <td className="px-3 py-2.5 text-right">{acciones(x)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden space-y-2">
+                {datos.compras.map((x) => (
+                  <li key={x.id} className={`rounded-xl border border-teal-800 px-4 py-3 space-y-1 ${x.anulada ? "opacity-50" : ""}`}>
+                    <div className="flex justify-between gap-2"><span className="text-slate-100">{x.proveedores?.nombre || "Sin proveedor"}</span><span className="font-semibold tabular-nums">{formatoPrecio(x.total)}</span></div>
+                    <p className="text-xs text-teal-400">{x.fecha.slice(8, 10)}/{x.fecha.slice(5, 7)} · {renglones(x)}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">{estado(x)}{acciones(x)}</div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Proveedores</h2>
+              {!provForm && <button type="button" onClick={() => setProvForm({ nombre: "", telefono: "" })} className="text-xs text-lime-400">+ Agregar</button>}
+            </div>
+            {provForm && (
+              <div className="flex flex-wrap gap-2">
+                <input value={provForm.nombre} onChange={(e) => setProvForm({ ...provForm, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del proveedor" className="flex-1 min-w-[10rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={provForm.telefono} onChange={(e) => setProvForm({ ...provForm, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp del proveedor" className="w-44 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <button type="button" disabled={busy} onClick={guardarProveedor} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setProvForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            )}
+            {datos.proveedores.length === 0 ? <p className="text-teal-400">Todavía no cargaste proveedores.</p> : (
+              <ul className="divide-y divide-teal-900/70">
+                {datos.proveedores.map((pv) => {
+                  const debe = deudaDe(pv.id);
+                  return (
+                    <li key={pv.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="flex-1 min-w-[8rem] text-slate-100">{pv.nombre}{pv.telefono && <span className="block text-xs text-teal-500">{formatArPhone(pv.telefono)}</span>}</span>
+                      {debe > 0 ? <span className="text-xs font-semibold text-amber-300">Le debés {formatoPrecio(debe)}</span> : <span className="text-xs text-teal-500">Al día</span>}
+                      {pv.telefono && <a href={waLink(pv.telefono, "")} target="_blank" rel="noreferrer" className="text-xs text-teal-300 underline">WhatsApp</a>}
+                      <button type="button" onClick={() => setProvForm({ id: pv.id, nombre: pv.nombre, telefono: pv.telefono ? formatArPhone(pv.telefono) : "" })} className="text-xs text-teal-300 underline">Editar</button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Cargar una compra: renglones de productos (cantidad y costo por unidad) o algo suelto, y cómo se pagó */
+function NuevaCompra({ complejoId, proveedores, productos, costos, accessToken, onCancel, onDone, onProveedorNuevo }) {
+  const [proveedorId, setProveedorId] = useState(proveedores[0]?.id || "");
+  const [provNuevo, setProvNuevo] = useState(null);
+  const [fecha, setFecha] = useState(hoyArgentina());
+  const [items, setItems] = useState([{ productoId: "", descripcion: "", cantidad: "", costo: "" }]);
+  const [medio, setMedio] = useState("efectivo"); // "" = queda debiendo
+  const [actualizarCosto, setActualizarCosto] = useState(true);
+  const [nota, setNota] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const setItem = (i, cambio) => setItems((l) => l.map((x, j) => (j === i ? { ...x, ...cambio } : x)));
+  const elegirProducto = (i, id) => setItem(i, { productoId: id, costo: id && costos[id] != null ? String(Math.round(costos[id])) : items[i].costo });
+  const total = items.reduce((s, x) => s + (Number(x.cantidad) || 0) * (leerPrecio(x.costo) || 0), 0);
+
+  const guardar = async () => {
+    const renglones = items.filter((x) => x.productoId || x.descripcion.trim() || x.cantidad || x.costo);
+    if (renglones.length === 0) { setError("Cargá al menos un renglón."); return; }
+    for (const x of renglones) {
+      if (!x.productoId && !x.descripcion.trim()) { setError("Elegí el producto o escribí qué es."); return; }
+      if (!(Number(x.cantidad) > 0) || leerPrecio(x.costo) == null) { setError("Revisá cantidad y costo de cada renglón."); return; }
+    }
+    setBusy(true); setError("");
+    try {
+      let prov = proveedorId || null;
+      if (provNuevo !== null) {
+        if (!provNuevo.trim()) { setError("Poné el nombre del proveedor."); setBusy(false); return; }
+        const [p] = await supabaseTable("proveedores", { method: "POST", body: { complejo_id: complejoId, nombre: provNuevo.trim() }, accessToken, prefer: "return=representation" });
+        prov = p.id;
+        onProveedorNuevo();
+      }
+      await supabaseRpc("registrar_compra", {
+        p_complejo: complejoId, p_proveedor: prov, p_fecha: fecha || hoyArgentina(),
+        p_items: renglones.map((x) => x.productoId
+          ? { producto_id: x.productoId, cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }
+          : { descripcion: x.descripcion.trim().slice(0, 60), cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }),
+        p_medio: medio || null, p_nota: nota.trim() || null, p_actualizar_costo: actualizarCosto,
+      }, accessToken);
+      onDone();
+    } catch (e) { setError(compraErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
+
+  return (
+    <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <h2 className="text-sm uppercase tracking-wide text-teal-400">Nueva compra</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-teal-400">Proveedor
+          {provNuevo === null ? (
+            <select value={proveedorId} onChange={(e) => (e.target.value === "__nuevo" ? setProvNuevo("") : setProveedorId(e.target.value))} className={`block w-full mt-1 ${campo}`} style={adminInput}>
+              <option value="">Sin proveedor</option>
+              {proveedores.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+              <option value="__nuevo">+ Proveedor nuevo…</option>
+            </select>
+          ) : (
+            <span className="flex gap-2 mt-1">
+              <input value={provNuevo} onChange={(e) => setProvNuevo(e.target.value)} maxLength={80} placeholder="Nombre del proveedor" className={`flex-1 ${campo}`} style={adminInput} autoFocus />
+              <button type="button" onClick={() => setProvNuevo(null)} className="text-teal-400 text-sm">Elegir</button>
+            </span>
+          )}
+        </label>
+        <label className="text-xs text-teal-400">Fecha
+          <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} className={`block w-full mt-1 ${campo}`} style={adminInput} />
+        </label>
+      </div>
+
+      <div className="space-y-2">
+        {items.map((x, i) => (
+          <div key={i} className="rounded-lg border border-teal-900 p-2 grid gap-2 grid-cols-2 sm:grid-cols-[minmax(0,1fr)_6rem_8rem_auto] items-center">
+            {x.productoId !== "__suelto" ? (
+              <select value={x.productoId} onChange={(e) => (e.target.value === "__suelto" ? setItem(i, { productoId: "__suelto" }) : elegirProducto(i, e.target.value))} aria-label="Producto" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput}>
+                <option value="">Elegí el producto…</option>
+                {productos.map((p) => <option key={p.id} value={p.id}>{p.rubro ? `${p.rubro} · ` : ""}{p.nombre}{p.stock != null ? ` (hay ${p.stock})` : ""}</option>)}
+                <option value="__suelto">Otra cosa (no es un producto)…</option>
+              </select>
+            ) : (
+              <input value={x.descripcion} onChange={(e) => setItem(i, { descripcion: e.target.value })} maxLength={60} placeholder="Qué es (ej: bolsas, limpieza)" aria-label="Descripción" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput} autoFocus />
+            )}
+            <input inputMode="numeric" value={x.cantidad} onChange={(e) => setItem(i, { cantidad: e.target.value.replace(/\D/g, "") })} placeholder="Cant." aria-label="Cantidad" className={campo} style={adminInput} />
+            <input inputMode="numeric" value={x.costo} onChange={(e) => setItem(i, { costo: e.target.value })} placeholder="$ c/u" aria-label="Costo por unidad" className={campo} style={adminInput} />
+            {items.length > 1 && <button type="button" onClick={() => setItems((l) => l.filter((_, j) => j !== i))} className="text-teal-500 hover:text-red-300 justify-self-end px-2" aria-label="Quitar renglón">✕</button>}
+          </div>
+        ))}
+        <button type="button" onClick={() => setItems((l) => [...l, { productoId: "", descripcion: "", cantidad: "", costo: "" }])} className="text-teal-300 hover:text-lime-400">+ Otro renglón</button>
+        {items.some((x) => x.productoId && x.productoId !== "__suelto") && (
+          <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={actualizarCosto} onChange={(e) => setActualizarCosto(e.target.checked)} /> Actualizar el costo de los productos con este precio</label>
+        )}
+      </div>
+
+      <div className="flex justify-between items-baseline border-t border-teal-800 pt-3">
+        <span className="text-teal-200">Total</span>
+        <span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(total) || "$0"}</span>
+      </div>
+      <div className="space-y-1">
+        <p className="text-xs text-teal-400">Cómo se pagó</p>
+        <div className="flex flex-wrap gap-1.5">
+          {[...MEDIOS_VENTA, ["", "Queda debiendo"]].map(([m, l]) => (
+            <button key={m || "debe"} type="button" onClick={() => setMedio(m)} className={`px-3 py-1.5 rounded-lg border text-xs ${medio === m ? (m ? "border-lime-400 text-lime-400" : "border-amber-400 text-amber-300") : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+      <input value={nota} onChange={(e) => setNota(e.target.value)} maxLength={200} placeholder="Nota (opcional, ej: número de factura)" aria-label="Nota" className={`w-full ${campo}`} style={adminInput} />
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar compra"}</button>
+        <button type="button" onClick={onCancel} className="text-teal-400">Cancelar</button>
+      </div>
+    </section>
+  );
+}
+
+/* Gastos fijos del mes en la Caja: se cargan una vez y cada mes se marcan pagados */
+function GastosFijos({ organizer, mes, onChanged }) {
+  const accessToken = organizer.accessToken;
+  const [lista, setLista] = useState(null);
+  const [pagados, setPagados] = useState(new Set()); // gastos fijos ya pagados ese mes
+  const [form, setForm] = useState(null); // { id?, concepto, monto, dia, medio }
+  const [administrar, setAdministrar] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const [gs, pagos] = await Promise.all([
+        supabaseTable(`gastos_fijos?organizador_id=eq.${organizer.id}&order=dia.asc,concepto.asc`, { accessToken }),
+        supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&periodo=eq.${mes}&gasto_fijo_id=not.is.null&select=gasto_fijo_id`, { accessToken }),
+      ]);
+      setLista(gs); setPagados(new Set(pagos.map((x) => x.gasto_fijo_id))); setError("");
+    } catch { setLista([]); }
+  }, [organizer.id, accessToken, mes]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Ese gasto ya está pagado este mes." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const pagar = (g) => run(() => supabaseTable("caja_movimientos", {
+    method: "POST", accessToken, prefer: "return=minimal",
+    body: { organizador_id: organizer.id, fecha: `${mes}-${String(g.dia).padStart(2, "0")}` > hoyArgentina() ? hoyArgentina() : `${mes}-${String(g.dia).padStart(2, "0")}`, tipo: "gasto", concepto: g.concepto, monto: Number(g.monto), medio: g.medio, gasto_fijo_id: g.id, periodo: mes },
+  }));
+  const guardar = () => {
+    const monto = leerPrecio(form.monto);
+    const dia = Math.min(28, Math.max(1, Number(form.dia) || 1));
+    if (!form.concepto.trim() || !monto) { setError("Poné el concepto y el monto."); return; }
+    run(async () => {
+      const body = { concepto: form.concepto.trim(), monto, dia, medio: form.medio };
+      if (form.id) await supabaseTable(`gastos_fijos?id=eq.${form.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("gastos_fijos", { method: "POST", body: { ...body, organizador_id: organizer.id }, accessToken, prefer: "return=minimal" });
+      setForm(null);
+    });
+  };
+  const alternar = (g) => run(() => supabaseTable(`gastos_fijos?id=eq.${g.id}`, { method: "PATCH", body: { activo: !g.activo }, accessToken, prefer: "return=minimal" }));
+
+  if (lista === null) return null;
+  const activos = lista.filter((g) => g.activo);
+  const pendientes = activos.filter((g) => !pagados.has(g.id));
+  const mesLabel = etiquetaMes(mes).split(" ")[0].toLowerCase();
+
+  return (
+    <section className="rounded-xl border p-4 space-y-3" style={{ borderColor: pendientes.length ? "#f59e0b66" : "#134e4a", backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">Gastos fijos de {mesLabel}</h2>
+        <button type="button" onClick={() => { setAdministrar(!administrar); setForm(null); }} className="text-xs text-teal-300 underline">{administrar ? "Listo" : lista.length ? "Administrar" : "+ Cargar gastos fijos"}</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {!administrar ? (
+        activos.length === 0 ? <p className="text-teal-400">Cargá la luz, el alquiler o los sueldos una vez y acá te aparecen todos los meses para marcarlos pagados.</p> : (
+          <ul className="divide-y divide-teal-900/70">
+            {activos.map((g) => (
+              <li key={g.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="flex-1 min-w-[8rem] text-slate-100">{g.concepto}<span className="block text-xs text-teal-500">vence el {g.dia} · {medioCobroLabel(g.medio)}</span></span>
+                <span className="tabular-nums font-semibold">{formatoPrecio(g.monto)}</span>
+                {pagados.has(g.id)
+                  ? <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagado ✓</span>
+                  : <button type="button" disabled={busy} onClick={() => pagar(g)} className="px-3 py-1 rounded-lg text-xs font-semibold border border-amber-400 text-amber-300">Marcar pagado</button>}
+              </li>
+            ))}
+          </ul>
+        )
+      ) : (
+        <div className="space-y-2">
+          {lista.map((g) => (
+            <div key={g.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${g.activo ? "" : "opacity-60"}`}>
+              <span className="flex-1 min-w-[8rem] text-slate-100">{g.concepto} · {formatoPrecio(g.monto)} · día {g.dia}</span>
+              <button type="button" onClick={() => setForm({ id: g.id, concepto: g.concepto, monto: String(Math.round(g.monto)), dia: String(g.dia), medio: g.medio })} className="text-xs text-teal-300 underline">Editar</button>
+              <button type="button" disabled={busy} onClick={() => alternar(g)} className="text-xs text-teal-400 underline">{g.activo ? "Pausar" : "Reactivar"}</button>
+            </div>
+          ))}
+          {form ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
+                <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder="Ej: Luz, alquiler" aria-label="Concepto" className="col-span-2 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+                <input inputMode="numeric" value={form.dia} onChange={(e) => setForm({ ...form, dia: e.target.value.replace(/\D/g, "") })} placeholder="Día (1 a 28)" aria-label="Día del mes" className="px-3 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {MEDIOS_COBRO.map(([m, l]) => <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-xs ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : <button type="button" onClick={() => setForm({ concepto: "", monto: "", dia: "10", medio: "transferencia" })} className="text-lime-400 text-sm">+ Agregar gasto fijo</button>}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /* ---------- Caja del día: abrir y cerrar la caja de cada persona (ver 20261025_cierre_caja.sql) ---------- */
 
 const ORIGEN_TURNO_CAJA = { mostrador: "Mostrador", cuentas: "Cuentas", inscripciones: "Inscripciones", turnos: "Turnos" };
