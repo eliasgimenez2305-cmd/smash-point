@@ -9,6 +9,7 @@ import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
+import { armarClientes, noVienenHace, claveNombre } from "./clientes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
@@ -8566,6 +8567,7 @@ const PANEL_ICONOS = {
   perfil: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
   salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
   cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
+  clientes: "M9 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 6.5M18 14a6.5 6.5 0 013.5 6",
   compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
@@ -8853,6 +8855,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const verConsumos = complejosCantina.length > 0 && permisos.consumos;
   const verInicio = complejos.length > 0;
   const verCajaDia = complejos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
+  const verClientes = complejos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
   const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
@@ -8881,6 +8884,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
     { titulo: "", items: verInicio ? [["inicio", "Inicio", "inicio"]] : [] },
     { titulo: "Operación", items: [
       ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
+      ...(verClientes ? [["clientes", "Clientes", "clientes"]] : []),
       ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
       ...(verCajaDia ? [["cajadia", "Caja del día", "cajadia"]] : []),
     ] },
@@ -8914,6 +8918,8 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
           verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
         />
+      ) : seccion === "clientes" && verClientes ? (
+        <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
       ) : seccion === "compras" && verConsumos && !colaborador ? (
         <ComprasPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} />
       ) : seccion === "cajadia" && verCajaDia ? (
@@ -12208,6 +12214,184 @@ const pocoStock = (p) => p.activo && p.stock != null && p.aviso_stock != null &&
 
 /* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
    stock. La usan el dueño y los colaboradores con permiso de consumos. */
+/* ---------- Clientes: ficha de cada persona (turnos, cuenta, torneos) ---------- */
+
+/* Todas las filas de una consulta (la base devuelve de a 1000) */
+async function traerTodo(path, accessToken) {
+  const filas = [];
+  for (let offset = 0; offset < 20000; offset += 1000) {
+    const parte = await supabaseTable(`${path}&limit=1000&offset=${offset}`, { accessToken });
+    filas.push(...parte);
+    if (parte.length < 1000) break;
+  }
+  return filas;
+}
+
+const FILTROS_CLIENTES = [["todos", "Todos"], ["frecuentes", "Vienen seguido"], ["ausentes", "No vienen hace 30+ días"], ["deben", "Deben"]];
+
+function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripciones = [] }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas }
+  const [error, setError] = useState("");
+  const [filtro, setFiltro] = useState("todos");
+  const [buscar, setBuscar] = useState("");
+  const [abierto, setAbierto] = useState(null); // clave del cliente
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "el complejo";
+
+  useEffect(() => {
+    let vivo = true;
+    setDatos(null);
+    const c = encodeURIComponent(complejoId);
+    Promise.all([
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
+      verCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
+      supabaseTable(`canchas?complejo_id=eq.${c}&select=id,nombre`),
+    ]).then(([reservas, cuentas, canchas]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas }); setError(""); } })
+      .catch(() => { if (vivo) setError("No se pudieron cargar los clientes. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [complejoId, accessToken, verCuentas, hoy]);
+
+  const clientes = useMemo(() => (datos ? armarClientes({ reservas: datos.reservas, cuentas: datos.cuentas, inscripciones, hoy }) : []), [datos, inscripciones, hoy]);
+  const frecuente = (c) => c.historial.filter((r) => r.fecha <= hoy && r.fecha >= sumarDias(hoy, -60) && !r.no_vino).length >= 4;
+  const texto = claveNombre(buscar);
+  const visibles = clientes
+    .filter((c) => filtro === "todos" || (filtro === "frecuentes" && frecuente(c)) || (filtro === "ausentes" && noVienenHace(c)) || (filtro === "deben" && c.deuda > 0))
+    .filter((c) => !texto || claveNombre(c.nombre).includes(texto) || (c.telefono || "").includes(buscar.replace(/\D/g, "") || "~"))
+    .sort((a, b) => (filtro === "deben" ? b.deuda - a.deuda : filtro === "ausentes" ? b.diasSinVenir - a.diasSinVenir : (b.ultimaVisita || "").localeCompare(a.ultimaVisita || "")));
+  const activos = clientes.filter((c) => c.diasSinVenir != null && c.diasSinVenir <= 30).length;
+  const ausentes = clientes.filter((c) => noVienenHace(c)).length;
+  const deben = clientes.filter((c) => c.deuda > 0).length;
+  const ultima = (c) => (c.ultimaVisita ? (c.diasSinVenir === 0 ? "hoy" : `hace ${c.diasSinVenir} día${c.diasSinVenir === 1 ? "" : "s"}`) : "—");
+  const cliente = clientes.find((c) => c.clave === abierto);
+
+  if (cliente) return <FichaCliente cliente={cliente} canchas={datos.canchas} venueName={nombreComplejo(complejoId)} hoy={hoy} onBack={() => setAbierto(null)} />;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <TarjetaResumen titulo="Clientes" tono="cyan" valor={String(clientes.length)} detalle="Últimos 6 meses" onClick={() => setFiltro("todos")} />
+            <TarjetaResumen titulo="Activos" tono="lime" valor={String(activos)} detalle="Vinieron en 30 días" onClick={() => setFiltro("frecuentes")} />
+            <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
+            <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle={verCuentas ? "En la cantina" : "—"} onClick={() => setFiltro("deben")} />
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || verCuentas).map(([k, l]) => (
+              <button key={k} type="button" onClick={() => setFiltro(k)} className={`px-3 py-1.5 rounded-full border ${filtro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+            ))}
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cliente" className="w-full sm:w-64 sm:ml-auto px-3 py-2 rounded-lg border text-base" style={adminInput} />
+          </div>
+          {filtro === "ausentes" && visibles.length > 0 && <p className="text-xs text-teal-400">Tocá un cliente para mandarle un WhatsApp invitándolo a volver.</p>}
+          {visibles.length === 0 ? <p className="text-teal-400">{clientes.length === 0 ? "Todavía no hay turnos cargados en los últimos 6 meses." : "No hay clientes con ese filtro."}</p> : (
+            <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Cliente</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Turnos</th>
+                      <th className="px-3 py-2.5 font-semibold">Última vez</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Gastó en turnos</th>
+                      {verCuentas && <th className="px-3 py-2.5 font-semibold text-right">Debe</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibles.slice(0, 300).map((c) => (
+                      <tr key={c.clave} onClick={() => setAbierto(c.clave)} className="border-t border-teal-900/70 hover:bg-white/5 cursor-pointer">
+                        <td className="px-3 py-2.5"><span className="text-slate-100">{c.nombre}</span>{c.telefono && <span className="block text-xs text-teal-500">{formatArPhone(c.telefono)}</span>}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{c.turnos}{c.proximos > 0 && <span className="text-xs text-lime-400"> +{c.proximos}</span>}</td>
+                        <td className={`px-3 py-2.5 ${noVienenHace(c) ? "text-amber-300" : "text-teal-300"}`}>{ultima(c)}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.gastado) || "$0"}</td>
+                        {verCuentas && <td className="px-3 py-2.5 text-right tabular-nums">{c.deuda > 0 ? <span className="text-red-300 font-semibold">{formatoPrecio(c.deuda)}</span> : <span className="text-teal-600">—</span>}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                {visibles.slice(0, 300).map((c) => (
+                  <li key={c.clave}>
+                    <button type="button" onClick={() => setAbierto(c.clave)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left">
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-slate-100 truncate">{c.nombre}</span>
+                        <span className={`block text-xs ${noVienenHace(c) ? "text-amber-300" : "text-teal-500"}`}>{c.turnos} turno{c.turnos === 1 ? "" : "s"} · {ultima(c)}{c.proximos > 0 ? ` · ${c.proximos} próximo${c.proximos === 1 ? "" : "s"}` : ""}</span>
+                      </span>
+                      {c.deuda > 0 && <span className="text-xs font-semibold text-red-300 shrink-0">Debe {formatoPrecio(c.deuda)}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {visibles.length > 300 && <p className="text-xs text-teal-500">Se muestran 300 de {visibles.length}. Usá el buscador.</p>}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
+  const nombreCancha = (id) => canchas.find((x) => x.id === id)?.nombre || "Cancha";
+  const pasados = c.historial.filter((r) => r.fecha <= hoy).slice(0, 12);
+  const proximos = c.historial.filter((r) => r.fecha > hoy).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+  const primerNombre = c.nombre.split(" ")[0];
+  const mensajeVolver = `Hola ${primerNombre}! ¿Cómo andás? Hace rato no te vemos por ${venueName} 🎾 ¿Armamos un partido esta semana? Avisanos qué día te queda bien y te reservamos la cancha.`;
+  const mensajeDeuda = `Hola ${primerNombre}! Te escribimos de ${venueName}: te quedó un saldo de ${formatoPrecio(c.deuda)} en la cantina. Cuando puedas pasá a regularizarlo. ¡Gracias!`;
+  const horario = (r) => `${etiquetaFecha(r.fecha)} · ${etiquetaHora(minutoEnGrilla(r.fecha, r.inicio))} · ${nombreCancha(r.cancha_id)}`;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Clientes</button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl text-slate-100" style={F.display}>{c.nombre.toUpperCase()}</h2>
+          {c.telefono && <p className="text-teal-300">{formatArPhone(c.telefono)}</p>}
+        </div>
+        {c.telefono && (
+          <div className="flex flex-wrap gap-2">
+            {noVienenHace(c) && <a href={waLink(c.telefono, mensajeVolver)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Invitarlo a volver</a>}
+            {c.deuda > 0 && <a href={waLink(c.telefono, mensajeDeuda)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-red-400 text-red-300">Recordarle la deuda</a>}
+            <a href={waLink(c.telefono, `Hola ${primerNombre}! `)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">WhatsApp</a>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <TarjetaResumen titulo="Turnos jugados" tono="cyan" valor={String(c.turnos)} detalle={c.noVino ? `${c.noVino} vez${c.noVino === 1 ? "" : "es"} no vino` : "Últimos 6 meses"} />
+        <TarjetaResumen titulo="Última vez" tono={noVienenHace(c) ? "ambar" : "lime"} valor={c.ultimaVisita ? (c.diasSinVenir === 0 ? "Hoy" : `${c.diasSinVenir} días`) : "—"} detalle={c.ultimaVisita ? etiquetaFecha(c.ultimaVisita) : "Todavía no jugó"} />
+        <TarjetaResumen titulo="Gastó en turnos" tono="lime" valor={formatoPrecio(c.gastado) || "$0"} detalle={c.torneos ? `Jugó ${c.torneos} torneo${c.torneos === 1 ? "" : "s"}` : "Cobrados"} />
+        <TarjetaResumen titulo="Debe" tono={c.deuda > 0 ? "rojo" : "gris"} valor={formatoPrecio(c.deuda) || "$0"} detalle={c.cuentaId ? "Cuenta de la cantina" : "Sin cuenta"} />
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+          <h3 className="text-sm uppercase tracking-wide text-teal-400 mb-2">Próximos turnos</h3>
+          {proximos.length === 0 ? <p className="text-teal-400">No tiene turnos reservados.</p> : (
+            <ul className="space-y-1">{proximos.slice(0, 8).map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fijo</span>}</li>)}</ul>
+          )}
+        </section>
+        <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+          <h3 className="text-sm uppercase tracking-wide text-teal-400 mb-2">Últimos turnos</h3>
+          {pasados.length === 0 ? <p className="text-teal-400">Sin turnos en los últimos 6 meses.</p> : (
+            <ul className="space-y-1">{pasados.map((r) => (
+              <li key={r.id} className="flex justify-between gap-2">
+                <span className="text-teal-200 min-w-0">{horario(r)}</span>
+                <span className={`text-xs shrink-0 ${r.no_vino ? "text-red-300" : r.medio_pago ? "text-lime-400" : "text-amber-300"}`}>{r.no_vino ? "No vino" : r.medio_pago ? "Pagó" : "Sin cobrar"}</span>
+              </li>
+            ))}</ul>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Compras a proveedores (ver 20261026_compras_gastos_fijos.sql): solo el dueño ---------- */
 
 const COMPRA_ERRORES = {
