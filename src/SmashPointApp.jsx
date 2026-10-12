@@ -5687,7 +5687,7 @@ function DirectoryAvatar({ url, name, color, size = 64 }) {
 /* Pestaña pública "Canchas": fichas de los complejos (logo, nombre, dirección, Instagram, WhatsApp) */
 function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisReservas }) {
   const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
-  const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas);
+  const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas && c.modulo_reservas !== false);
   return (
     <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
       <div className="flex items-start justify-between gap-3">
@@ -5735,7 +5735,7 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
    por complejo con sus horarios libres. Tocar un horario lleva directo a confirmar (onElegir). */
 function BuscadorTurnos({ venues, complejos, onElegir }) {
   const hoy = hoyArgentina();
-  const habilitados = complejos.filter((c) => c.reservas_habilitadas && venues.some((v) => v.id === c.id));
+  const habilitados = complejos.filter((c) => c.reservas_habilitadas && c.modulo_reservas !== false && venues.some((v) => v.id === c.id));
   const ids = habilitados.map((c) => c.id).join(",");
   const [canchas, setCanchas] = useState(null);
   const [fecha, setFecha] = useState(hoy);
@@ -7522,8 +7522,9 @@ function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
 function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], complejos = [], onSaveComplejo }) {
   const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
   const [form, setForm] = useState(empty);
-  // Reservas: la cuenta del dueño y si tiene la sección habilitada (tabla complejos, aparte de la ficha)
-  const [reserva, setReserva] = useState({ duenoId: "", habilitada: false });
+  // Panel del complejo: la cuenta del dueño, si está habilitado y qué módulos usa (tabla complejos, aparte de la ficha)
+  const reservaVacia = { duenoId: "", habilitada: false, torneos: true, reservas: true, cantina: true };
+  const [reserva, setReserva] = useState(reservaVacia);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
   const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
@@ -7532,30 +7533,32 @@ function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], 
   const submit = async () => {
     if (!form.name.trim()) { setError("Poné el nombre del complejo."); return; }
     if (form.whatsapp.trim() && !normalizeArPhone(form.whatsapp)) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
-    if (reserva.habilitada && !reserva.duenoId) { setError("Para habilitar Reservas, elegí la cuenta del dueño."); return; }
+    if (reserva.habilitada && !reserva.duenoId) { setError("Para habilitar el panel del complejo, elegí la cuenta del dueño."); return; }
+    if (reserva.habilitada && !reserva.torneos && !reserva.reservas && !reserva.cantina) { setError("Marcá al menos un módulo."); return; }
     const id = editingId || uid();
     onSave({ id, ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
     const before = complejos.find((c) => c.id === id);
     if (before || reserva.duenoId || reserva.habilitada) {
       try {
-        await onSaveComplejo({ id, dueno_id: reserva.duenoId || null, reservas_habilitadas: reserva.habilitada });
+        await onSaveComplejo({ id, dueno_id: reserva.duenoId || null, reservas_habilitadas: reserva.habilitada, modulo_torneos: reserva.torneos, modulo_reservas: reserva.reservas, modulo_cantina: reserva.cantina });
       } catch (e) {
-        setError(`La ficha se guardó, pero no la parte de Reservas: ${reservaErrorText(e)}`);
+        setError(`La ficha se guardó, pero no el panel del complejo: ${reservaErrorText(e)}`);
         return;
       }
     }
-    setForm(empty); setReserva({ duenoId: "", habilitada: false }); setEditingId(null); setError("");
+    setForm(empty); setReserva(reservaVacia); setEditingId(null); setError("");
   };
   const edit = (v) => {
     const c = complejos.find((x) => x.id === v.id);
-    setForm({ ...empty, ...v }); setReserva({ duenoId: c?.dueno_id || "", habilitada: !!c?.reservas_habilitadas });
+    setForm({ ...empty, ...v }); setReserva({ duenoId: c?.dueno_id || "", habilitada: !!c?.reservas_habilitadas, torneos: c?.modulo_torneos !== false, reservas: c?.modulo_reservas !== false, cantina: c?.modulo_cantina !== false });
     setEditingId(v.id); setError(""); window.scrollTo(0, 0);
   };
   const reservaLabel = (v) => {
     const c = complejos.find((x) => x.id === v.id);
     if (!c?.reservas_habilitadas) return v.address;
     const owner = organizers.find((o) => o.id === c.dueno_id);
-    return [v.address, `Reservas: ${owner?.name || "sin dueño"}`].filter(Boolean).join(" · ");
+    const modulos = [c.modulo_torneos !== false && "Torneos", c.modulo_reservas !== false && "Reservas", c.modulo_cantina !== false && "Cantina"].filter(Boolean).join(", ");
+    return [v.address, `Panel: ${owner?.name || "sin dueño"} (${modulos})`].filter(Boolean).join(" · ");
   };
 
   return (
@@ -7583,7 +7586,7 @@ function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], 
         </div>
         <div className="border-t border-teal-900 pt-3 mb-3 grid gap-3 sm:grid-cols-2 items-end">
           <div>
-            <label className="block text-xs text-teal-400 mb-1">Dueño (cuenta que maneja las reservas)</label>
+            <label className="block text-xs text-teal-400 mb-1">Dueño (cuenta que maneja el complejo)</label>
             <select value={reserva.duenoId} onChange={(e) => setReserva({ ...reserva, duenoId: e.target.value })} className="w-full px-3 py-2 rounded border text-sm" style={adminInput}>
               <option value="">Sin dueño</option>
               {owners.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -7591,13 +7594,25 @@ function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], 
           </div>
           <label className="flex items-center gap-2 text-sm text-teal-200 py-2">
             <input type="checkbox" checked={reserva.habilitada} onChange={(e) => setReserva({ ...reserva, habilitada: e.target.checked })} />
-            Sección Reservas habilitada
+            Panel del complejo habilitado
           </label>
+          {reserva.habilitada && (
+            <div className="sm:col-span-2">
+              <p className="text-xs text-teal-400 mb-1">Qué usa (el dueño y sus empleados ven solo esto)</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1">
+                {[["torneos", "Torneos"], ["reservas", "Reservas de canchas"], ["cantina", "Cantina"]].map(([k, label]) => (
+                  <label key={k} className="flex items-center gap-2 text-sm text-teal-200">
+                    <input type="checkbox" checked={reserva[k]} onChange={(e) => setReserva({ ...reserva, [k]: e.target.checked })} /> {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
         <div className="flex gap-3 items-center">
           <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Agregar complejo"}</button>
-          {editingId && <button type="button" onClick={() => { setForm(empty); setReserva({ duenoId: "", habilitada: false }); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
+          {editingId && <button type="button" onClick={() => { setForm(empty); setReserva(reservaVacia); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
         </div>
       </div>
 
@@ -8534,20 +8549,306 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
   );
 }
 
+/* ---------- Panel del organizador / dueño: menú lateral e Inicio ---------- */
+
+/* Íconos del menú (trazos simples, toman el color del texto) */
+const PANEL_ICONOS = {
+  inicio: "M3 11l9-7 9 7M5 10v10h5v-6h4v6h5V10",
+  reservas: "M4 6h16v14H4zM4 10h16M8 3v5M16 3v5",
+  consumos: "M6 8h12l-1.5 12h-9zM9 8V6a3 3 0 016 0v2",
+  torneos: "M8 4h8v5a4 4 0 01-8 0zM8 6H5a3 3 0 003 4M16 6h3a3 3 0 01-3 4M12 13v4M8 20h8",
+  caja: "M3 7h18v12H3zM3 11h18M7 15h3",
+  perfil: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
+  salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
+  menu: "M4 7h16M4 12h16M4 17h16",
+  cerrar: "M6 6l12 12M18 6L6 18",
+};
+function PanelIcono({ nombre, className = "w-5 h-5" }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={PANEL_ICONOS[nombre]} />
+    </svg>
+  );
+}
+
+/* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
+   botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, titulo, children }) {
+  const [abierto, setAbierto] = useState(false);
+  useEffect(() => {
+    if (!abierto) return;
+    const cerrar = (e) => { if (e.key === "Escape") setAbierto(false); };
+    window.addEventListener("keydown", cerrar);
+    return () => window.removeEventListener("keydown", cerrar);
+  }, [abierto]);
+  const elegir = (clave) => { onElegir(clave); setAbierto(false); window.scrollTo(0, 0); };
+
+  const menu = (
+    <div className="flex flex-col h-full" style={F.body}>
+      <div className="flex items-center gap-3 px-4 py-5 border-b border-teal-900">
+        {logoUrl
+          ? <img src={logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700 shrink-0" />
+          : <img src={logoMarkUrl} alt="" className="w-10 h-10 rounded-full object-contain shrink-0" />}
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-100 truncate">{nombre}</p>
+          <p className="text-xs text-teal-500 truncate">{subtitulo}</p>
+        </div>
+      </div>
+      <nav className="flex-1 overflow-y-auto px-2 py-3" aria-label="Secciones del panel">
+        {grupos.map((g, i) => (
+          <div key={g.titulo || i} className="mb-3">
+            {g.titulo && <p className="px-3 mb-1 text-[11px] uppercase tracking-widest text-teal-600">{g.titulo}</p>}
+            {g.items.map(([clave, etiqueta, icono, aviso]) => (
+              <button
+                key={clave}
+                type="button"
+                onClick={() => elegir(clave)}
+                aria-current={activa === clave ? "page" : undefined}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-left transition ${activa === clave ? "font-semibold" : "text-slate-300 hover:bg-white/5"}`}
+                style={activa === clave ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime, boxShadow: `inset 3px 0 0 ${BRAND.lime}` } : undefined}
+              >
+                <PanelIcono nombre={icono} />
+                <span className="flex-1">{etiqueta}</span>
+                {aviso > 0 && <span className="min-w-[1.5rem] px-1.5 py-0.5 rounded-full text-xs font-bold text-center" style={{ backgroundColor: "#f59e0b", color: "#14181f" }}>{aviso}</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <button type="button" onClick={onLogout} className="flex items-center gap-3 mx-2 mb-4 px-3 py-2.5 rounded-lg text-sm text-teal-400 hover:text-lime-400 hover:bg-white/5">
+        <PanelIcono nombre="salir" /> Cerrar sesión
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="lg:pl-64">
+      {/* PC: menú fijo */}
+      <aside className="hidden lg:block fixed inset-y-0 left-0 w-64 border-r border-teal-900 z-30" style={{ backgroundColor: "rgba(6,15,20,0.92)" }}>
+        {menu}
+      </aside>
+      {/* Celular: barra de arriba y menú desplegable */}
+      <div className="lg:hidden flex items-center gap-3 px-4 py-3 border-b border-teal-900" style={{ backgroundColor: "rgba(6,15,20,0.85)" }}>
+        <button type="button" onClick={() => setAbierto(true)} className="p-2 -ml-2 rounded-lg text-slate-200 hover:bg-white/5" aria-label="Abrir menú" aria-expanded={abierto}>
+          <PanelIcono nombre="menu" className="w-6 h-6" />
+        </button>
+        <p className="flex-1 min-w-0 text-sm font-semibold truncate" style={F.body}>{nombre}</p>
+        {grupos.flatMap((g) => g.items).some(([, , , aviso]) => aviso > 0) && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} aria-label="Hay avisos" />}
+      </div>
+      {abierto && (
+        <div className="lg:hidden fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Menú">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setAbierto(false)} />
+          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] border-r border-teal-900" style={{ backgroundColor: "#071319" }}>
+            <button type="button" onClick={() => setAbierto(false)} className="absolute top-4 right-3 p-2 rounded-lg text-teal-400 hover:bg-white/5" aria-label="Cerrar menú">
+              <PanelIcono nombre="cerrar" />
+            </button>
+            {menu}
+          </aside>
+        </div>
+      )}
+      <main className="px-4 sm:px-6 lg:px-10 py-6 lg:py-8 max-w-5xl">
+        <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>
+        {children}
+      </main>
+    </div>
+  );
+}
+
+/* Tarjeta de resumen (Inicio, y más adelante Caja y Cuentas) */
+const TONOS_RESUMEN = { lime: "#9fe022", rojo: "#f87171", cyan: "#22d3ee", ambar: "#f59e0b", gris: "#94a3b8" };
+function TarjetaResumen({ titulo, valor, detalle, tono = "cyan", onClick }) {
+  const color = TONOS_RESUMEN[tono];
+  const Tag = onClick ? "button" : "div";
+  return (
+    <Tag
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      className={`block w-full text-left rounded-xl p-4 border min-w-0 ${onClick ? "hover:brightness-125 transition" : ""}`}
+      style={{ borderColor: `${color}55`, background: `linear-gradient(160deg, ${color}1a, rgba(8,18,24,0.75) 60%)` }}
+    >
+      <p className="text-[11px] uppercase tracking-widest font-semibold" style={{ color }}>{titulo}</p>
+      <p className="text-2xl font-bold mt-1 tabular-nums truncate" style={{ color }}>{valor}</p>
+      {detalle && <p className="text-xs text-teal-400 mt-1 truncate">{detalle}</p>}
+    </Tag>
+  );
+}
+
+/* Inicio del panel: lo del día de un vistazo. Cada bloque aparece si el complejo tiene ese módulo y
+   quien entra tiene el permiso; la plata del día, solo el dueño. */
+function InicioPanel({ organizer, colaborador, permisos, complejosReservas, complejosCantina, complejos, tournaments, inscripciones, pedidosPendientes, verTorneos, onIr, onOpen, venues }) {
+  const hoy = hoyArgentina();
+  const accessToken = organizer.accessToken;
+  const verAgenda = complejosReservas.length > 0 && permisos.agenda;
+  const verCantina = complejosCantina.length > 0 && permisos.consumos;
+  const verPlata = !colaborador;
+  const [datos, setDatos] = useState(null);
+  const [error, setError] = useState("");
+  const lista = (cs) => cs.map((c) => encodeURIComponent(c.id)).join(",");
+  const idsReservas = lista(complejosReservas);
+  const idsCantina = lista(complejosCantina);
+  const idsTodos = lista(complejos);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  useEffect(() => {
+    let vivo = true;
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    const desdeHoy = `created_at=gte.${enAr(hoy)}&created_at=lt.${enAr(sumarDias(hoy, 1))}`;
+    const nada = Promise.resolve([]);
+    Promise.all([
+      verAgenda ? supabaseTable(`reservas?complejo_id=in.(${idsReservas})&fecha=eq.${hoy}&tipo=eq.turno&estado=in.(confirmada,pendiente)&order=inicio.asc`, { accessToken }) : nada,
+      verAgenda ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&select=id,nombre`) : nada,
+      verCantina ? supabaseTable(`productos?complejo_id=in.(${idsCantina})&activo=eq.true&stock=not.is.null&aviso_stock=not.is.null&select=id,nombre,stock,aviso_stock,activo,complejo_id`, { accessToken }).catch(() => []) : nada,
+      verCantina ? Promise.all(idsCantina.split(",").map((id) => supabaseRpc("cuentas_con_saldo", { p_complejo: decodeURIComponent(id) }, accessToken).catch(() => []))).then((r) => r.flat()) : nada,
+      // La plata de hoy (solo el dueño): lo mismo que suma la Caja, para el día
+      verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata ? supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=eq.${hoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=eq.turno&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas]) => {
+      if (!vivo) return;
+      const suma = (rows) => rows.reduce((s, r) => s + Number(r.monto ?? r.precio ?? 0), 0);
+      setDatos({
+        turnos, canchas,
+        pocoStock: productos.filter(pocoStock),
+        deudores: cuentas.map((c) => ({ ...c, saldo: Number(c.consumido) - Number(c.pagado) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
+        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(manuales.filter((m) => m.tipo === "ingreso")),
+        egresos: suma(manuales.filter((m) => m.tipo === "gasto")),
+      });
+      setError("");
+    }).catch(() => { if (vivo) setError("No se pudo cargar el resumen. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [hoy, accessToken, organizer.id, verAgenda, verCantina, verPlata, idsReservas, idsCantina, idsTodos]);
+
+  const proximos = verTorneos
+    ? tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO).sort((a, b) => (a.date || "").localeCompare(b.date || "")).slice(0, 4)
+    : [];
+  const pendientesDe = (id) => (inscripciones || []).filter((i) => i.torneo_id === id && i.estado === "pendiente").length;
+  const ahora = minutoEnGrilla(hoy, new Date().toISOString());
+  const nombreCancha = (id) => datos?.canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const totalDeben = (datos?.deudores || []).reduce((s, c) => s + c.saldo, 0);
+  const cargando = !datos && !error;
+
+  return (
+    <div className="space-y-6" style={F.body}>
+      <p className="text-sm text-teal-300 -mt-3">{etiquetaFecha(hoy)}</p>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+        {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, consumos, inscripciones" onClick={() => onIr("caja")} />}
+        {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos cargados en Caja" onClick={() => onIr("caja")} />}
+        {verAgenda && <TarjetaResumen titulo="Turnos de hoy" tono="cyan" valor={cargando ? "…" : String(datos?.turnos.filter((r) => r.estado === "confirmada").length || 0)} detalle={pedidosPendientes > 0 ? `${pedidosPendientes} pedido${pedidosPendientes === 1 ? "" : "s"} por confirmar` : "Sin pedidos pendientes"} onClick={() => onIr("reservas")} />}
+        {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("consumos")} />}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {verAgenda && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Próximos turnos</h2>
+              <button type="button" onClick={() => onIr("reservas")} className="text-xs text-teal-300 hover:text-lime-400">Ver agenda →</button>
+            </div>
+            {!datos ? <p className="text-sm opacity-60">{cargando ? "Cargando…" : ""}</p> : (() => {
+              const siguientes = datos.turnos.filter((r) => minutoEnGrilla(hoy, r.fin) > ahora).slice(0, 6);
+              return siguientes.length === 0 ? <p className="text-sm text-teal-300">No quedan turnos hoy.</p> : (
+                <ul className="divide-y divide-teal-900">
+                  {siguientes.map((r) => (
+                    <li key={r.id} className="flex items-center gap-3 py-2 text-sm">
+                      <span className="w-12 shrink-0 font-semibold tabular-nums text-slate-100">{etiquetaHora(minutoEnGrilla(hoy, r.inicio))}</span>
+                      <span className="flex-1 min-w-0 truncate">{r.nombre || "Sin nombre"}<span className="text-teal-500"> · {nombreCancha(r.cancha_id)}{complejosReservas.length > 1 ? ` · ${nombreComplejo(r.complejo_id)}` : ""}</span></span>
+                      {r.estado === "pendiente" && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>Pedido</span>}
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </section>
+        )}
+
+        {verCantina && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Cantina</h2>
+              <button type="button" onClick={() => onIr("consumos")} className="text-xs text-teal-300 hover:text-lime-400">Ver cuentas →</button>
+            </div>
+            {!datos ? <p className="text-sm opacity-60">{cargando ? "Cargando…" : ""}</p> : (
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs text-teal-500 mb-1">Stock bajo</p>
+                  {datos.pocoStock.length === 0 ? <p className="text-sm text-teal-300">Todo con stock.</p> : (
+                    <ul className="flex flex-wrap gap-2">
+                      {datos.pocoStock.map((p) => (
+                        <li key={p.id} className="text-xs px-2 py-1 rounded-full" style={{ backgroundColor: p.stock <= 0 ? "#f8717126" : "#f59e0b26", color: p.stock <= 0 ? "#fca5a5" : "#fbbf24" }}>{p.nombre}: {p.stock <= 0 ? "sin stock" : `quedan ${p.stock}`}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="text-xs text-teal-500 mb-1">Los que más deben</p>
+                  {datos.deudores.length === 0 ? <p className="text-sm text-teal-300">Nadie debe nada.</p> : (
+                    <ul className="divide-y divide-teal-900">
+                      {datos.deudores.slice(0, 4).map((c) => (
+                        <li key={c.id} className="flex justify-between gap-3 py-1.5 text-sm">
+                          <span className="truncate">{c.nombre}</span>
+                          <span className="shrink-0 font-semibold tabular-nums text-red-300">{formatoPrecio(c.saldo)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {verTorneos && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Torneos</h2>
+              <button type="button" onClick={() => onIr("torneos")} className="text-xs text-teal-300 hover:text-lime-400">Ver todos →</button>
+            </div>
+            {proximos.length === 0 ? <p className="text-sm text-teal-300">No hay torneos próximos ni en curso.</p> : (
+              <ul className="divide-y divide-teal-900">
+                {proximos.map((t) => {
+                  const pend = pendientesDe(t.id);
+                  return (
+                    <li key={t.id}>
+                      <button type="button" onClick={() => onOpen(t.id)} className="w-full flex items-center gap-3 py-2 text-sm text-left hover:text-lime-400">
+                        <span className="flex-1 min-w-0 truncate">{t.name}<span className="text-teal-500"> · {t.date ? formatDateShort(t.date) : "sin fecha"}</span></span>
+                        {tournamentStatusOf(t) === STATUS.EN_CURSO && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#9fe02226", color: BRAND.lime }}>En curso</span>}
+                        {pend > 0 && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>{pend} inscripción{pend === 1 ? "" : "es"}</span>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
   // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
   const colaborador = organizer.role === "colaborador";
   const permisos = colaborador ? organizer.permisos : { agenda: true, resultados: true, torneos: true, canchas: true, consumos: true };
-  const verTorneos = permisos.resultados || permisos.torneos;
-  const verReservas = complejos.length > 0 && (permisos.agenda || permisos.canchas);
-  const verConsumos = complejos.length > 0 && permisos.consumos;
-  const [seccion, setSeccion] = useState(verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // perfil | torneos | reservas | consumos | caja (solo el dueño)
+  // Módulos de cada complejo (los marca el creador, ver 20261023_modulos_complejo.sql). Un
+  // organizador sin complejo ve Torneos como siempre.
+  const complejosReservas = complejos.filter((c) => c.modulo_reservas !== false);
+  const complejosCantina = complejos.filter((c) => c.modulo_cantina !== false);
+  const moduloTorneos = complejos.length === 0 || complejos.some((c) => c.modulo_torneos !== false);
+  const verTorneos = moduloTorneos && (permisos.resultados || permisos.torneos);
+  const verReservas = complejosReservas.length > 0 && (permisos.agenda || permisos.canchas);
+  const verConsumos = complejosCantina.length > 0 && permisos.consumos;
+  const verInicio = complejos.length > 0;
+  const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
   const [pedidosPendientes, setPedidosPendientes] = useState(0);
-  const complejoIds = complejos.map((c) => c.id).join(",");
+  const complejoIds = complejosReservas.map((c) => c.id).join(",");
   useEffect(() => {
     if (!complejoIds) return;
     const load = () => supabaseTable(`reservas?complejo_id=in.(${complejoIds.split(",").map(encodeURIComponent).join(",")})&estado=eq.pendiente&select=id`, { accessToken: organizer.accessToken })
@@ -8566,45 +8867,42 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
     onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
     setPerfilGuardado(true);
   };
-  const secciones = [
-    ...(colaborador ? [] : [["perfil", "Perfil"]]),
-    ...(verTorneos ? [["torneos", "Torneos"]] : []),
-    ...(verReservas ? [["reservas", pedidosPendientes > 0 && permisos.agenda ? `Reservas (${pedidosPendientes})` : "Reservas"]] : []),
-    ...(verConsumos ? [["consumos", "Consumos"]] : []),
-    ...(colaborador ? [] : [["caja", "Caja"]]),
-  ];
+  // Menú lateral, agrupado: [clave, etiqueta, ícono, aviso]
+  const grupos = [
+    { titulo: "", items: verInicio ? [["inicio", "Inicio", "inicio"]] : [] },
+    { titulo: "Operación", items: [
+      ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
+      ...(verConsumos ? [["consumos", "Cantina", "consumos"]] : []),
+    ] },
+    { titulo: "Gestión", items: [
+      ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
+      ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
+    ] },
+    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
+  ].filter((g) => g.items.length > 0);
+  const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
   return (
-    <div className="px-6 py-8 max-w-3xl mx-auto">
-      <div className="flex justify-between items-center gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          {organizer.logoUrl && <img src={organizer.logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700" />}
-          <div className="min-w-0">
-            <h1 className="text-xl" style={F.display}>PANEL — {organizer.name.toUpperCase()}</h1>
-            {colaborador && <p className="text-xs text-teal-500 break-all" style={F.body}>Colaborador: {organizer.email}</p>}
-          </div>
-        </div>
-        <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
-      </div>
-
-      <nav className="flex gap-1 p-1 rounded-full mt-4 mb-6 overflow-x-auto" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)", scrollbarWidth: "none" }} aria-label="Secciones del panel">
-        {secciones.map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => { setSeccion(key); setPerfilGuardado(false); }}
-            aria-current={seccion === key ? "page" : undefined}
-            className="flex-1 shrink-0 whitespace-nowrap py-2 px-3 rounded-full text-sm font-semibold transition"
-            style={seccion === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f" } : { ...F.body, color: "#cbd5e1" }}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      {seccion === "consumos" && verConsumos ? (
-        <ConsumosPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+    <PanelLayout
+      nombre={organizer.name}
+      logoUrl={organizer.logoUrl}
+      subtitulo={colaborador ? `Empleado · ${organizer.email}` : complejos.length > 0 ? "Panel del complejo" : "Panel del organizador"}
+      grupos={grupos}
+      activa={seccion}
+      onElegir={(key) => { setSeccion(key); setPerfilGuardado(false); }}
+      onLogout={onLogout}
+      titulo={tituloSeccion}
+    >
+      {seccion === "inicio" && verInicio ? (
+        <InicioPanel
+          organizer={organizer} colaborador={colaborador} permisos={permisos}
+          complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina}
+          tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
+          verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
+        />
+      ) : seccion === "consumos" && verConsumos ? (
+        <ConsumosPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "caja" && !colaborador ? (
         <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
       ) : seccion === "perfil" && !colaborador ? (
@@ -8632,7 +8930,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
           ))}
         </div>
       ) : (seccion === "reservas" || !verTorneos) && verReservas ? (
-        <ReservasPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} rol={colaborador ? "colaborador" : "dueno"} permisos={permisos} />
+        <ReservasPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} rol={colaborador ? "colaborador" : "dueno"} permisos={permisos} />
       ) : !verTorneos ? (
         <p className="text-sm text-teal-300" style={F.body}>{verConsumos ? "" : "El dueño todavía no te dio permisos. Pedile que te habilite lo que necesitás."}</p>
       ) : (
@@ -8674,7 +8972,7 @@ function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent,
           )}
         </>
       )}
-    </div>
+    </PanelLayout>
   );
 }
 
@@ -13209,7 +13507,7 @@ function SmashPointAppInner() {
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
         cobros={session.role === "creador" ? null : {
           accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
-          complejoIds: complejos.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
+          complejoIds: complejos.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
         }}
       />
     );
