@@ -93,6 +93,11 @@ async function renewWithLatestToken(refreshToken) {
 /* Lo que queda guardado en este navegador para no perder la sesión al recargar: el refresh token y
    la pantalla del panel en la que estaba. Cerrar sesión lo borra. */
 const AUTH_STORAGE_KEY = "sp:auth";
+// Complejo cuyo panel tenía abierto el empleado, para volver ahí al recargar
+const PANEL_COMPLEJO_KEY = "sp:panel-complejo";
+function olvidarPanelComplejo() {
+  try { localStorage.removeItem(PANEL_COMPLEJO_KEY); } catch {}
+}
 function readStoredAuth() {
   try { return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null"); } catch { return null; }
 }
@@ -8617,7 +8622,7 @@ function PanelIcono({ nombre, className = "w-5 h-5" }) {
 
 /* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
    botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
-function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, titulo, anchoCompleto = false, children }) {
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, children }) {
   const [abierto, setAbierto] = useState(false);
   useEffect(() => {
     if (!abierto) return;
@@ -8659,6 +8664,12 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
           </div>
         ))}
       </nav>
+      {/* Mi cuenta: reservar un turno u otro panel, sin cerrar la sesión */}
+      {onMiCuenta && (
+        <button type="button" onClick={onMiCuenta} className="flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg text-sm text-teal-400 hover:text-lime-400 hover:bg-white/5">
+          <PanelIcono nombre="perfil" /> Mi cuenta
+        </button>
+      )}
       <button type="button" onClick={onLogout} className="flex items-center gap-3 mx-2 mb-4 px-3 py-2.5 rounded-lg text-sm text-teal-400 hover:text-lime-400 hover:bg-white/5">
         <PanelIcono nombre="salir" /> Cerrar sesión
       </button>
@@ -8874,7 +8885,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
   );
 }
 
-function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
+function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onMiCuenta, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
   // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
@@ -8945,6 +8956,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       activa={torneoAbierto ? "torneos" : seccion}
       onElegir={(key) => { if (torneoAbierto) onCerrarTorneo(); setSeccion(key); setPerfilGuardado(false); }}
       onLogout={onLogout}
+      onMiCuenta={onMiCuenta}
       titulo={torneoAbierto ? null : tituloSeccion}
       anchoCompleto={!!torneoAbierto}
     >
@@ -15255,6 +15267,7 @@ function SmashPointAppInner() {
   };
   // Cerrar sesión cierra todo: la cuenta (useJugador) y, si estaba abierto, el panel de organizador
   const endSession = () => {
+    olvidarPanelComplejo();
     jugadorApi.logout();
     if (session?.role !== "colaborador") writeStoredAuth(null);
     setSession(null);
@@ -15287,10 +15300,12 @@ function SmashPointAppInner() {
     const j = jugadorApi.jugador;
     if (!j) return;
     const owner = organizers.find((o) => o.id === c.dueno_id);
+    const venue = venues.find((v) => v.id === c.complejo_id);
+    // Arriba del panel va el complejo donde trabaja (con su logo), no el nombre del dueño
     setSession({
       id: c.dueno_id,
-      name: owner?.name || venues.find((v) => v.id === c.complejo_id)?.name || "Complejo",
-      logoUrl: owner?.logoUrl || "",
+      name: venue?.name || owner?.name || "Complejo",
+      logoUrl: venue?.logoUrl || owner?.logoUrl || "",
       coverUrl: owner?.coverUrl || "",
       role: "colaborador",
       accessToken: j.accessToken,
@@ -15299,6 +15314,30 @@ function SmashPointAppInner() {
       permisos: { agenda: c.p_agenda, resultados: c.p_resultados, torneos: c.p_torneos, canchas: c.p_canchas, consumos: !!c.p_consumos },
     });
     setRoute("admin-home");
+    try { localStorage.setItem(PANEL_COMPLEJO_KEY, c.complejo_id); } catch {}
+  };
+  // Al recargar, el empleado vuelve al panel del complejo en el que estaba (si sigue habilitado ahí)
+  const panelRestaurado = useRef(false);
+  useEffect(() => {
+    const j = jugadorApi.jugador;
+    if (!ready || !j || session || panelRestaurado.current) return;
+    let id = null;
+    try { id = localStorage.getItem(PANEL_COMPLEJO_KEY); } catch {}
+    // Espera a que carguen los complejos: el panel arma su menú con ellos
+    if (id && !complejos.some((x) => x.id === id)) return;
+    panelRestaurado.current = true;
+    if (!id || route !== "public-home") return;
+    (async () => {
+      try {
+        const c = ((await supabaseRpc("mis_complejos_colaborador", {}, await jugadorApi.token())) || []).find((r) => r.complejo_id === id);
+        if (c) entrarComoColaborador(c); else olvidarPanelComplejo();
+      } catch {}
+    })();
+  }, [ready, jugadorApi.jugador, session, complejos]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Del panel a Mi cuenta (reservar u otro panel): el empleado sale del panel; el organizador lo deja abierto
+  const irAMiCuenta = () => {
+    if (session?.role === "colaborador") { olvidarPanelComplejo(); setSession(null); }
+    setRoute("cuenta");
   };
   // El token del colaborador se renueva con el del jugador; si cierra esa sesión, sale del panel
   useEffect(() => {
@@ -15687,6 +15726,7 @@ function SmashPointAppInner() {
         onDuplicate={(t) => saver.save(t)}
         onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
         onLogout={endSession}
+        onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
         onUpdate={updateTournament}
         onDelete={deleteTournament}
         onAddCircuit={addCircuit}
