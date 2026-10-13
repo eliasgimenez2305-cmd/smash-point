@@ -47,8 +47,8 @@ async function supabaseSignIn(email, password) {
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
     body: JSON.stringify({ email, password }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "Usuario o contraseña incorrectos.");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error_description || data.msg || "Usuario o contraseña incorrectos."), { code: data.error_code || data.code, status: res.status });
   return data; // { access_token, user: { id, email, ... }, ... }
 }
 
@@ -108,7 +108,7 @@ function authFields(auth) {
 }
 
 async function supabaseRequestPasswordReset(email) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover?redirect_to=${encodeURIComponent(window.location.origin + window.location.pathname)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
     body: JSON.stringify({ email }),
@@ -301,7 +301,7 @@ async function fetchComplejosReserva() {
   try { return (await supabaseTable("complejos?select=*")) || []; } catch { return []; }
 }
 
-/* ---------- Jugadores: entran con un código que les llega por mail (ver 20261015_reservas_jugadores.sql) ---------- */
+/* ---------- Cuentas: cada persona entra con su mail y contraseña (jugador, empleado u organizador) ---------- */
 
 async function supabaseAuthPost(path, body) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
@@ -318,10 +318,52 @@ async function supabaseAuthPost(path, body) {
   }
   return data;
 }
-/* Manda el código al mail (si es la primera vez, también crea la cuenta) */
-const supabaseSendOtp = (email) => supabaseAuthPost("otp", { email, create_user: true });
-/* Cambia el código por una sesión: { access_token, refresh_token, expires_in, user } */
-const supabaseVerifyOtp = (email, token) => supabaseAuthPost("verify", { type: "email", email, token });
+/* Adónde vuelven los links de los mails (confirmar la cuenta, nueva contraseña): esta misma página */
+const volverA = () => `?redirect_to=${encodeURIComponent(window.location.origin + window.location.pathname)}`;
+/* Crea la cuenta: llega un mail con el link para confirmarla. Si el mail ya tenía cuenta, Supabase
+   no avisa (para no revelar quién está registrado): responde sin identidades. */
+const supabaseSignUp = (email, password) => supabaseAuthPost(`signup${volverA()}`, { email, password });
+const supabaseResendConfirm = (email) => supabaseAuthPost(`resend${volverA()}`, { type: "signup", email });
+async function supabaseGetUser(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new Error("La sesión no es válida.");
+  return res.json();
+}
+async function supabaseUpdatePassword(accessToken, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo cambiar la contraseña."), { code: data.error_code || data.code, status: res.status });
+  return data;
+}
+/* Lo que traen los links de los mails en la dirección (#access_token=…&type=signup|recovery, o
+   #error=…). Se lee una vez al abrir la página y se borra de la dirección. */
+function leerLinkDeMail() {
+  const hash = window.location.hash.slice(1);
+  if (!/(^|&)(access_token|error)=/.test(hash)) return null;
+  const p = new URLSearchParams(hash);
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  if (p.get("error")) return { error: p.get("error_code") || p.get("error") };
+  return {
+    tipo: p.get("type"),
+    auth: { access_token: p.get("access_token"), refresh_token: p.get("refresh_token"), expires_in: Number(p.get("expires_in")) || 3600 },
+  };
+}
+// Se lee al cargar el archivo (una sola vez, antes de que la app arranque)
+const LINK_DE_MAIL = typeof window !== "undefined" ? leerLinkDeMail() : null;
+const CUENTA_ERRORES = {
+  invalid_credentials: "Mail o contraseña incorrectos.",
+  email_not_confirmed: "Todavía no confirmaste tu cuenta: buscá el mail que te mandamos (fijate también en correo no deseado).",
+  weak_password: "La contraseña es muy débil: usá al menos 8 caracteres.",
+  same_password: "Es la misma contraseña que tenías: elegí otra.",
+  over_email_send_rate_limit: "Mandamos muchos mails seguidos. Esperá un rato y probá de nuevo.",
+  over_request_rate_limit: "Demasiados intentos. Esperá un minuto y probá de nuevo.",
+  otp_expired: "El link del mail ya venció o ya se usó. Pedí uno nuevo.",
+};
+const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : "No se pudo completar. Revisá la conexión y probá de nuevo.");
 
 const PEDIDO_ERRORES = {
   sin_sesion: "Tu sesión venció: volvé a entrar.",
@@ -340,8 +382,8 @@ const PEDIDO_ERRORES = {
 const PEDIDO_ERRORES_GENERICO = "No se pudo completar. Revisá la conexión y probá de nuevo.";
 const pedidoErrorText = (e) => PEDIDO_ERRORES[e?.code] || PEDIDO_ERRORES_GENERICO;
 
-/* Sesión del jugador, aparte de la del organizador: se guarda en el navegador para no tener que
-   pedir el código cada vez, y se renueva sola antes de vencer */
+/* Sesión de la cuenta (jugador o empleado), aparte de la del organizador: se guarda en el navegador para no tener que
+   ingresar cada vez, y se renueva sola antes de vencer */
 const JUGADOR_STORAGE_KEY = "sp:jugador";
 function readStoredJugador() {
   try { return JSON.parse(localStorage.getItem(JUGADOR_STORAGE_KEY) || "null"); } catch { return null; }
@@ -5223,7 +5265,7 @@ function PrivacidadView({ onBack }) {
       <p>Si sos menor de edad, usá Smash Point con el permiso de tu madre, padre o tutor.</p>
 
       <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Seguridad</h2>
-      <p>Tus datos se guardan con acceso restringido: cada persona ve solo lo que le corresponde (por ejemplo, un complejo no ve las reservas de otro). Entrás con un código que te llega al mail, sin contraseñas guardadas en la página.</p>
+      <p>Tus datos se guardan con acceso restringido: cada persona ve solo lo que le corresponde (por ejemplo, un complejo no ve las reservas de otro). Entrás con tu mail y una contraseña que elegís vos; la contraseña se guarda cifrada y nadie la puede ver, ni nosotros.</p>
 
       <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Cambios</h2>
       <p>Si cambiamos esta política, actualizamos la fecha de arriba. Si el cambio es importante, te avisamos en la app.</p>
@@ -5245,9 +5287,7 @@ function ContactFooter({ onGoLogin }) {
       </div>
       {onGoLogin && (
         <p className="mt-4 text-xs text-teal-600">
-          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">Ingreso organizadores</button>
-          {" · "}
-          <a href="#complejo" className="hover:text-lime-400 underline decoration-teal-800">Empleados de complejos</a>
+          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">Ingresar o crear cuenta</button>
           {" · "}
           <a href="#privacidad" className="hover:text-lime-400 underline decoration-teal-800">Privacidad</a>
         </p>
@@ -5256,11 +5296,16 @@ function ContactFooter({ onGoLogin }) {
   );
 }
 
-/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Complejos · Entrenamientos
-   (el acceso de organizadores está al pie, en ContactFooter) */
-function SiteHeader({ tab, onTab }) {
+/* Encabezado público: arriba a la derecha "Ingresar" o "Mi cuenta", el logo al medio y debajo las
+   pestañas Torneos · Complejos · Entrenamientos */
+function SiteHeader({ tab, onTab, cuenta }) {
   return (
-    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
+    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-3 pb-3">
+      {cuenta && (
+        <div className="flex justify-end mb-1">
+          <button type="button" onClick={cuenta.onClick} className="px-3 py-1 rounded-full text-xs font-semibold border hover:border-lime-400" style={{ ...F.body, borderColor: `${BRAND.cyan}66`, color: cuenta.logueado ? BRAND.lime : "#cbd5e1" }}>{cuenta.logueado ? "Mi cuenta" : "Ingresar"}</button>
+        </div>
+      )}
       <div className="flex items-center justify-center gap-2">
         <Logo size={44} />
         <div>
@@ -5849,73 +5894,163 @@ function BuscadorTurnos({ venues, complejos, onElegir }) {
   );
 }
 
-/* Entrada del jugador: mail → código de 6 dígitos → (la primera vez) sus datos. Sin contraseña. */
-function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titulo = "Entrar para reservar" }) {
-  const { jugador } = jugadorApi;
-  const [step, setStep] = useState(jugador && !jugador.perfil && conPerfil ? "perfil" : "email");
+/* Entrar o crear la cuenta con mail y contraseña: la misma cuenta sirve para reservar turnos, para
+   trabajar en un complejo y para organizar. La primera vez llega un mail con un link para confirmarla.
+   onEntro(jugador, contraseña) se llama con la sesión ya iniciada. */
+function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
+  const [modo, setModo] = useState(modoInicial); // entrar | crear | recuperar | enviado
   const [email, setEmail] = useState("");
-  const [codigo, setCodigo] = useState("");
+  const [password, setPassword] = useState("");
+  const [ver, setVer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [reenviarEn, setReenviarEn] = useState(0);
-  useEffect(() => {
-    if (reenviarEn <= 0) return;
-    const t = setTimeout(() => setReenviarEn((s) => s - 1), 1000);
-    return () => clearTimeout(t);
-  }, [reenviarEn]);
+  const [aviso, setAviso] = useState("");
+  const [sinConfirmar, setSinConfirmar] = useState(false);
+  const mail = email.trim().toLowerCase();
+  const mailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail);
+  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); };
 
-  const mandar = async () => {
-    const mail = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { setError("Revisá el mail."); return; }
-    setBusy(true); setError("");
-    try {
-      await supabaseSendOtp(mail);
-      setEmail(mail); setCodigo(""); setStep("codigo"); setReenviarEn(60);
-    } catch (e) {
-      setError(e.status === 429 ? "Pediste muchos códigos seguidos. Esperá un minuto y probá de nuevo." : "No pudimos mandarte el código. Revisá el mail y la conexión.");
-    } finally { setBusy(false); }
-  };
   const entrar = async () => {
-    const token = codigo.replace(/\D/g, "");
-    if (token.length < 6) { setError("El código tiene 6 números."); return; }
+    if (!mailOk || !password) { setError("Completá mail y contraseña."); return; }
+    setBusy(true); setError(""); setSinConfirmar(false);
+    try {
+      const j = await jugadorApi.login(await supabaseSignIn(mail, password));
+      await onEntro(j, password);
+    } catch (e) {
+      const texto = cuentaErrorText(e);
+      setError(texto);
+      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed);
+      setBusy(false);
+    }
+  };
+  const crear = async () => {
+    if (!mailOk) { setError("Revisá el mail."); return; }
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
     setBusy(true); setError("");
     try {
-      const j = await jugadorApi.login(await supabaseVerifyOtp(email, token));
-      if (j.perfil || !conPerfil) onDone(); else setStep("perfil");
-    } catch (e) {
-      setError(e.status === 429 ? "Demasiados intentos. Esperá un minuto." : "El código no es correcto o ya venció. Revisalo o pedí uno nuevo.");
-    } finally { setBusy(false); }
+      const r = await supabaseSignUp(mail, password);
+      if (r.access_token) { // sin confirmación por mail: ya entra
+        const j = await jugadorApi.login(r);
+        await onEntro(j, password);
+        return;
+      }
+      const user = r.user || r;
+      if (Array.isArray(user.identities) && user.identities.length === 0) {
+        setError("Ese mail ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\" (también si antes entrabas con un código).");
+      } else {
+        cambiar("enviado");
+      }
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
   };
+  const recuperar = async () => {
+    if (!mailOk) { setError("Revisá el mail."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRequestPasswordReset(mail);
+      setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const reenviar = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseResendConfirm(mail);
+      setSinConfirmar(false);
+      setAviso("Te mandamos de nuevo el mail para confirmar la cuenta.");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const enviar = modo === "crear" ? crear : modo === "recuperar" ? recuperar : entrar;
   const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  const boton = (texto, ocupado) => (
+    <button type="button" disabled={busy} onClick={enviar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? ocupado : texto}</button>
+  );
+
+  if (modo === "enviado") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-100 font-semibold">¡Ya casi! Revisá tu mail</p>
+        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta. Tocalo y listo: después entrás siempre con tu mail y contraseña.</p>
+        <p className="text-xs text-teal-500">Puede tardar un minuto. Si no llega, revisá el correo no deseado.</p>
+        {aviso && <p className="text-lime-400">{aviso}</p>}
+        {error && <p className="text-red-400">{error}</p>}
+        <div className="flex justify-between gap-3 text-xs">
+          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Reenviar el mail</button>
+          <button type="button" onClick={() => cambiar("entrar")} className="text-teal-400">Ya la confirmé: ingresar</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <Modal title={step === "perfil" ? "Tus datos" : titulo} onClose={onClose}>
-      <div className="space-y-3 text-sm" style={F.body}>
-        {step === "email" && (
-          <>
-            <p className="text-teal-300">Te mandamos un código a tu mail para entrar. No hace falta contraseña.</p>
-            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && mandar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
-            {error && <p className="text-red-400">{error}</p>}
-            <button type="button" disabled={busy} onClick={mandar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Mandando…" : "Mandarme el código"}</button>
-          </>
-        )}
-        {step === "codigo" && (
-          <>
-            <p className="text-teal-300">Te mandamos un código a <span className="text-teal-100 font-semibold">{email}</span>. Puede tardar un minuto; si no llega, revisá el correo no deseado.</p>
-            <input inputMode="numeric" autoComplete="one-time-code" value={codigo} onChange={(e) => setCodigo(e.target.value)} onKeyDown={(e) => e.key === "Enter" && entrar()} placeholder="Código" maxLength={10} className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
-            {error && <p className="text-red-400">{error}</p>}
-            <button type="button" disabled={busy} onClick={entrar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Entrando…" : "Entrar"}</button>
-            <div className="flex justify-between text-xs">
-              <button type="button" onClick={() => { setStep("email"); setError(""); }} className="text-teal-400">Usar otro mail</button>
-              <button type="button" disabled={reenviarEn > 0 || busy} onClick={mandar} className="text-teal-400 disabled:opacity-50">{reenviarEn > 0 ? `Reenviar en ${reenviarEn} s` : "Reenviar código"}</button>
-            </div>
-          </>
-        )}
-        {step === "perfil" && (
-          <PerfilJugadorForm initial={jugadorApi.jugador?.perfil} email={jugadorApi.jugador?.email} submitLabel="Guardar y seguir"
-            onSave={async (perfil) => { await jugadorApi.savePerfil(perfil); onDone(); }} />
-        )}
+    <div className="space-y-3 text-sm" style={F.body}>
+      {modo !== "recuperar" ? (
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-full border border-teal-800">
+          {[["entrar", "Ingresar"], ["crear", "Crear cuenta"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => cambiar(k)} className="py-1.5 rounded-full font-semibold" style={modo === k ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-teal-300">Poné tu mail y te mandamos un link para elegir una contraseña nueva. Si antes entrabas con un código, así te creás la contraseña.</p>
+      )}
+      <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
+      {modo !== "recuperar" && (
+        <div className="relative">
+          <input type={ver ? "text" : "password"} autoComplete={modo === "crear" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña"} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
+          <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">Mandarme de nuevo el mail para confirmar</button>}
+      {aviso && <p className="text-lime-400">{aviso}</p>}
+      {modo === "entrar" && boton("Ingresar", "Ingresando…")}
+      {modo === "crear" && boton("Crear mi cuenta", "Creando…")}
+      {modo === "recuperar" && boton("Mandarme el link", "Mandando…")}
+      {modo === "entrar" && <button type="button" onClick={() => cambiar("recuperar")} className="text-xs text-teal-400 hover:text-lime-400">Olvidé mi contraseña</button>}
+      {modo === "recuperar" && <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400 hover:text-lime-400">← Volver a ingresar</button>}
+    </div>
+  );
+}
+
+/* Elegir la contraseña nueva, después de tocar el link del mail de "Olvidé mi contraseña" */
+function NuevaClave({ jugadorApi, onListo }) {
+  const [password, setPassword] = useState("");
+  const [ver, setVer] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const guardar = async () => {
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseUpdatePassword(await jugadorApi.token(), password);
+      await onListo(jugadorApi.jugador, password);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
+  };
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-300">Elegí tu contraseña nueva para <span className="text-teal-100 break-all">{jugadorApi.jugador?.email}</span>.</p>
+      <div className="relative">
+        <input type={ver ? "text" : "password"} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && guardar()} placeholder="Contraseña nueva (mínimo 8 caracteres)" className="w-full px-3 py-2.5 rounded-lg border text-base pr-16" style={adminInput} aria-label="Contraseña nueva" autoFocus />
+        <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
       </div>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy} onClick={guardar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar contraseña"}</button>
+    </div>
+  );
+}
+
+/* Entrar para reservar: la cuenta y, la primera vez, sus datos (nombre, WhatsApp) */
+function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titulo = "Entrar para reservar" }) {
+  const { jugador } = jugadorApi;
+  const [step, setStep] = useState(jugador && !jugador.perfil && conPerfil ? "perfil" : "cuenta");
+  return (
+    <Modal title={step === "perfil" ? "Tus datos" : titulo} onClose={onClose}>
+      {step === "cuenta" && <CuentaForm jugadorApi={jugadorApi} onEntro={(j) => { if (j.perfil || !conPerfil) onDone(); else setStep("perfil"); }} />}
+      {step === "perfil" && (
+        <PerfilJugadorForm initial={jugadorApi.jugador?.perfil} email={jugadorApi.jugador?.email} submitLabel="Guardar y seguir"
+          onSave={async (perfil) => { await jugadorApi.savePerfil(perfil); onDone(); }} />
+      )}
     </Modal>
   );
 }
@@ -6438,7 +6573,7 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
-function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, complejos = [], jugadorApi }) {
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
   const [reservarId, setReservarId] = useState(null);
@@ -6578,7 +6713,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} />
+      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
       <ContactFooter onGoLogin={onGoLogin} />
@@ -6953,124 +7088,21 @@ function PublicTournament({ tournament, organizers, onBack }) {
     </CourtNamesContext.Provider>
   );
 }
-function Login({ onLogin, onBack, onColaborador }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState("login"); // login | recuperar
-  const [recoverMsg, setRecoverMsg] = useState("");
-
-  const submit = async () => {
-    if (!email.trim() || !password) { setError("Completá email y contraseña."); return; }
-    setError("");
-    setLoading(true);
-    try {
-      const auth = await supabaseSignIn(email.trim(), password);
-      const orgs = await fetchOrganizers();
-      const profile = orgs.find((o) => o.id === auth.user.id);
-      if (!profile) { setError("Tu cuenta no tiene un perfil de organizador asociado."); setLoading(false); return; }
-      onLogin({ ...profile, ...authFields(auth) });
-    } catch (e) {
-      setError(e.message || "Usuario o contraseña incorrectos.");
-    }
-    setLoading(false);
-  };
-
-  const submitRecover = async () => {
-    if (!email.trim()) { setRecoverMsg("Ingresá tu email."); return; }
-    setRecoverMsg("");
-    setLoading(true);
-    try {
-      await supabaseRequestPasswordReset(email.trim());
-      setRecoverMsg("Si el email existe, te enviamos un correo para restablecer la contraseña.");
-    } catch (e) {
-      setRecoverMsg(e.message || "No pudimos enviar el correo de recuperación.");
-    }
-    setLoading(false);
-  };
-
+/* Entrada única: jugadores, empleados de complejos y organizadores, con mail y contraseña */
+function Login({ jugadorApi, onEntro, onBack, aviso }) {
   return (
-    <div className="min-h-[75vh] flex items-center justify-center px-6">
+    <div className="min-h-[75vh] flex items-center justify-center px-6 py-8">
       <div className="w-full max-w-sm">
         <div className="flex justify-center mb-8">
           <Logo size={72} withWordmark />
         </div>
-
-        <div className="border border-teal-800 rounded-xl p-7 bg-teal-950/40">
-          {mode === "login" ? (
-            <div>
-              <h1 className="text-lg font-semibold mb-1" style={F.body}>Acceso al panel</h1>
-              <p className="text-sm text-teal-400 mb-6" style={F.body}>Para organizadores y administración de la plataforma.</p>
-
-              <label className="block text-sm mb-1 text-teal-300" style={F.body}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                className="w-full mb-4 px-3 py-2 rounded-md border outline-none focus:border-lime-400 transition" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-              />
-
-              <label htmlFor="login-password" className="block text-sm mb-1 text-teal-300" style={F.body}>Contraseña</label>
-              <div className="relative mb-2">
-                <input
-                  id="login-password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                  className="w-full pl-3 pr-11 py-2 rounded-md border outline-none focus:border-lime-400 transition" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                />
-                {/* Ojo: muestra u oculta lo que se escribió */}
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  aria-pressed={showPassword}
-                  title={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  className="absolute inset-y-0 right-0 px-3 flex items-center text-slate-500 hover:text-slate-800"
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
-                    <circle cx="12" cy="12" r="3" />
-                    {showPassword && <line x1="3" y1="3" x2="21" y2="21" />}
-                  </svg>
-                </button>
-              </div>
-
-              {error && <p className="text-sm text-red-400 mb-2" style={F.body}>{error}</p>}
-
-              <button type="button" onClick={() => { setMode("recuperar"); setRecoverMsg(""); }} className="text-xs text-teal-400 hover:text-lime-400 mb-5 block" style={F.body}>
-                ¿Olvidaste tu contraseña?
-              </button>
-
-              <button type="button" disabled={loading} onClick={submit} className="w-full py-2.5 rounded-md font-semibold transition" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: loading ? 0.6 : 1, ...F.body }}>{loading ? "Ingresando…" : "Ingresar"}</button>
-              {onColaborador && (
-                <button type="button" onClick={onColaborador} className="w-full mt-4 text-sm text-teal-300 hover:text-lime-400" style={F.body}>¿Trabajás en un complejo? Entrá con tu mail</button>
-              )}
-              <button type="button" onClick={onBack} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al sitio público</button>
-            </div>
-          ) : (
-            <div>
-              <h1 className="text-lg font-semibold mb-1" style={F.body}>Recuperar acceso</h1>
-              <p className="text-sm text-teal-400 mb-6" style={F.body}>Ingresá tu email y te mandamos un link para restablecer la contraseña.</p>
-              <label className="block text-sm mb-1 text-teal-300" style={F.body}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitRecover(); }}
-                className="w-full mb-4 px-3 py-2 rounded-md border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-              />
-              {recoverMsg && <p className="text-sm text-lime-400 mb-3" style={F.body}>{recoverMsg}</p>}
-              <button type="button" disabled={loading} onClick={submitRecover} className="w-full py-2.5 rounded-md font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: loading ? 0.6 : 1, ...F.body }}>{loading ? "Enviando…" : "Enviar solicitud"}</button>
-              <button type="button" onClick={() => setMode("login")} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver a ingresar</button>
-            </div>
-          )}
+        <div className="border border-teal-800 rounded-xl p-6 bg-teal-950/40">
+          <h1 className="text-lg font-semibold mb-1" style={F.body}>Tu cuenta</h1>
+          <p className="text-sm text-teal-400 mb-4" style={F.body}>Con tu cuenta reservás turnos en cualquier complejo. Si trabajás en uno u organizás torneos, también entrás a tu panel.</p>
+          {aviso && <p className="text-sm text-lime-400 mb-3" style={F.body}>{aviso}</p>}
+          <CuentaForm jugadorApi={jugadorApi} onEntro={onEntro} />
         </div>
+        <button type="button" onClick={onBack} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al sitio</button>
       </div>
     </div>
   );
@@ -9200,7 +9232,7 @@ const PERMISOS_COLABORADOR = [
 ];
 
 /* Colaboradores del complejo (empleados): el dueño agrega su mail y elige qué puede hacer cada uno.
-   Ellos entran con un código que les llega a ese mail. */
+   Ellos entran con su cuenta (mail y contraseña) usando ese mail. */
 function ColaboradoresConfig({ complejoId, accessToken }) {
   const [lista, setLista] = useState(null);
   const [form, setForm] = useState({ email: "", nombre: "" });
@@ -9246,7 +9278,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
   return (
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
-        Tus empleados entran desde <span className="text-teal-100 break-all">{entrada}</span> con el mail que cargues acá: les llega un código, sin contraseña.
+        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, en <span className="text-teal-100 break-all">{entrada}</span>, y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
         A cada uno le elegís qué puede hacer. Siempre quedan para vos: borrar torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
@@ -9301,14 +9333,13 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
   );
 }
 
-/* Entrada del colaborador (empleado de un complejo): entra con el código por mail y, si está
-   habilitado en un complejo, pasa al panel con lo que el dueño le permitió (onEntrar). Si trabaja en
-   más de un complejo, elige cuál. Se llega con #complejo en la dirección. */
-function ColaboradorHome({ jugadorApi, venues, onBack, onEntrar }) {
+/* Mi cuenta: desde acá cada uno va a lo suyo. Reservar turnos (cualquiera), el panel de los complejos
+   donde trabaja (si el dueño lo cargó con su mail; ver 20261016_reservas_colaboradores.sql) y su
+   panel de organizador. Se llega también con #complejo en la dirección (el link viejo de empleados). */
+function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, aviso, onEntrarComplejo, onPanelOrganizador, onIngresar, onReservar, onSalir }) {
   const { jugador } = jugadorApi;
   const [complejos, setComplejos] = useState(null);
   const [error, setError] = useState("");
-  const [entrando, setEntrando] = useState(false);
   const jugadorId = jugador?.id;
   const { token } = jugadorApi;
   const nombre = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
@@ -9317,45 +9348,49 @@ function ColaboradorHome({ jugadorApi, venues, onBack, onEntrar }) {
     if (!jugadorId) { setComplejos(null); return; }
     (async () => {
       try {
-        const rows = (await supabaseRpc("mis_complejos_colaborador", {}, await token())) || [];
-        setComplejos(rows);
+        setComplejos((await supabaseRpc("mis_complejos_colaborador", {}, await token())) || []);
         setError("");
-        if (rows.length === 1) onEntrar(rows[0]); // trabaja en un solo complejo: directo a su panel
-      } catch { setError("No se pudo cargar tu panel. Revisá la conexión."); }
+      } catch { setError("No se pudieron cargar tus complejos. Revisá la conexión."); }
     })();
-  }, [jugadorId, token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jugadorId, token]);
 
-  return (
-    <div className="px-6 py-8 max-w-3xl mx-auto" style={F.body}>
-      <div className="flex justify-between items-center mb-6 gap-3">
-        <h1 className="text-xl" style={F.display}>PANEL DEL COMPLEJO</h1>
-        {jugador
-          ? <button type="button" onClick={() => { jugadorApi.logout(); setComplejos(null); }} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
-          : <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400">← Sitio público</button>}
+  if (!jugador) {
+    return (
+      <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
+        <h1 className="text-xl mb-4" style={F.display}>MI CUENTA</h1>
+        <p className="text-sm text-teal-300 mb-4">Ingresá con tu mail y contraseña. Si trabajás en un complejo, usá el mail que te cargó el dueño.</p>
+        <button type="button" onClick={onIngresar} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ingresar o crear cuenta</button>
+        <button type="button" onClick={onReservar} className="block mt-6 text-sm text-teal-400 hover:text-lime-400">← Volver al sitio</button>
       </div>
-      {!jugador ? (
-        <>
-          <p className="text-sm text-teal-300 mb-4">Para empleados de los complejos. Entrá con el mail que te cargó el dueño: te llega un código, sin contraseña.</p>
-          <button type="button" onClick={() => setEntrando(true)} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Entrar con mi mail</button>
-        </>
-      ) : error ? (
-        <p className="text-sm text-red-400">{error}</p>
-      ) : complejos === null ? (
-        <p className="text-sm opacity-60">Cargando…</p>
-      ) : complejos.length === 0 ? (
-        <p className="text-sm text-teal-300">Tu mail (<span className="text-teal-100">{jugador.email}</span>) no está habilitado en ningún complejo. Pedile al dueño que te agregue como colaborador.</p>
-      ) : (
-        <>
-          <p className="text-sm text-teal-300 mb-3">Elegí el complejo:</p>
-          <div className="space-y-2">
-            {complejos.map((c) => (
-              <button key={c.complejo_id} type="button" onClick={() => onEntrar(c)} className="w-full text-left px-4 py-3 rounded-lg font-semibold border border-teal-700 text-teal-100 hover:border-lime-400">{nombre(c.complejo_id)}</button>
-            ))}
-          </div>
-          <p className="text-xs text-teal-500 mt-4">Entraste como {jugador.email}</p>
-        </>
+    );
+  }
+
+  const opcion = (texto, detalle, onClick, key) => (
+    <button key={key} type="button" onClick={onClick} className="w-full text-left px-4 py-3 rounded-lg border border-teal-700 hover:border-lime-400">
+      <span className="block font-semibold text-teal-100">{texto}</span>
+      {detalle && <span className="block text-xs text-teal-400">{detalle}</span>}
+    </button>
+  );
+  return (
+    <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
+      <div className="flex justify-between items-center mb-1 gap-3">
+        <h1 className="text-xl" style={F.display}>MI CUENTA</h1>
+        <button type="button" onClick={onSalir} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
+      </div>
+      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email}</p>
+      {aviso && <p className="text-sm text-lime-400 mb-4">{aviso}</p>}
+      <div className="space-y-2">
+        {opcion("Reservar un turno", "En cualquier complejo, y ver mis reservas", onReservar, "reservar")}
+        {esOrganizador && (conPanelOrganizador
+          ? opcion("Mi panel de organizador", null, onPanelOrganizador, "organizador")
+          : opcion("Mi panel de organizador", "Ingresá de nuevo con tu contraseña para abrirlo", onIngresar, "organizador"))}
+        {error && <p className="text-sm text-red-400">{error}</p>}
+        {complejos === null && !error && <p className="text-sm opacity-60">Cargando…</p>}
+        {(complejos || []).map((c) => opcion(`Panel de ${nombre(c.complejo_id)}`, "Donde trabajás", () => onEntrarComplejo(c), c.complejo_id))}
+      </div>
+      {complejos?.length === 0 && !esOrganizador && (
+        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con este mail y vas a ver acá el panel.</p>
       )}
-      {entrando && <LoginJugadorModal jugadorApi={jugadorApi} conPerfil={false} titulo="Entrar al panel del complejo" onClose={() => setEntrando(false)} onDone={() => setEntrando(false)} />}
     </div>
   );
 }
@@ -15041,9 +15076,10 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
-  const routeFromHash = () => ({ "#complejo": "colaborador", "#privacidad": "privacidad" })[window.location.hash] || null;
+  const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
   const [route, setRoute] = useState(() => routeFromHash() || "public-home");
-  // El link "Empleados de complejos" del pie lleva a #complejo: abre el panel del colaborador
+  const [avisoCuenta, setAvisoCuenta] = useState(null); // "Tu cuenta quedó confirmada", etc.
+  // #complejo (el link viejo de empleados) abre Mi cuenta
   useEffect(() => {
     const onHash = () => { const r = routeFromHash(); if (r) { setRoute(r); window.scrollTo(0, 0); } };
     window.addEventListener("hashchange", onHash);
@@ -15054,6 +15090,26 @@ function SmashPointAppInner() {
   const [saveNotice, setSaveNotice] = useState(null);
   const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
   const jugadorApi = useJugador();
+
+  /* Llegó desde un link del mail: confirmar la cuenta (entra y va a Mi cuenta) o elegir una
+     contraseña nueva. Si el link venció, a la entrada con el aviso. */
+  const linkProcesado = useRef(false);
+  useEffect(() => {
+    if (!LINK_DE_MAIL || linkProcesado.current) return;
+    linkProcesado.current = true;
+    if (LINK_DE_MAIL.error) { setAvisoCuenta("El link del mail ya venció o ya se usó. Ingresá o pedí uno nuevo."); setRoute("login"); return; }
+    (async () => {
+      try {
+        const user = await supabaseGetUser(LINK_DE_MAIL.auth.access_token);
+        await jugadorApi.login({ ...LINK_DE_MAIL.auth, user });
+        if (LINK_DE_MAIL.tipo === "recovery") setRoute("nueva-clave");
+        else { setAvisoCuenta("¡Listo! Tu cuenta quedó confirmada."); setRoute("cuenta"); }
+      } catch {
+        setAvisoCuenta("El link del mail ya venció o ya se usó. Ingresá o pedí uno nuevo.");
+        setRoute("login");
+      }
+    })();
+  }, [jugadorApi]);
 
   useEffect(() => {
     (async () => {
@@ -15197,22 +15253,35 @@ function SmashPointAppInner() {
     setSession(org);
     setRoute(org.role === "creador" ? "creator-home" : "admin-home");
   };
+  // Cerrar sesión cierra todo: la cuenta (useJugador) y, si estaba abierto, el panel de organizador
   const endSession = () => {
-    if (session?.role === "colaborador") {
-      // El colaborador entra con el código de jugador: se cierra esa sesión y vuelve a su entrada
-      jugadorApi.logout();
-      setSession(null);
-      setRoute("colaborador");
-      return;
-    }
-    writeStoredAuth(null);
+    jugadorApi.logout();
+    if (session?.role !== "colaborador") writeStoredAuth(null);
     setSession(null);
+    setAvisoCuenta(null);
     setRoute("public-home");
+  };
+
+  /* Después de ingresar con mail y contraseña: el organizador va a su panel (con su propia sesión,
+     que se renueva aparte); quien trabaja en un complejo, a Mi cuenta para elegir; el resto, al sitio. */
+  const despuesDeEntrar = async (j, password) => {
+    setAvisoCuenta(null);
+    const perfil = organizers.find((o) => o.id === j.id);
+    if (perfil && password) {
+      try {
+        startSession({ ...perfil, ...authFields(await supabaseSignIn(j.email, password)) });
+        return;
+      } catch {}
+    }
+    if (perfil) { setRoute("cuenta"); return; }
+    let rows = [];
+    try { rows = (await supabaseRpc("mis_complejos_colaborador", {}, j.accessToken)) || []; } catch {}
+    setRoute(rows.length > 0 ? "cuenta" : "public-home");
   };
 
   /* Colaborador de un complejo: trabaja en el panel en nombre del dueño (session.id es el del dueño,
      así ve y crea los torneos a su nombre) con su propio token y sus permisos; la base controla qué
-     puede hacer (ver 20261017_colaboradores_permisos.sql). La sesión es la del código por mail
+     puede hacer (ver 20261017_colaboradores_permisos.sql). La sesión es la de su cuenta
      (useJugador): no usa la renovación de los organizadores (sin expiresAt ni refreshToken). */
   const entrarComoColaborador = (c) => {
     const j = jugadorApi.jugador;
@@ -15235,7 +15304,7 @@ function SmashPointAppInner() {
   useEffect(() => {
     if (session?.role !== "colaborador") return;
     const j = jugadorApi.jugador;
-    if (!j) { setSession(null); setRoute("colaborador"); return; }
+    if (!j) { setSession(null); setRoute("cuenta"); return; }
     if (j.accessToken !== session.accessToken) setSession((cur) => (cur ? { ...cur, accessToken: j.accessToken } : cur));
   }, [jugadorApi.jugador, session]);
   useEffect(() => {
@@ -15523,7 +15592,7 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   } else if (route === "public-tournament" && selected) {
     showFooterAds = true;
     content = isInfoOnly(selected)
@@ -15532,11 +15601,34 @@ function SmashPointAppInner() {
         ? <LoadingTournament />
         : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
-    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} onColaborador={() => { window.location.hash = "complejo"; setRoute("colaborador"); }} />;
+    content = <Login jugadorApi={jugadorApi} aviso={avisoCuenta} onEntro={despuesDeEntrar} onBack={() => { setAvisoCuenta(null); setRoute("public-home"); }} />;
+  } else if (route === "nueva-clave" && jugadorApi.jugador) {
+    content = (
+      <div className="min-h-[75vh] flex items-center justify-center px-6 py-8">
+        <div className="w-full max-w-sm border border-teal-800 rounded-xl p-6 bg-teal-950/40">
+          <h1 className="text-lg font-semibold mb-3" style={F.body}>Contraseña nueva</h1>
+          <NuevaClave jugadorApi={jugadorApi} onListo={despuesDeEntrar} />
+        </div>
+      </div>
+    );
   } else if (route === "privacidad") {
     content = <PrivacidadView onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute(session ? (session.role === "creador" ? "creator-home" : "admin-home") : "public-home"); }} />;
-  } else if (route === "colaborador") {
-    content = <ColaboradorHome jugadorApi={jugadorApi} venues={venues} onEntrar={entrarComoColaborador} onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute("public-home"); }} />;
+  } else if (route === "cuenta" || route === "nueva-clave") {
+    const alSitio = () => { history.replaceState(null, "", window.location.pathname); setAvisoCuenta(null); setRoute("public-home"); };
+    content = (
+      <CuentaHome
+        jugadorApi={jugadorApi}
+        venues={venues}
+        aviso={avisoCuenta}
+        esOrganizador={!!jugadorApi.jugador && organizers.some((o) => o.id === jugadorApi.jugador.id)}
+        conPanelOrganizador={!!session && session.role !== "colaborador"}
+        onPanelOrganizador={() => setRoute(session.role === "creador" ? "creator-home" : "admin-home")}
+        onEntrarComplejo={(c) => { setAvisoCuenta(null); entrarComoColaborador(c); }}
+        onIngresar={() => setRoute("login")}
+        onReservar={alSitio}
+        onSalir={endSession}
+      />
+    );
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
@@ -15610,7 +15702,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   }
 
   return (

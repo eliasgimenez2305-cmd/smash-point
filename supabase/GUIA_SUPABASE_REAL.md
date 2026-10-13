@@ -1,7 +1,7 @@
 # Guía: reservas de canchas en el Supabase REAL
 
 Pasos para llevar al proyecto **real** ("Smash Point", `cfaapvyttzedackbmkpt`) todo lo que se probó en
-`smash-point-prueba`: reservas, login de jugadores con código, colaboradores con permisos, buscador y
+`smash-point-prueba`: reservas, cuentas con mail y contraseña (jugadores, empleados y organizadores), colaboradores con permisos, buscador y
 política de privacidad.
 
 **Cuándo:** entre el **16 y el 22/10/2026**, cuando vuelvan los créditos de Netlify y antes de los
@@ -104,9 +104,9 @@ select
 
 ---
 
-## Paso 5 — Envío de mails (código de entrada)
+## Paso 5 — Envío de mails (confirmar cuenta y contraseña nueva)
 
-Sin esto, los jugadores y los empleados **no reciben el código** (el servicio de Supabase solo manda
+Sin esto, los que se crean una cuenta **no reciben el mail para confirmarla** (ni el de "Olvidé mi contraseña") (el servicio de Supabase solo manda
 a los mails del equipo y unos pocos por hora).
 
 **Opción A — Resend con dominio propio** (por ejemplo `smashpoint.com.ar`):
@@ -128,26 +128,37 @@ a los mails del equipo y unos pocos por hora).
    - **Save changes**
 4. Si se usa Brevo, avisar para cambiar "Resend" por "Brevo" en la política de privacidad.
 
-**Plantillas** (Authentication → Emails → Templates), en **"Magic link or OTP"** y en **"Confirm sign up"**:
+**Plantillas** (Authentication → Emails → Templates). Cada persona entra con su mail y contraseña;
+el mail solo se usa para confirmar la cuenta la primera vez y para elegir una contraseña nueva.
 
-- Asunto: `Tu código para Smash Point`
-- Cuerpo:
+**"Confirm sign up"** · asunto: `Confirmá tu cuenta de Smash Point`
 
 ```html
-<h2>Tu código para Smash Point</h2>
-<p>Escribí este código en la app para entrar:</p>
-<p style="font-size:28px;font-weight:bold;letter-spacing:6px">{{ .Token }}</p>
-<p>Vence en 1 hora. Si no lo pediste, ignorá este mail.</p>
+<h2>¡Bienvenido a Smash Point!</h2>
+<p>Tocá el botón para confirmar tu cuenta. Después entrás siempre con tu mail y tu contraseña.</p>
+<p><a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:12px 20px;background:#9fe022;color:#14181f;font-weight:bold;text-decoration:none;border-radius:8px">Confirmar mi cuenta</a></p>
+<p>Si no creaste una cuenta en Smash Point, ignorá este mail.</p>
 ```
 
-- [ ] Las dos plantillas guardadas.
-- [ ] **No tocar** la plantilla "Reset password": la usan los organizadores para recuperar su contraseña.
+**"Reset password"** · asunto: `Elegí tu contraseña de Smash Point`
+
+```html
+<h2>Elegí tu contraseña nueva</h2>
+<p>Pediste cambiar la contraseña de tu cuenta de Smash Point (o crearte una, si antes entrabas con un código). Tocá el botón para elegirla:</p>
+<p><a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:12px 20px;background:#9fe022;color:#14181f;font-weight:bold;text-decoration:none;border-radius:8px">Elegir contraseña</a></p>
+<p>Si no lo pediste, ignorá este mail: tu contraseña sigue igual.</p>
+```
+
+- [ ] Las dos plantillas guardadas (la de "Magic link or OTP" ya no se usa).
+- [ ] Authentication → **URL Configuration**: en **Site URL**, la dirección del sitio publicado; en
+      **Redirect URLs**, agregar esa misma dirección con `/**` al final (por ejemplo
+      `https://smashpoint.netlify.app/**`). Sin esto, los links de los mails no vuelven al sitio.
 
 ## Paso 6 — Altas de usuarios (recién después del Paso 2)
 
 Authentication → **Sign In / Providers**:
 
-- [ ] **Allow new users to sign up**: activado (los jugadores y empleados crean su cuenta con el código).
+- [ ] **Allow new users to sign up**: activado (cualquiera se crea su cuenta con mail y contraseña).
 - [ ] **Confirm email**: activado.
 - [ ] Authentication → **Rate Limits**: con SMTP propio el límite de mails sube a 30 por hora. Si se
       espera más movimiento (por ejemplo, el día que se anuncie), subirlo.
@@ -171,12 +182,13 @@ Authentication → **Sign In / Providers**:
 
 ## Paso 9 — Prueba final en el sitio publicado
 
-- [ ] **Jugador** (ventana de incógnito): Complejos → buscador → tocar un horario → código por mail →
-      datos → **Pedir turno**.
+- [ ] **Jugador** (ventana de incógnito): Complejos → buscador → tocar un horario → Crear cuenta →
+      confirmar con el link del mail → ingresar → datos → **Pedir turno**.
 - [ ] **Dueño**: el pedido aparece arriba de la agenda y "Reservas (1)" en la pestaña → **Confirmar** →
       "Avisarle por WhatsApp".
 - [ ] **Jugador**: en "Mis reservas" figura **Confirmado**.
-- [ ] **Empleado**: `…/#complejo` → código → ve solo lo que tiene permitido.
+- [ ] **Empleado**: con el mail que cargó el dueño: Ingresar (o Crear cuenta) → Mi cuenta → Panel del
+      complejo → ve solo lo que tiene permitido. Con la misma cuenta puede reservar en otro complejo.
 - [ ] Un torneo: cargar un resultado y verlo en la página pública.
 - [ ] Cancelar o rechazar los turnos de prueba para que no queden en la agenda.
 
@@ -187,7 +199,7 @@ Authentication → **Sign In / Providers**:
 - **El sitio nuevo falla:** en Netlify → **Deploys** → elegir el deploy anterior → **Publish deploy**.
   Vuelve la versión de antes al instante. Las migraciones pueden quedar: la versión vieja funciona con
   ellas.
-- **No llegan los códigos:** Supabase → **Logs → Auth** → buscar `/otp` con ERROR y abrir el detalle
+- **No llegan los mails:** Supabase → **Logs → Auth** → buscar `/signup` o `/recover` con ERROR y abrir el detalle
   (por ejemplo, `535` = clave SMTP mal cargada; `550 … verify a domain` = falta verificar el dominio).
 - **Un organizador no puede guardar:** revisar que su cuenta esté en la tabla `organizers` (las
   cuentas de jugadores no pueden crear torneos a propósito).
