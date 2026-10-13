@@ -11436,15 +11436,20 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
           <div key={c.id}>
             <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">{c.name}{precioJugador(tournament, c) != null && ` · ${formatoPrecio(precioJugador(tournament, c))} por jugador`}</p>
             <ul className="space-y-2">
-              {visibles.filter((f) => f.c.id === c.id).map((f) => {
+              {/* Una tarjeta por pareja, con sus dos jugadores adentro */}
+              {c.pairs.filter((pair) => visibles.some((f) => f.c.id === c.id && f.pair.id === pair.id)).map((pair) => (
+              <li key={pair.id} className="rounded-lg border border-teal-900 overflow-hidden">
+                {c.format !== "super8_individual" && <p className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-teal-400 border-b border-teal-900" style={{ backgroundColor: "rgba(20,60,70,0.25)" }}>{pair.name}</p>}
+                <div className="divide-y divide-teal-900">
+              {visibles.filter((f) => f.c.id === c.id && f.pair.id === pair.id).map((f) => {
                 const estado = f.debe === 0 ? ["Pagó", BRAND.lime] : f.pagado > 0 ? [f.debe == null ? `Pagó ${formatoPrecio(f.pagado)}` : `Debe ${formatoPrecio(f.debe)}`, "#fbbf24"] : [f.debe == null ? "Sin pagos" : `Debe ${formatoPrecio(f.debe)}`, "#f87171"];
                 const historial = pagosDe(f.k);
                 return (
-                  <li key={f.k} className="rounded-lg border border-teal-900 p-3">
+                  <div key={f.k} className="p-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="flex-1 min-w-[10rem]">
+                        {c.format !== "super8_individual" && <p className="text-[11px] text-teal-500">Jugador {f.jugador}</p>}
                         <p className="text-teal-100 font-semibold">{f.nombre}</p>
-                        {c.format !== "super8_individual" && <p className="text-xs text-teal-500">{f.pair.name}</p>}
                       </div>
                       <span className="text-xs font-semibold" style={{ color: estado[1] }}>● {estado[0]}</span>
                       {(() => {
@@ -11556,9 +11561,12 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                         ))}
                       </ul>
                     )}
-                  </li>
+                  </div>
                 );
               })}
+                </div>
+              </li>
+              ))}
             </ul>
           </div>
         ))
