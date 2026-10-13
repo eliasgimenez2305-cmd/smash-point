@@ -8070,7 +8070,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
           )}
           <div>
             <span style={F.body} className="block font-medium">{t.name}</span>
-            <span className="text-xs text-teal-500" style={F.body}>
+            <span className="block text-xs text-teal-500" style={F.body}>
               {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })}
               {" · "}{t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""}
               {" · "}{totalPairs} pareja{totalPairs !== 1 ? "s" : ""}
