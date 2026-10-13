@@ -13743,9 +13743,9 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno }) {
                       style={{ borderColor: n > 0 ? BRAND.lime : "#134e4a", backgroundColor: n > 0 ? `${BRAND.lime}14` : "rgba(8,18,24,0.6)" }}
                     >
                       <span className="block text-slate-100 font-semibold leading-snug line-clamp-2 pr-6">{p.nombre}</span>
-                      <span className="flex items-end justify-between gap-1 mt-2">
-                        <span className="font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio)}</span>
-                        {p.stock != null && <span className={`text-[11px] ${sinStock ? "text-red-300" : pocoStock(p) ? "text-amber-300" : "text-teal-500"}`}>{sinStock ? "sin stock" : `quedan ${p.stock - n}`}</span>}
+                      <span className="block mt-2">
+                        <span className="block font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio)}</span>
+                        {p.stock != null && <span className={`block text-[11px] whitespace-nowrap ${sinStock ? "text-red-300" : pocoStock(p) ? "text-amber-300" : "text-teal-500"}`}>{sinStock ? "sin stock" : `quedan ${p.stock - n}`}</span>}
                       </span>
                       {n > 0 && <span className="absolute top-2 right-2 min-w-[1.5rem] h-6 px-1.5 rounded-full text-xs font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{n}</span>}
                     </button>
