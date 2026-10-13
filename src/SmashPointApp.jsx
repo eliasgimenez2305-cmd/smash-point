@@ -11759,7 +11759,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
             <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Resultado" tono={resultado < 0 ? "rojo" : "cyan"} valor={conSigno(resultado)} detalle="Ingresos − gastos" /></div>
           </div>
 
-          <div className="rounded-lg border border-teal-900 overflow-hidden">
+          {ingresos.length + gastos.length > 0 && <div className="rounded-lg border border-teal-900 overflow-hidden">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-teal-500 text-left">
@@ -11796,7 +11796,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
                 })}
               </tbody>
             </table>
-          </div>
+          </div>}
 
           <GastosFijos organizer={organizer} mes={rango.hasta.slice(0, 7)} onChanged={load} />
 
