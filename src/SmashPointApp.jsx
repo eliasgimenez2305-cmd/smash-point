@@ -12683,17 +12683,18 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
       {error && <p className="text-red-400">{error}</p>}
       {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className={`grid grid-cols-2 ${verCuentas ? "lg:grid-cols-4" : "lg:grid-cols-3"} gap-3`}>
             <TarjetaResumen titulo="Clientes" tono="cyan" valor={String(clientes.length)} detalle="Últimos 6 meses" onClick={() => setFiltro("todos")} />
             <TarjetaResumen titulo="Activos" tono="lime" valor={String(activos)} detalle="Vinieron en 30 días" onClick={() => setFiltro("frecuentes")} />
             <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
-            <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle={verCuentas ? "En la cantina" : "—"} onClick={() => setFiltro("deben")} />
+            {/* Sin acceso a las cuentas no hay deudas para mostrar */}
+            {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="En la cantina" onClick={() => setFiltro("deben")} />}
           </div>
           <div className="flex flex-wrap gap-2 items-center">
             {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || verCuentas).map(([k, l]) => (
               <button key={k} type="button" onClick={() => setFiltro(k)} className={`px-3 py-1.5 rounded-full border ${filtro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
             ))}
-            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cliente" className="w-full sm:w-64 sm:ml-auto px-3 py-2 rounded-lg border text-base" style={adminInput} />
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cliente" className="flex-1 min-w-[15rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
           </div>
           {filtro === "ausentes" && visibles.length > 0 && <p className="text-xs text-teal-400">Tocá un cliente para mandarle un WhatsApp invitándolo a volver.</p>}
           {visibles.length === 0 ? <p className="text-teal-400">{clientes.length === 0 ? "Todavía no hay turnos cargados en los últimos 6 meses." : "No hay clientes con ese filtro."}</p> : (
