@@ -14478,8 +14478,12 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
                 </span>
                 {esDueno && ganancia(p) && <span className="block text-xs text-teal-500">{ganancia(p)}</span>}
               </span>
-              <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
-              <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
+              {p.stock != null ? (
+                <>
+                  <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                  <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
+                </>
+              ) : esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-lime-400">Controlar stock</button>}
               {esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-teal-300 underline">Editar</button>}
             </li>
           ))}
