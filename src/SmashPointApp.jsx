@@ -7917,33 +7917,33 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout, onMiCuenta }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
   const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
   const staff = organizers.filter((o) => o.role !== "creador");
   const organizerName = (id) => organizers.find((o) => o.id === id)?.name || "Organizador";
 
+  // El mismo panel que los organizadores: menú al costado (en el celular, ☰)
+  const grupos = [
+    { titulo: "Plataforma", items: [["organizadores", "Organizadores", "clientes"], ["canchas", "Complejos", "complejos"], ["profes", "Entrenamientos", "clases"]] },
+    { titulo: "Contenido", items: [["torneos", "Torneos", "torneos"], ["circuitos", "Circuitos", "circuitos"], ["publicidad", "Publicidad", "publicidad"]] },
+    { titulo: "Gestión", items: [["caja", "Caja", "caja"], ["respaldo", "Respaldo", "respaldo"]] },
+  ];
+  const titulo = grupos.flatMap((g) => g.items).find(([k]) => k === tab)?.[1] || "Panel";
+
   return (
-    <div className="px-6 py-8 max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-xl" style={F.display}>ADMINISTRACIÓN — {creator.name.toUpperCase()}</h1>
-        <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
-      </div>
-
-      <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["caja", "Caja"], ["respaldo", "Respaldo"]].map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={`px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
+    <PanelLayout
+      nombre={creator.name}
+      logoUrl={creator.logoUrl}
+      subtitulo="Administración de la plataforma"
+      grupos={grupos}
+      activa={tab}
+      onElegir={(key) => { setTab(key); setInfoForm(null); }}
+      onLogout={onLogout}
+      onMiCuenta={onMiCuenta}
+      titulo={titulo}
+    >
       {tab === "caja" ? (
         <CajaPlataforma accessToken={creator.accessToken} ads={ads} organizers={organizers} coaches={coaches} venues={venues} />
       ) : tab === "publicidad" ? (
@@ -8007,7 +8007,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
           </div>
         </>
       )}
-    </div>
+    </PanelLayout>
   );
 }
 
@@ -8609,6 +8609,10 @@ const PANEL_ICONOS = {
   reportes: "M4 20V10M10 20V4M16 20v-7M22 20H2",
   clases: "M2 9l10-5 10 5-10 5zM6 11v5c3 2 9 2 12 0v-5M22 9v6",
   compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
+  complejos: "M3 21h18M5 21V8l7-4 7 4v13M9 21v-5h6v5M9 11h.01M15 11h.01",
+  circuitos: "M6 19a2 2 0 100-4 2 2 0 000 4zM18 9a2 2 0 100-4 2 2 0 000 4zM6 15V9a4 4 0 014-4h6M18 9v6a4 4 0 01-4 4H8",
+  publicidad: "M3 10v4h3l6 4V6L6 10zM16 9a4 4 0 010 6M19 6a8 8 0 010 12",
+  respaldo: "M12 3v12M7 10l5 5 5-5M4 17v3h16v-3",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
@@ -15697,6 +15701,7 @@ function SmashPointAppInner() {
         onDeleteAd={deleteAd}
         onRestoreBackup={restoreBackup}
         onLogout={endSession}
+        onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
       />
     );
   } else if ((route === "admin-home" || route === "admin-tournament") && session) {
