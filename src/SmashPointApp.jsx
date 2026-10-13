@@ -11279,6 +11279,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
   const [avisoFila, setAvisoFila] = useState(null); // { k, texto } después de anotar o cobrar
   const [vinculando, setVinculando] = useState(null); // clave del jugador con el selector de cuenta abierto
   const [cobrandoTodo, setCobrandoTodo] = useState(null); // clave del jugador cobrando inscripción + consumos
+  const [confirmandoCuenta, setConfirmandoCuenta] = useState(null); // clave del jugador: ¿es la misma persona que una cuenta con su nombre?
   const complejosKey = complejoIds.join(",");
 
   const load = useCallback(async () => {
@@ -11344,8 +11345,16 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
       await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: cuenta.id, complejo_id: cuenta.complejo_id }, accessToken, prefer: "return=minimal" });
       setVinculando(null);
       await load();
-    } catch (e) { setError(reservaErrorText(e)); }
+      return true;
+    } catch (e) { setError(reservaErrorText(e)); return false; }
     finally { setBusy(false); }
+  };
+  // Cuentas que ya existen con el mismo nombre del jugador: antes de crearle una nueva se pregunta
+  const mismoNombre = (f) => (cuentas || []).filter((x) => nameMatch(f.nombre, x.nombre) === "igual");
+  const abrirConsumo = (f) => {
+    setAvisoFila(null); setError("");
+    if (!cuentaDe(f) && mismoNombre(f).length > 0) setConfirmandoCuenta(f.k);
+    else setConsumiendo(f.k);
   };
   // La cuenta del jugador: la vinculada o, si no tiene, una nueva con su nombre (se crea sola)
   const cuentaDe = (f) => {
@@ -11481,9 +11490,25 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                               <AnotarConsumo compacto productos={productosCx.filter((x) => x.complejo_id === (cuenta?.complejo_id || complejoIds[0]))} esDueno={esDueno} busy={busy} onAnotar={(items, otro, total) => anotarA(f, items, otro, total)} />
                               <button type="button" onClick={() => setConsumiendo(null)} className="text-teal-400">Cerrar</button>
                             </div>
+                          ) : confirmandoCuenta === f.k ? (
+                            <div className="rounded-lg border p-2 space-y-2" style={{ borderColor: "#fbbf2466" }}>
+                              <p className="text-amber-300">{mismoNombre(f).length === 1 ? "Ya hay una cuenta" : `Ya hay ${mismoNombre(f).length} cuentas`} a nombre de {f.nombre}. ¿Es la misma persona?</p>
+                              <div className="flex flex-wrap gap-2">
+                                {mismoNombre(f).map((x) => {
+                                  const debe = Math.max(0, saldoDe(x));
+                                  return (
+                                    <button key={x.id} type="button" disabled={busy} onClick={async () => { if (await vincular(f, x.id)) { setConfirmandoCuenta(null); setConsumiendo(f.k); } }} className="px-2 py-1 rounded border border-lime-400 text-lime-400 text-left">
+                                      Sí, usar "{x.nombre}"{x.telefono && ` · WhatsApp …${x.telefono.slice(-4)}`}{debe > 0 ? ` · debe ${formatoPrecio(debe)}` : " · al día"}{x.ultimo && ` · último movimiento ${new Date(x.ultimo).toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`}
+                                    </button>
+                                  );
+                                })}
+                                <button type="button" disabled={busy} onClick={() => { setConfirmandoCuenta(null); setConsumiendo(f.k); }} className="px-2 py-1 rounded border border-teal-700 text-teal-200">No, es otra persona: cuenta nueva</button>
+                              </div>
+                              <button type="button" onClick={() => setConfirmandoCuenta(null)} className="text-teal-400">Cancelar</button>
+                            </div>
                           ) : cobrando !== f.k && cobrandoTodo !== f.k && vinculando !== f.k && (
                             <div className="flex flex-wrap items-center gap-3">
-                              <button type="button" onClick={() => { setConsumiendo(f.k); setAvisoFila(null); setError(""); }} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>
+                              <button type="button" onClick={() => abrirConsumo(f)} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>
                               {cuenta
                                 ? <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline">usar otra cuenta</button>
                                 : cuentas.length > 0 && <button type="button" onClick={() => setVinculando(f.k)} className="text-teal-500 underline">usar una cuenta que ya existe</button>}
