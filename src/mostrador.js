@@ -39,10 +39,20 @@ export function vueltoDe(pagaCon, monto) {
   return p - monto;
 }
 
-/* Lo que se manda a vender(): productos del catálogo y algo suelto */
+/* Clave del ticket: el producto, o el producto y su talle ("id|M") */
+export const claveTicket = (productoId, talle = null) => (talle ? `${productoId}|${talle}` : productoId);
+export function deClave(clave) {
+  const i = clave.indexOf("|");
+  return i === -1 ? { productoId: clave, talle: null } : { productoId: clave.slice(0, i), talle: clave.slice(i + 1) };
+}
+
+/* Lo que se manda a vender(): productos del catálogo (con su talle si tiene) y algo suelto */
 export function itemsParaVender(carrito, sueltos) {
   return [
-    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([producto_id, cantidad]) => ({ producto_id, cantidad })),
+    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([clave, cantidad]) => {
+      const { productoId, talle } = deClave(clave);
+      return talle ? { producto_id: productoId, talle, cantidad } : { producto_id: productoId, cantidad };
+    }),
     ...sueltos.map((s) => ({ descripcion: s.descripcion.trim(), precio: Number(s.precio), cantidad: s.cantidad || 1 })),
   ];
 }
@@ -75,3 +85,21 @@ export function masVendidos(productos, items) {
   for (const i of items) if (i.producto_id) vendidos.set(i.producto_id, (vendidos.get(i.producto_id) || 0) + Number(i.cantidad));
   return productos.map((p, orden) => ({ p, n: vendidos.get(p.id) || 0, orden })).sort((a, b) => b.n - a.n || a.orden - b.orden).map((x) => x.p);
 }
+
+/* Talles de un producto (vienen adentro de cada producto), en su orden */
+export const tallesDe = (p) => [...(p?.producto_talles || [])].sort((a, b) => a.orden - b.orden || a.talle.localeCompare(b.talle));
+
+/* Producto (y talle) con ese código exacto, o null */
+export function buscarPorCodigo(productos, codigo) {
+  const c = String(codigo || "").trim();
+  if (!c) return null;
+  for (const p of productos) {
+    if (p.codigo && p.codigo === c) return { p, talle: null };
+    const t = (p.producto_talles || []).find((x) => x.codigo && x.codigo === c);
+    if (t) return { p, talle: t.talle };
+  }
+  return null;
+}
+
+/* Talles sugeridos para indumentaria */
+export const TALLES_SUGERIDOS = ["S", "M", "L", "XL"];

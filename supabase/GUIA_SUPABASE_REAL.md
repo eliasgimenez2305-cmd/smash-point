@@ -67,6 +67,7 @@ Y [`migrations/20261026_compras_gastos_fijos.sql`](migrations/20261026_compras_g
 Y [`migrations/20261027_turnos_fijos.sql`](migrations/20261027_turnos_fijos.sql) (turnos fijos agrupados) → **Run** → **Success**.
 Y [`migrations/20261028_clases.sql`](migrations/20261028_clases.sql) (clases con profes, alumnos y cuotas) → **Run** → **Success**.
 Y [`migrations/20261029_cargar_a_turno.sql`](migrations/20261029_cargar_a_turno.sql) (mostrador: cargar consumos al turno de una cancha; débito y transferencia en turnos y cuentas) → **Run** → **Success**.
+Y [`migrations/20261030_talles_codigo_rubros.sql`](migrations/20261030_talles_codigo_rubros.sql) (talles con stock propio, código de barras y categorías del mostrador) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 

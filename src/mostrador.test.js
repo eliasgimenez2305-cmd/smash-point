@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos } from "./mostrador.js";
+import { rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, claveTicket, deClave, tallesDe, buscarPorCodigo } from "./mostrador.js";
 
 test("rubros: primero los sugeridos en su orden, después los propios", () => {
   const ps = [{ rubro: "Paletas" }, { rubro: "Grips" }, { rubro: "Bebidas" }, { rubro: "" }, { rubro: "Paletas" }, {}];
@@ -62,4 +62,25 @@ test("más vendidos primero, el resto en su orden", () => {
   const ps = [{ id: "a" }, { id: "b" }, { id: "c" }];
   assert.deepEqual(masVendidos(ps, [{ producto_id: "c", cantidad: 2 }, { producto_id: "b", cantidad: 5 }, { producto_id: null, cantidad: 9 }]).map((p) => p.id), ["b", "c", "a"]);
   assert.deepEqual(masVendidos(ps, []).map((p) => p.id), ["a", "b", "c"]);
+});
+
+test("ticket con talles: la clave lleva el talle y se manda a vender", () => {
+  assert.equal(claveTicket("p1", "M"), "p1|M");
+  assert.equal(claveTicket("p1"), "p1");
+  assert.deepEqual(deClave("p1|XL"), { productoId: "p1", talle: "XL" });
+  assert.deepEqual(itemsParaVender({ "p1|M": 2, p2: 1, "p1|S": 0 }, []), [
+    { producto_id: "p1", talle: "M", cantidad: 2 },
+    { producto_id: "p2", cantidad: 1 },
+  ]);
+});
+
+test("talles en orden y búsqueda por código", () => {
+  const remera = { id: "r", producto_talles: [{ talle: "L", orden: 2, codigo: "c-l" }, { talle: "S", orden: 0 }, { talle: "M", orden: 1 }] };
+  const agua = { id: "a", codigo: "779" };
+  assert.deepEqual(tallesDe(remera).map((t) => t.talle), ["S", "M", "L"]);
+  assert.deepEqual(tallesDe({}), []);
+  assert.deepEqual(buscarPorCodigo([agua, remera], " 779 "), { p: agua, talle: null });
+  assert.deepEqual(buscarPorCodigo([agua, remera], "c-l"), { p: remera, talle: "L" });
+  assert.equal(buscarPorCodigo([agua, remera], "nada"), null);
+  assert.equal(buscarPorCodigo([agua], ""), null);
 });

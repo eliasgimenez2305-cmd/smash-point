@@ -11,7 +11,7 @@ import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtC
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre } from "./clientes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
-import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock } from "./mostrador.js";
+import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -8756,7 +8756,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
     Promise.all([
       verAgenda ? supabaseTable(`reservas?complejo_id=in.(${idsReservas})&fecha=eq.${hoy}&tipo=eq.turno&estado=in.(confirmada,pendiente)&order=inicio.asc`, { accessToken }) : nada,
       verAgenda ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&select=id,nombre`) : nada,
-      verCantina ? supabaseTable(`productos?complejo_id=in.(${idsCantina})&activo=eq.true&stock=not.is.null&aviso_stock=not.is.null&select=id,nombre,stock,aviso_stock,activo,complejo_id`, { accessToken }).catch(() => []) : nada,
+      verCantina ? supabaseTable(`productos?complejo_id=in.(${idsCantina})&activo=eq.true&stock=not.is.null&select=id,nombre,stock,aviso_stock,activo,complejo_id`, { accessToken }).catch(() => []) : nada,
       verCantina ? Promise.all(idsCantina.split(",").map((id) => supabaseRpc("cuentas_con_saldo", { p_complejo: decodeURIComponent(id) }, accessToken).catch(() => []))).then((r) => r.flat()) : nada,
       // La plata de hoy (solo el dueño): lo mismo que suma la Caja, para el día
       verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
@@ -11395,7 +11395,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     const inIds = ids.map(encodeURIComponent).join(",");
     const [ls, ps, ...cs] = await Promise.all([
       supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}`, { accessToken }).catch(() => null),
-      supabaseTable(`productos?complejo_id=in.(${inIds})&activo=is.true&order=orden.asc,nombre.asc`, { accessToken }).catch(() => []),
+      supabaseTable(`productos?complejo_id=in.(${inIds})&activo=is.true&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }).catch(() => []),
       ...ids.map((cid) => supabaseRpc("cuentas_con_saldo", { p_complejo: cid }, accessToken).then((r) => (r || []).map((c) => ({ ...c, complejo_id: cid }))).catch(() => null)),
     ]);
     if (ls && cs.every(Boolean)) { setLinks(ls); setCuentas(cs.flat()); setProductosCx(ps || []); } else { setLinks(null); setCuentas(null); }
@@ -13038,6 +13038,8 @@ const COMPRA_ERRORES = {
   producto_invalido: "Un producto ya no existe: recargá la pantalla.",
   compra_ya_pagada: "Esa compra ya estaba pagada.",
   datos_invalidos: "Revisá cantidades y costos.",
+  elegir_talle: "Esa prenda tiene talles: cargá la cantidad de cada talle.",
+  talle_invalido: "Un talle ya no existe: recargá la pantalla.",
 };
 const compraErrorText = (e) => COMPRA_ERRORES[e?.code] || reservaErrorText(e);
 
@@ -13062,7 +13064,7 @@ function ComprasPanel({ complejos, venues, accessToken }) {
       const [compras, proveedores, productos, costos, deudas] = await Promise.all([
         supabaseTable(`compras?complejo_id=eq.${c}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc&select=*,compra_items(descripcion,cantidad,costo_unitario),proveedores(nombre)`, { accessToken }),
         supabaseTable(`proveedores?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
-        supabaseTable(`productos?complejo_id=eq.${c}&order=rubro.asc.nullslast,nombre.asc`, { accessToken }),
+        supabaseTable(`productos?complejo_id=eq.${c}&order=rubro.asc.nullslast,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
         supabaseTable(`producto_costos?complejo_id=eq.${c}&select=producto_id,costo`, { accessToken }),
         // Lo que se le debe a cada proveedor (todas las compras sin pagar, de cualquier mes)
         supabaseTable(`compras?complejo_id=eq.${c}&anulada=is.false&pagada_at=is.null&order=fecha.asc&select=id,fecha,total,proveedor_id,proveedores(nombre)`, { accessToken }),
@@ -13223,22 +13225,25 @@ function NuevaCompra({ complejoId, proveedores, productos, costos, accessToken, 
   const [proveedorId, setProveedorId] = useState(proveedores[0]?.id || "");
   const [provNuevo, setProvNuevo] = useState(null);
   const [fecha, setFecha] = useState(hoyArgentina());
-  const [items, setItems] = useState([{ productoId: "", descripcion: "", cantidad: "", costo: "" }]);
+  const [items, setItems] = useState([{ productoId: "", descripcion: "", cantidad: "", costo: "", cantTalles: {} }]);
+  // Con talles, la cantidad se carga por talle (un renglón puede traer S, M y L)
+  const tallesDeItem = (x) => tallesDe(productos.find((p) => p.id === x.productoId));
+  const cantidadDe = (x) => (tallesDeItem(x).length > 0 ? Object.values(x.cantTalles || {}).reduce((s, n) => s + (Number(n) || 0), 0) : Number(x.cantidad) || 0);
   const [medio, setMedio] = useState("efectivo"); // "" = queda debiendo
   const [actualizarCosto, setActualizarCosto] = useState(true);
   const [nota, setNota] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const setItem = (i, cambio) => setItems((l) => l.map((x, j) => (j === i ? { ...x, ...cambio } : x)));
-  const elegirProducto = (i, id) => setItem(i, { productoId: id, costo: id && costos[id] != null ? String(Math.round(costos[id])) : items[i].costo });
-  const total = items.reduce((s, x) => s + (Number(x.cantidad) || 0) * (leerPrecio(x.costo) || 0), 0);
+  const elegirProducto = (i, id) => setItem(i, { productoId: id, cantTalles: {}, costo: id && costos[id] != null ? String(Math.round(costos[id])) : items[i].costo });
+  const total = items.reduce((s, x) => s + cantidadDe(x) * (leerPrecio(x.costo) || 0), 0);
 
   const guardar = async () => {
     const renglones = items.filter((x) => x.productoId || x.descripcion.trim() || x.cantidad || x.costo);
     if (renglones.length === 0) { setError("Cargá al menos un renglón."); return; }
     for (const x of renglones) {
       if (!x.productoId && !x.descripcion.trim()) { setError("Elegí el producto o escribí qué es."); return; }
-      if (!(Number(x.cantidad) > 0) || leerPrecio(x.costo) == null) { setError("Revisá cantidad y costo de cada renglón."); return; }
+      if (!(cantidadDe(x) > 0) || leerPrecio(x.costo) == null) { setError("Revisá cantidad y costo de cada renglón."); return; }
     }
     setBusy(true); setError("");
     try {
@@ -13251,9 +13256,11 @@ function NuevaCompra({ complejoId, proveedores, productos, costos, accessToken, 
       }
       await supabaseRpc("registrar_compra", {
         p_complejo: complejoId, p_proveedor: prov, p_fecha: fecha || hoyArgentina(),
-        p_items: renglones.map((x) => x.productoId
-          ? { producto_id: x.productoId, cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }
-          : { descripcion: x.descripcion.trim().slice(0, 60), cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }),
+        p_items: renglones.flatMap((x) => tallesDeItem(x).length > 0
+          ? Object.entries(x.cantTalles).filter(([, n]) => Number(n) > 0).map(([talle, n]) => ({ producto_id: x.productoId, talle, cantidad: Number(n), costo: leerPrecio(x.costo) }))
+          : x.productoId && x.productoId !== "__suelto"
+            ? [{ producto_id: x.productoId, cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }]
+            : [{ descripcion: x.descripcion.trim().slice(0, 60), cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }]),
         p_medio: medio || null, p_nota: nota.trim() || null, p_actualizar_costo: actualizarCosto,
       }, accessToken);
       onDone();
@@ -13291,18 +13298,29 @@ function NuevaCompra({ complejoId, proveedores, productos, costos, accessToken, 
             {x.productoId !== "__suelto" ? (
               <select value={x.productoId} onChange={(e) => (e.target.value === "__suelto" ? setItem(i, { productoId: "__suelto" }) : elegirProducto(i, e.target.value))} aria-label="Producto" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput}>
                 <option value="">Elegí el producto…</option>
-                {productos.map((p) => <option key={p.id} value={p.id}>{p.rubro ? `${p.rubro} · ` : ""}{p.nombre}{p.stock != null ? ` (hay ${p.stock})` : ""}</option>)}
+                {productos.map((p) => <option key={p.id} value={p.id}>{p.rubro ? `${p.rubro} · ` : ""}{p.nombre}{tallesDe(p).length > 0 ? ` (talles ${tallesDe(p).map((t) => t.talle).join("·")})` : p.stock != null ? ` (hay ${p.stock})` : ""}</option>)}
                 <option value="__suelto">Otra cosa (no es un producto)…</option>
               </select>
             ) : (
               <input value={x.descripcion} onChange={(e) => setItem(i, { descripcion: e.target.value })} maxLength={60} placeholder="Qué es (ej: bolsas, limpieza)" aria-label="Descripción" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput} autoFocus />
             )}
-            <input inputMode="numeric" value={x.cantidad} onChange={(e) => setItem(i, { cantidad: e.target.value.replace(/\D/g, "") })} placeholder="Cant." aria-label="Cantidad" className={campo} style={adminInput} />
+            {tallesDeItem(x).length > 0
+              ? <span className="text-xs text-slate-400 self-center">{cantidadDe(x)} en total</span>
+              : <input inputMode="numeric" value={x.cantidad} onChange={(e) => setItem(i, { cantidad: e.target.value.replace(/\D/g, "") })} placeholder="Cant." aria-label="Cantidad" className={campo} style={adminInput} />}
             <input inputMode="numeric" value={x.costo} onChange={(e) => setItem(i, { costo: e.target.value })} placeholder="$ c/u" aria-label="Costo por unidad" className={campo} style={adminInput} />
             {items.length > 1 && <button type="button" onClick={() => setItems((l) => l.filter((_, j) => j !== i))} className="text-teal-500 hover:text-red-300 justify-self-end px-2" aria-label="Quitar renglón">✕</button>}
+            {tallesDeItem(x).length > 0 && (
+              <div className="col-span-full flex flex-wrap gap-2">
+                {tallesDeItem(x).map((t) => (
+                  <label key={t.talle} className="text-xs text-slate-400 flex items-center gap-1">{t.talle}
+                    <input inputMode="numeric" value={x.cantTalles?.[t.talle] || ""} onChange={(e) => setItem(i, { cantTalles: { ...x.cantTalles, [t.talle]: e.target.value.replace(/\D/g, "") } })} placeholder="0" aria-label={`Cantidad del talle ${t.talle}`} className="w-16 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
         ))}
-        <button type="button" onClick={() => setItems((l) => [...l, { productoId: "", descripcion: "", cantidad: "", costo: "" }])} className="text-teal-300 hover:text-lime-400">+ Otro renglón</button>
+        <button type="button" onClick={() => setItems((l) => [...l, { productoId: "", descripcion: "", cantidad: "", costo: "", cantTalles: {} }])} className="text-teal-300 hover:text-lime-400">+ Otro renglón</button>
         {items.some((x) => x.productoId && x.productoId !== "__suelto") && (
           <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={actualizarCosto} onChange={(e) => setActualizarCosto(e.target.checked)} /> Actualizar el costo de los productos con este precio</label>
         )}
@@ -13743,6 +13761,9 @@ const VENTA_ERRORES = {
   cuenta_invalida: "Esa cuenta no es de este complejo.",
   producto_invalido: "Un producto ya no existe: recargá la pantalla.",
   no_autorizado: "No tenés permiso para vender en este complejo.",
+  elegir_talle: "Elegí el talle de la prenda.",
+  talle_invalido: "Ese talle ya no existe: recargá la pantalla.",
+  turno_invalido: "Ese turno ya no está confirmado: elegí otro.",
 };
 const ventaErrorText = (e) => VENTA_ERRORES[e?.code] || reservaErrorText(e);
 
@@ -13755,8 +13776,8 @@ const RUBRO_ICONOS = {
   pelotas: ["M12 21a9 9 0 100-18 9 9 0 000 18zM5.5 5.5c3 3 3 10 0 13M18.5 5.5c-3 3-3 10 0 13", "#facc15"],
   accesorios: ["M3 12V4h8l10 10-8 8zM7.5 8.5h.01", "#2dd4bf"],
 };
-function RubroIcono({ rubro, className = "w-6 h-6" }) {
-  const [d, color] = RUBRO_ICONOS[String(rubro || "").trim().toLowerCase()] || ["M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5", "#94a3b8"];
+function RubroIcono({ rubro, icono, className = "w-6 h-6" }) {
+  const [d, color] = RUBRO_ICONOS[icono] || RUBRO_ICONOS[String(rubro || "").trim().toLowerCase()] || ["M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5", "#94a3b8"];
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>
   );
@@ -13886,16 +13907,20 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
   const [cargarA, setCargarA] = useState("mostrador"); // mostrador | cancha | cliente
   const [destino, setDestino] = useState(null); // el turno o el cliente elegido
   const [sinDestino, setSinDestino] = useState(false); // tocó "Cargar a la cuenta" sin elegir
+  const [rubrosTabla, setRubrosTabla] = useState([]); // categorías del complejo, con orden e ícono
+  const [eligiendoTalle, setEligiendoTalle] = useState(null); // producto con talles que se tocó
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
 
   const load = useCallback(async () => {
     try {
       const desde = encodeURIComponent(`${sumarDias(hoyArgentina(), -30)}T00:00:00-03:00`);
-      const [ps, vs] = await Promise.all([
-        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&activo=eq.true&order=orden.asc,nombre.asc`, { accessToken }),
+      const [ps, vs, rs] = await Promise.all([
+        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&activo=eq.true&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
         supabaseTable(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&anulada=is.false&created_at=gte.${desde}&select=total,created_at,venta_items(producto_id,cantidad)`, { accessToken }).catch(() => null),
+        supabaseTable(`rubros?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken }).catch(() => []),
       ]);
       setProductos(ps);
+      setRubrosTabla(rs || []);
       if (vs) {
         const inicioHoy = Date.parse(`${hoyArgentina()}T00:00:00-03:00`);
         const deHoy = vs.filter((v) => Date.parse(v.created_at) >= inicioHoy);
@@ -13913,36 +13938,54 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
     return () => clearTimeout(t);
   }, [aviso]);
 
-  const rubros = productos ? rubrosDe(productos) : [];
+  // Categorías: primero las del complejo en su orden (las que tienen productos), después las demás
+  const conProductos = productos ? rubrosDe(productos) : [];
+  const rubros = [...rubrosTabla.map((r) => r.nombre).filter((n) => conProductos.includes(n)), ...conProductos.filter((n) => !rubrosTabla.some((r) => r.nombre === n))];
+  const iconoDe = (rubroNombre) => rubrosTabla.find((r) => r.nombre === rubroNombre)?.icono;
+  const enTicket = (p) => Object.entries(carrito).reduce((s, [k, n]) => s + (deClave(k).productoId === p.id ? n : 0), 0);
   const texto = buscar.trim().toLowerCase();
   // Buscando se busca en todos; si no, la categoría elegida (Más vendidos: todos, los que más salen primero)
   const visibles = !productos ? [] : texto
     ? productos.filter((p) => p.nombre.toLowerCase().includes(texto))
     : rubro === MAS_VENDIDOS ? masVendidos(productos, vendidos30) : productos.filter((p) => p.rubro === rubro);
   const renglones = [
-    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ key: id, p: (productos || []).find((x) => x.id === id), cantidad: n })).filter((r) => r.p)
-      .map((r) => ({ ...r, descripcion: nombreLindo(r.p.nombre), precio: Number(r.p.precio) })),
+    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([k, n]) => ({ key: k, ...deClave(k), cantidad: n }))
+      .map((r) => ({ ...r, p: (productos || []).find((x) => x.id === r.productoId) })).filter((r) => r.p)
+      .map((r) => ({ ...r, descripcion: `${nombreLindo(r.p.nombre)}${r.talle ? ` ${r.talle}` : ""}`, precio: Number(r.p.precio) })),
     ...sueltos.map((s, i) => ({ key: `s${i}`, suelto: i, descripcion: s.descripcion, precio: Number(s.precio), cantidad: s.cantidad })),
   ];
   const subtotal = subtotalDe(renglones);
   const cantidadTotal = renglones.reduce((s, r) => s + r.cantidad, 0);
   const vuelto = medio === "efectivo" ? vueltoDe(leerPrecio(pagaCon), subtotal) : null;
 
-  const tocar = (p) => {
-    const n = carrito[p.id] || 0;
-    if (estadoStock(p, n).estado === "sin") {
-      setAviso({ texto: n > 0 ? `No hay más stock de ${nombreLindo(p.nombre)}: ya están todos en el ticket.` : `${nombreLindo(p.nombre)} no tiene stock. Cargalo en Productos y stock o en Compras.`, tono: "alerta" });
+  // Tocar un producto: lo suma al ticket; si tiene talles, primero se elige el talle
+  const tocar = (p, talle = null) => {
+    const talles = tallesDe(p);
+    if (talles.length > 0 && !talle) { setEligiendoTalle(p); return; }
+    const k = claveTicket(p.id, talle);
+    const n = carrito[k] || 0;
+    const t = talle ? talles.find((x) => x.talle === talle) : null;
+    const sinStock = t ? Number(t.stock) - n <= 0 : estadoStock(p, n).estado === "sin";
+    if (sinStock) {
+      const nombre = `${nombreLindo(p.nombre)}${talle ? ` talle ${talle}` : ""}`;
+      setAviso({ texto: n > 0 ? `No hay más stock de ${nombre}: ya están todos en el ticket.` : `${nombre} no tiene stock. Cargalo en Productos y stock o en Compras.`, tono: "alerta" });
       return;
     }
-    setCarrito((c) => ({ ...c, [p.id]: n + 1 }));
-    setVacio(false);
+    setCarrito((c) => ({ ...c, [k]: n + 1 }));
+    setVacio(false); setEligiendoTalle(null);
+  };
+  // Buscador: si se escribe o escanea un código exacto y se aprieta Enter, va directo al ticket
+  const alEnter = () => {
+    const hallado = buscarPorCodigo(productos || [], buscar);
+    if (hallado) { tocar(hallado.p, hallado.talle); setBuscar(""); return; }
+    if (visibles.length === 1) { tocar(visibles[0]); setBuscar(""); }
   };
   const cambiar = (r, d) => {
     if (r.suelto != null) {
       setSueltos((l) => l.map((s, i) => (i === r.suelto ? { ...s, cantidad: Math.max(1, s.cantidad + d) } : s)));
       return;
     }
-    if (d > 0) { tocar(r.p); return; }
+    if (d > 0) { tocar(r.p, r.talle); return; }
     setCarrito((c) => ({ ...c, [r.key]: Math.max(0, (c[r.key] || 0) + d) }));
   };
   const quitar = (r) => (r.suelto != null ? setSueltos((l) => l.filter((_, i) => i !== r.suelto)) : setCarrito((c) => ({ ...c, [r.key]: 0 })));
@@ -14103,7 +14146,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
       {productos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_23rem] items-start">
           <div className="space-y-3 min-w-0">
-            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar producto" aria-label="Buscar producto" className="w-full px-4 py-2.5 rounded-xl border text-base" style={adminInput} />
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); alEnter(); } }} placeholder="Buscar o escanear código" aria-label="Buscar producto o escanear código" className="w-full px-4 py-2.5 rounded-xl border text-base" style={adminInput} />
             {!texto && productos.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {[[MAS_VENDIDOS, "Más vendidos"], ...rubros.map((r) => [r, r])].map(([k, l]) => (
@@ -14116,9 +14159,12 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
             ) : visibles.length === 0 ? <p className="text-slate-400">{texto ? "No hay productos con ese nombre." : "No hay productos en esta categoría."}</p> : (
               <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(9.5rem, 1fr))" }}>
                 {visibles.map((p) => {
-                  const n = carrito[p.id] || 0;
+                  const n = enTicket(p);
+                  const talles = tallesDe(p);
                   const { estado, quedan } = estadoStock(p, n);
                   const [textoStock, colorStock] = estado === "cocina" ? ["Cocina", "#94a3b8"] : estado === "sin" ? ["Sin stock", "#f87171"] : estado === "poco" ? [quedan === 1 ? "Queda 1" : `Quedan ${quedan}`, "#fbbf24"] : [`Stock ${quedan}`, "#94a3b8"];
+                  // Con talles: se ven los talles; los que no tienen stock, tachados
+                  const quedaDe = (t) => Number(t.stock) - (carrito[claveTicket(p.id, t.talle)] || 0);
                   const agotado = estado === "sin" && n === 0;
                   return (
                     <button
@@ -14129,11 +14175,15 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
                       className={`relative text-left rounded-2xl border p-3.5 min-h-[8.5rem] flex flex-col transition ${agotado ? "opacity-50" : "hover:brightness-125"}`}
                       style={{ borderColor: n > 0 ? BRAND.lime : "#1f3a44", backgroundColor: n > 0 ? `${BRAND.lime}0d` : "rgba(15,30,38,0.7)" }}
                     >
-                      <RubroIcono rubro={p.rubro} />
+                      <RubroIcono rubro={p.rubro} icono={iconoDe(p.rubro)} />
                       {n > 0 && <span className="absolute top-3 right-3 min-w-[1.75rem] h-7 px-1.5 rounded-full text-sm font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{n}</span>}
                       <span className="block mt-2 text-slate-100 font-semibold leading-snug line-clamp-2">{nombreLindo(p.nombre)}</span>
                       <span className="block mt-auto pt-1 text-base font-semibold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio) || "$0"}</span>
-                      <span className="block text-xs" style={{ color: colorStock }}>{textoStock}</span>
+                      {talles.length > 0 && estado !== "sin" ? (
+                        <span className="block text-xs text-slate-400 truncate">
+                          {talles.map((t, i) => <span key={t.talle}>{i > 0 && " · "}<span className={quedaDe(t) <= 0 ? "line-through opacity-50" : ""}>{t.talle}</span></span>)}
+                        </span>
+                      ) : <span className="block text-xs" style={{ color: colorStock }}>{textoStock}</span>}
                     </button>
                   );
                 })}
@@ -14154,6 +14204,23 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
           </span>
           <button type="button" onClick={() => document.getElementById("ticket-mostrador")?.scrollIntoView({ behavior: "smooth" })} className="px-6 py-3 rounded-lg font-bold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver ticket</button>
         </div>
+      )}
+
+      {eligiendoTalle && (
+        <Modal title={`Talle · ${nombreLindo(eligiendoTalle.nombre)}`} onClose={() => setEligiendoTalle(null)}>
+          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 text-sm" style={F.body}>
+            {tallesDe(eligiendoTalle).map((t) => {
+              const queda = Number(t.stock) - (carrito[claveTicket(eligiendoTalle.id, t.talle)] || 0);
+              return (
+                <button key={t.talle} type="button" onClick={() => tocar(eligiendoTalle, t.talle)} className={`rounded-xl border py-3 transition ${queda <= 0 ? "opacity-50" : "hover:brightness-125"}`} style={{ borderColor: queda > 0 ? "#1f3a44" : "#7f1d1d", backgroundColor: "rgba(15,30,38,0.7)" }}>
+                  <span className="block text-lg font-bold text-slate-100">{t.talle}</span>
+                  <span className="block text-xs" style={{ color: queda <= 0 ? "#f87171" : queda <= minimoStock(eligiendoTalle) ? "#fbbf24" : "#94a3b8" }}>{queda <= 0 ? "Sin stock" : queda === 1 ? "Queda 1" : `Quedan ${queda}`}</span>
+                </button>
+              );
+            })}
+          </div>
+          {aviso?.tono === "alerta" && <p className="mt-3 text-amber-300 text-sm" style={F.body}>{aviso.texto}</p>}
+        </Modal>
       )}
 
       {dividiendo && (
@@ -14402,7 +14469,7 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = nu
   const load = useCallback(async () => {
     try {
       const [ps, cs] = await Promise.all([
-        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken }),
+        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
         supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken),
       ]);
       setProductos(ps); setCuentas(cs || []); setError("");
@@ -14511,7 +14578,8 @@ function AnotarConsumo({ productos, esDueno, busy, onAnotar, compacto = false })
   const [carrito, setCarrito] = useState({}); // productoId -> cantidad
   const [otro, setOtro] = useState(null); // { descripcion, precio }
   const [error, setError] = useState("");
-  const activos = productos.filter((p) => p.activo);
+  // Las prendas con talles se venden desde el Mostrador (ahí se elige el talle)
+  const activos = productos.filter((p) => p.activo && tallesDe(p).length === 0);
   const items = Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ p: productos.find((x) => x.id === id), n })).filter((x) => x.p);
   const otroPrecio = otro ? leerPrecio(otro.precio) : null;
   const total = items.reduce((s, { p, n }) => s + n * Number(p.precio), 0) + (otro && otro.descripcion.trim() && otroPrecio != null ? otroPrecio : 0);
@@ -14714,13 +14782,113 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
 }
 
 /* Productos del complejo: precio y stock. Los carga y cambia el dueño; el colaborador puede reponer stock. */
+const ICONOS_RUBRO = [["bebidas", "Bebidas"], ["comida", "Comida"], ["indumentaria", "Indumentaria"], ["paletas", "Paletas"], ["pelotas", "Pelotas"], ["accesorios", "Accesorios"], ["otros", "Otros"]];
+const iconoSugerido = (nombre) => (RUBRO_ICONOS[String(nombre || "").trim().toLowerCase()] ? String(nombre).trim().toLowerCase() : "otros");
+
+/* Categorías del mostrador (ver 20261030_talles_codigo_rubros.sql): nombre, ícono y orden. Cambiar
+   el nombre lo cambia también en sus productos; borrarla los deja sin categoría. Solo el dueño. */
+function CategoriasEditor({ complejoId, accessToken, rubrosTabla, productos, onChanged, onCerrar }) {
+  const [nombres, setNombres] = useState({}); // id -> nombre que se está escribiendo
+  const [nueva, setNueva] = useState({ nombre: "", icono: "otros" });
+  const [borrando, setBorrando] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await onChanged(); } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una categoría con ese nombre." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const base = `rubros?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+  const enUso = (nombre) => productos.filter((p) => p.rubro === nombre).length;
+  // La primera vez: las que ya usan los productos y las sugeridas
+  const armar = () => run(async () => {
+    const lista = [...new Set([...rubrosDe(productos), ...RUBROS_SUGERIDOS])];
+    await supabaseTable("rubros", { method: "POST", body: lista.map((n, i) => ({ complejo_id: complejoId, nombre: n, icono: iconoSugerido(n), orden: i })), accessToken, prefer: "return=minimal" });
+  });
+  const renombrar = (r) => {
+    const nuevo = (nombres[r.id] ?? r.nombre).trim().slice(0, 30);
+    if (!nuevo || nuevo === r.nombre) return;
+    run(async () => {
+      await supabaseTable(`rubros?id=eq.${r.id}`, { method: "PATCH", body: { nombre: nuevo }, accessToken, prefer: "return=minimal" });
+      if (enUso(r.nombre) > 0) await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&rubro=eq.${encodeURIComponent(r.nombre)}`, { method: "PATCH", body: { rubro: nuevo }, accessToken, prefer: "return=minimal" });
+      setNombres((m) => { const x = { ...m }; delete x[r.id]; return x; });
+    });
+  };
+  const mover = (i, d) => {
+    const a = rubrosTabla[i]; const b = rubrosTabla[i + d];
+    if (!a || !b) return;
+    run(async () => {
+      await supabaseTable(`rubros?id=eq.${a.id}`, { method: "PATCH", body: { orden: i + d }, accessToken, prefer: "return=minimal" });
+      await supabaseTable(`rubros?id=eq.${b.id}`, { method: "PATCH", body: { orden: i }, accessToken, prefer: "return=minimal" });
+    });
+  };
+  const borrar = (r) => run(async () => {
+    await supabaseTable(`rubros?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+    if (enUso(r.nombre) > 0) await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&rubro=eq.${encodeURIComponent(r.nombre)}`, { method: "PATCH", body: { rubro: null }, accessToken, prefer: "return=minimal" });
+    setBorrando(null);
+  });
+  const agregar = () => {
+    const nombre = nueva.nombre.trim().slice(0, 30);
+    if (!nombre) return;
+    run(async () => {
+      await supabaseTable("rubros", { method: "POST", body: { complejo_id: complejoId, nombre, icono: nueva.icono, orden: rubrosTabla.length }, accessToken, prefer: "return=minimal" });
+      setNueva({ nombre: "", icono: "otros" });
+    });
+  };
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
+
+  return (
+    <div className="rounded-lg border border-teal-700 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm text-slate-200 font-semibold">Categorías del mostrador</p>
+        <button type="button" onClick={onCerrar} className="text-sm text-slate-400">Cerrar</button>
+      </div>
+      <p className="text-xs text-slate-400">Se muestran en el mostrador en este orden, después de "Más vendidos". Cada una con su ícono.</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {rubrosTabla.length === 0 ? (
+        <button type="button" disabled={busy} onClick={armar} className="px-4 py-2 rounded-lg border border-teal-600 text-slate-100 disabled:opacity-50">Armar la lista con las que ya usás y las sugeridas</button>
+      ) : (
+        <ul className="space-y-2">
+          {rubrosTabla.map((r, i) => (
+            <li key={r.id} className="flex flex-wrap items-center gap-2">
+              <span className="w-8 flex justify-center"><RubroIcono icono={r.icono} rubro={r.nombre} /></span>
+              <select value={r.icono} disabled={busy} onChange={(e) => run(() => supabaseTable(`rubros?id=eq.${r.id}`, { method: "PATCH", body: { icono: e.target.value }, accessToken, prefer: "return=minimal" }))} aria-label={`Ícono de ${r.nombre}`} className="px-2 py-2 rounded-lg border text-sm" style={adminInput}>
+                {ICONOS_RUBRO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <input value={nombres[r.id] ?? r.nombre} onChange={(e) => setNombres({ ...nombres, [r.id]: e.target.value })} onBlur={() => renombrar(r)} onKeyDown={(e) => { if (e.key === "Enter") renombrar(r); }} maxLength={30} aria-label="Nombre de la categoría" className={`flex-1 min-w-[8rem] ${campo}`} style={adminInput} />
+              <span className="text-xs text-slate-500 w-16">{enUso(r.nombre)} prod.</span>
+              <button type="button" disabled={busy || i === 0} onClick={() => mover(i, -1)} className="w-8 h-8 rounded border border-teal-800 text-slate-300 disabled:opacity-30" aria-label="Subir">↑</button>
+              <button type="button" disabled={busy || i === rubrosTabla.length - 1} onClick={() => mover(i, 1)} className="w-8 h-8 rounded border border-teal-800 text-slate-300 disabled:opacity-30" aria-label="Bajar">↓</button>
+              {borrando === r.id ? (
+                <span className="text-xs text-red-300">{enUso(r.nombre) > 0 ? `Sus ${enUso(r.nombre)} productos quedan sin categoría. ` : ""}<button type="button" disabled={busy} onClick={() => borrar(r)} className="font-semibold text-red-400">Borrar</button> <button type="button" onClick={() => setBorrando(null)} className="text-slate-400 ml-1">No</button></span>
+              ) : <button type="button" onClick={() => setBorrando(r.id)} className="text-xs text-slate-400 hover:text-red-300">Borrar</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {rubrosTabla.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-teal-900 pt-3">
+          <select value={nueva.icono} onChange={(e) => setNueva({ ...nueva, icono: e.target.value })} aria-label="Ícono" className="px-2 py-2 rounded-lg border text-sm" style={adminInput}>
+            {ICONOS_RUBRO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+          <input value={nueva.nombre} onChange={(e) => setNueva({ ...nueva, nombre: e.target.value, icono: nueva.icono === "otros" ? iconoSugerido(e.target.value) : nueva.icono })} onKeyDown={(e) => { if (e.key === "Enter") agregar(); }} maxLength={30} placeholder="Nueva categoría (ej: Snacks)" aria-label="Nueva categoría" className={`flex-1 min-w-[8rem] ${campo}`} style={adminInput} />
+          <button type="button" disabled={busy || !nueva.nombre.trim()} onClick={agregar} className="px-3 py-2 rounded-lg border border-teal-600 text-slate-100 disabled:opacity-40">+ Agregar</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChanged }) {
   const [editando, setEditando] = useState(null); // "nuevo" | producto
   const [form, setForm] = useState(null);
   const [reponer, setReponer] = useState({}); // productoId -> cantidad escrita
+  const [reponerTalle, setReponerTalle] = useState({}); // productoId -> talle elegido para reponer
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [rubro, setRubro] = useState("");
+  const [rubrosTabla, setRubrosTabla] = useState([]);
+  const [categorias, setCategorias] = useState(false); // editor de categorías abierto
   // Costos: los ve y los carga solo el dueño (tabla aparte, ver 20261024_mostrador.sql)
   const [costos, setCostos] = useState({}); // productoId -> costo
   const loadCostos = useCallback(async () => {
@@ -14731,10 +14899,15 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
     } catch { setCostos({}); }
   }, [complejoId, accessToken, esDueno]);
   useEffect(() => { loadCostos(); }, [loadCostos]);
+  const loadRubros = useCallback(async () => {
+    try { setRubrosTabla((await supabaseTable(`rubros?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken })) || []); } catch { setRubrosTabla([]); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { loadRubros(); }, [loadRubros]);
 
   const rubros = rubrosDe(productos);
-  const opcionesRubro = [...new Set([...RUBROS_SUGERIDOS, ...rubros])];
+  const opcionesRubro = [...new Set([...rubrosTabla.map((r) => r.nombre), ...RUBROS_SUGERIDOS, ...rubros])];
   const abrir = (p) => {
+    const talles = tallesDe(p);
     setEditando(p || "nuevo");
     setForm({
       nombre: p?.nombre || "", rubro: p?.rubro || rubro || "", precio: p ? String(Math.round(p.precio)) : "",
@@ -14742,27 +14915,50 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       // Los nuevos controlan stock; el mínimo para avisar es 3 si no tiene otro
       controla: p ? p.stock != null : true,
       stock: p?.stock != null ? String(p.stock) : "", aviso: p?.aviso_stock != null ? String(p.aviso_stock) : "3", activo: p ? p.activo : true,
+      codigo: p?.codigo || "",
+      conTalles: talles.length > 0,
+      talles: talles.map((t) => ({ talle: t.talle, stock: String(t.stock), codigo: t.codigo || "" })),
     });
     setError("");
   };
   const run = async (fn) => {
     setBusy(true); setError("");
-    try { await fn(); await onChanged(); await loadCostos(); } catch (e) { setError(reservaErrorText(e)); }
+    try { await fn(); await onChanged(); await loadCostos(); }
+    catch (e) { setError(e.pgCode === "23505" ? "Ese código ya lo tiene otro producto o talle." : e.code === "elegir_talle" ? "Ese producto tiene talles: reponé eligiendo el talle." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
+  const setTalle = (i, cambio) => setForm((f) => ({ ...f, talles: f.talles.map((t, j) => (j === i ? { ...t, ...cambio } : t)) }));
+  const sumarSugeridos = () => setForm((f) => ({ ...f, talles: [...f.talles, ...TALLES_SUGERIDOS.filter((t) => !f.talles.some((x) => x.talle.trim().toUpperCase() === t)).map((t) => ({ talle: t, stock: "0", codigo: "" }))] }));
   const guardar = () => {
     const precio = leerPrecio(form.precio);
     const costo = form.costo.trim() === "" ? null : leerPrecio(form.costo);
     if (!form.nombre.trim()) { setError("Poné el nombre."); return; }
     if (precio == null) { setError("Poné el precio."); return; }
     const entero = (t) => (String(t).trim() === "" ? null : parseInt(String(t).replace(/[^\d-]/g, ""), 10));
-    const body = { nombre: form.nombre.trim(), rubro: form.rubro.trim() || null, precio, stock: form.controla ? entero(form.stock) ?? 0 : null, aviso_stock: form.controla ? entero(form.aviso) ?? 3 : null, activo: form.activo };
+    const conTalles = form.controla && form.conTalles;
+    const talles = conTalles ? form.talles.map((t, i) => ({ talle: t.talle.trim().slice(0, 10), stock: entero(t.stock) ?? 0, codigo: t.codigo.trim() || null, orden: i })).filter((t) => t.talle) : [];
+    if (conTalles && talles.length === 0) { setError("Cargá al menos un talle (o destildá \"Tiene talles\")."); return; }
+    if (new Set(talles.map((t) => t.talle.toUpperCase())).size !== talles.length) { setError("Hay talles repetidos."); return; }
+    const body = {
+      nombre: form.nombre.trim(), rubro: form.rubro.trim() || null, precio,
+      stock: form.controla ? (conTalles ? talles.reduce((s, t) => s + t.stock, 0) : entero(form.stock) ?? 0) : null,
+      aviso_stock: form.controla ? entero(form.aviso) ?? 3 : null, activo: form.activo,
+      codigo: conTalles ? null : form.codigo.trim() || null,
+    };
     run(async () => {
       let id = editando?.id;
+      const antes = editando === "nuevo" ? [] : tallesDe(editando).map((t) => t.talle);
+      // Deja de tener talles: se borran antes, así el stock que se carga queda
+      if (!conTalles && antes.length > 0) await supabaseTable(`producto_talles?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
       if (editando === "nuevo") {
         const [p] = await supabaseTable("productos", { method: "POST", body: { ...body, complejo_id: complejoId, orden: productos.length }, accessToken, prefer: "return=representation" });
         id = p.id;
       } else await supabaseTable(`productos?id=eq.${id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      if (conTalles) {
+        const quitados = antes.filter((t) => !talles.some((x) => x.talle === t));
+        if (quitados.length > 0) await supabaseTable(`producto_talles?producto_id=eq.${id}&talle=in.(${quitados.map((t) => `"${t.replace(/"/g, "")}"`).join(",")})`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+        await supabaseTable("producto_talles?on_conflict=producto_id,talle", { method: "POST", body: talles.map((t) => ({ ...t, producto_id: id, complejo_id: complejoId })), accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+      }
       if (costo != null) await supabaseTable("producto_costos?on_conflict=producto_id", { method: "POST", body: { producto_id: id, complejo_id: complejoId, costo, updated_at: new Date().toISOString() }, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
       else if (costos[id] != null) await supabaseTable(`producto_costos?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
       setEditando(null);
@@ -14771,8 +14967,11 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
   const sumarStock = (p) => {
     const n = parseInt(String(reponer[p.id] || "").replace(/[^\d-]/g, ""), 10);
     if (!n) return;
+    const talles = tallesDe(p);
+    const talle = talles.length > 0 ? reponerTalle[p.id] || talles[0].talle : null;
     run(async () => {
-      await supabaseRpc("sumar_stock", { p_producto: p.id, p_cantidad: n }, accessToken);
+      if (talle) await supabaseRpc("sumar_stock_talle", { p_producto: p.id, p_talle: talle, p_cantidad: n }, accessToken);
+      else await supabaseRpc("sumar_stock", { p_producto: p.id, p_cantidad: n }, accessToken);
       setReponer((r) => ({ ...r, [p.id]: "" }));
     });
   };
@@ -14788,13 +14987,19 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
   return (
     <div className="space-y-3">
       {error && <p className="text-red-400">{error}</p>}
-      {esDueno && !editando && <button type="button" onClick={() => abrir(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar producto</button>}
+      {esDueno && !editando && !categorias && (
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => abrir(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar producto</button>
+          <button type="button" onClick={() => setCategorias(true)} className="px-4 py-2 rounded-lg border border-teal-700 text-slate-200">Categorías</button>
+        </div>
+      )}
+      {categorias && <CategoriasEditor complejoId={complejoId} accessToken={accessToken} rubrosTabla={rubrosTabla} productos={productos} onChanged={async () => { await loadRubros(); await onChanged(); }} onCerrar={() => setCategorias(false)} />}
       {editando && (
         <div className="rounded-lg border border-teal-700 p-3 space-y-2">
-          <p className="text-xs text-teal-400">Cada modelo, talle o color va como un producto aparte (ej: "Grip blanco" y "Grip negro"), así cada uno lleva su stock.</p>
+          <p className="text-xs text-slate-400">Cada modelo o color va como un producto aparte (ej: "Grip blanco" y "Grip negro"). Los talles van adentro del producto, cada uno con su stock.</p>
           <div className="grid gap-2 grid-cols-2">
-            <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} placeholder="Nombre (ej: Agua 500 o Paleta Bullpadel Vertex)" aria-label="Nombre" className={`col-span-2 ${campo}`} style={adminInput} autoFocus />
-            <input list="rubros-productos" value={form.rubro} onChange={(e) => setForm({ ...form, rubro: e.target.value })} maxLength={30} placeholder="Rubro (ej: Bebidas, Paletas)" aria-label="Rubro" className={`col-span-2 ${campo}`} style={adminInput} />
+            <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} placeholder="Nombre (ej: Agua 500 o Remera Black)" aria-label="Nombre" className={`col-span-2 ${campo}`} style={adminInput} autoFocus />
+            <input list="rubros-productos" value={form.rubro} onChange={(e) => setForm({ ...form, rubro: e.target.value })} maxLength={30} placeholder="Categoría (ej: Bebidas, Indumentaria)" aria-label="Categoría" className={`col-span-2 ${campo}`} style={adminInput} />
             <datalist id="rubros-productos">{opcionesRubro.map((r) => <option key={r} value={r} />)}</datalist>
             <label className="text-xs text-teal-400">Precio de venta
               <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="$" aria-label="Precio" className={`block w-full mt-1 ${campo}`} style={adminInput} />
@@ -14802,11 +15007,41 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
             <label className="text-xs text-teal-400">Costo (solo lo ves vos)
               <input inputMode="numeric" value={form.costo} onChange={(e) => setForm({ ...form, costo: e.target.value })} placeholder="$ (opcional)" aria-label="Costo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
             </label>
+            {!(form.controla && form.conTalles) && (
+              <label className="col-span-2 text-xs text-teal-400">Código de barras (opcional)
+                <input value={form.codigo} onChange={(e) => setForm({ ...form, codigo: e.target.value })} maxLength={40} placeholder="Escaneá o escribí el código" aria-label="Código de barras" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+              </label>
+            )}
             <label className="col-span-2 flex items-start gap-2 text-slate-200">
               <input type="checkbox" checked={form.controla} onChange={(e) => setForm({ ...form, controla: e.target.checked })} className="mt-1" />
               <span>Controla stock<span className="block text-xs text-slate-400">Destildalo para lo que se prepara en el momento (papas fritas, tragos): en el mostrador dice "Cocina".</span></span>
             </label>
             {form.controla && (
+              <label className="col-span-2 flex items-start gap-2 text-slate-200">
+                <input type="checkbox" checked={form.conTalles} onChange={(e) => setForm({ ...form, conTalles: e.target.checked, talles: e.target.checked && form.talles.length === 0 ? TALLES_SUGERIDOS.map((t) => ({ talle: t, stock: "0", codigo: "" })) : form.talles })} className="mt-1" />
+                <span>Tiene talles<span className="block text-xs text-slate-400">Remeras, shorts, zapatillas: cada talle lleva su stock y su código. En el mostrador se elige el talle.</span></span>
+              </label>
+            )}
+            {form.controla && form.conTalles ? (
+              <div className="col-span-2 space-y-2">
+                <div className="grid grid-cols-[4.5rem_5rem_minmax(0,1fr)_auto] gap-2 text-xs text-slate-400"><span>Talle</span><span>Stock</span><span>Código (opcional)</span><span /></div>
+                {form.talles.map((t, i) => (
+                  <div key={i} className="grid grid-cols-[4.5rem_5rem_minmax(0,1fr)_auto] gap-2 items-center">
+                    <input value={t.talle} onChange={(e) => setTalle(i, { talle: e.target.value })} maxLength={10} aria-label="Talle" className={campo} style={adminInput} />
+                    <input inputMode="numeric" value={t.stock} onChange={(e) => setTalle(i, { stock: e.target.value })} aria-label={`Stock del talle ${t.talle}`} className={campo} style={adminInput} />
+                    <input value={t.codigo} onChange={(e) => setTalle(i, { codigo: e.target.value })} maxLength={40} aria-label={`Código del talle ${t.talle}`} className={campo} style={adminInput} />
+                    <button type="button" onClick={() => setForm((f) => ({ ...f, talles: f.talles.filter((_, j) => j !== i) }))} className="text-slate-400 hover:text-red-300 px-2" aria-label={`Quitar el talle ${t.talle}`}>✕</button>
+                  </div>
+                ))}
+                <div className="flex flex-wrap gap-3 text-sm">
+                  <button type="button" onClick={() => setForm((f) => ({ ...f, talles: [...f.talles, { talle: "", stock: "0", codigo: "" }] }))} className="text-cyan-300">+ Talle</button>
+                  <button type="button" onClick={sumarSugeridos} className="text-slate-400 underline">Sumar S · M · L · XL</button>
+                </div>
+                <label className="block text-xs text-teal-400 max-w-[14rem]">Stock mínimo por talle (avisa en amarillo)
+                  <input inputMode="numeric" value={form.aviso} onChange={(e) => setForm({ ...form, aviso: e.target.value })} placeholder="3" aria-label="Stock mínimo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+                </label>
+              </div>
+            ) : form.controla && (
               <>
                 <label className="text-xs text-teal-400">Stock
                   <input inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="0" aria-label="Stock" className={`block w-full mt-1 ${campo}`} style={adminInput} />
@@ -14837,25 +15072,39 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       )}
       {productos.length === 0 ? <p className="text-teal-400">Todavía no hay productos.</p> : (
         <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
-          {visibles.map((p) => (
-            <li key={p.id} className={`px-3 py-2 flex flex-wrap items-center gap-2 ${p.activo ? "" : "opacity-60"}`}>
-              <span className="flex-1 min-w-[8rem]">
-                <span className="block text-teal-100 font-semibold">{p.nombre}{!p.activo && <span className="text-xs text-teal-500 font-normal"> · no está a la venta</span>}</span>
-                <span className="block text-xs text-teal-400">
-                  {p.rubro && !rubro && <span className="text-teal-500">{p.rubro} · </span>}
-                  {formatoPrecio(p.precio)} · {p.stock == null ? "no controla stock (Cocina)" : <span className={pocoStock(p) ? "text-amber-300" : ""}>quedan {p.stock}</span>}
+          {visibles.map((p) => {
+            const talles = tallesDe(p);
+            return (
+              <li key={p.id} className={`px-3 py-2 flex flex-wrap items-center gap-2 ${p.activo ? "" : "opacity-60"}`}>
+                <span className="flex-1 min-w-[8rem]">
+                  <span className="block text-teal-100 font-semibold">{p.nombre}{!p.activo && <span className="text-xs text-teal-500 font-normal"> · no está a la venta</span>}</span>
+                  <span className="block text-xs text-teal-400">
+                    {p.rubro && !rubro && <span className="text-teal-500">{p.rubro} · </span>}
+                    {formatoPrecio(p.precio)} · {p.stock == null ? "no controla stock (Cocina)" : <span className={pocoStock(p) ? "text-amber-300" : ""}>quedan {p.stock}</span>}
+                    {p.codigo && <span className="text-teal-600"> · código {p.codigo}</span>}
+                  </span>
+                  {talles.length > 0 && (
+                    <span className="block text-xs text-slate-400">
+                      {talles.map((t, i) => <span key={t.talle}>{i > 0 && " · "}<span className={Number(t.stock) <= 0 ? "text-red-300" : Number(t.stock) <= minimoStock(p) ? "text-amber-300" : ""}>{t.talle} {t.stock}</span></span>)}
+                    </span>
+                  )}
+                  {esDueno && ganancia(p) && <span className="block text-xs text-teal-500">{ganancia(p)}</span>}
                 </span>
-                {esDueno && ganancia(p) && <span className="block text-xs text-teal-500">{ganancia(p)}</span>}
-              </span>
-              {p.stock != null ? (
-                <>
-                  <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
-                  <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
-                </>
-              ) : esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-lime-400">Controlar stock</button>}
-              {esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-teal-300 underline">Editar</button>}
-            </li>
-          ))}
+                {p.stock != null ? (
+                  <>
+                    {talles.length > 0 && (
+                      <select value={reponerTalle[p.id] || talles[0].talle} onChange={(e) => setReponerTalle({ ...reponerTalle, [p.id]: e.target.value })} aria-label={`Talle a reponer de ${p.nombre}`} className="px-2 py-1.5 rounded border text-sm" style={adminInput}>
+                        {talles.map((t) => <option key={t.talle} value={t.talle}>{t.talle}</option>)}
+                      </select>
+                    )}
+                    <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                    <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
+                  </>
+                ) : esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-lime-400">Controlar stock</button>}
+                {esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-teal-300 underline">Editar</button>}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
