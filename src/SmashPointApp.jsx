@@ -9068,7 +9068,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
 /* ---------- Reservas: panel del dueño del complejo ---------- */
 
 const HORAS_DEL_DIA = Array.from({ length: 48 }, (_, i) => etiquetaHora(i * PASO));
-const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"]];
+const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"]];
 const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
 const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
 
@@ -10008,6 +10008,10 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const [error, setError] = useState("");
   const [bloqueado, setBloqueado] = useState(null); // ¿el jugador está bloqueado en este complejo?
   const [confirmBloqueo, setConfirmBloqueo] = useState(false);
+  // Lo que se cargó a este turno desde el mostrador y todavía no se cobró (ver 20261029_cargar_a_turno.sql)
+  const [consumos, setConsumos] = useState(null); // { pendiente, detalle } | null
+  const [aviso, setAviso] = useState("");
+  const pendiente = Number(consumos?.pendiente || 0);
   const desde = minutoEnGrilla(fecha, r.inicio);
   const hasta = minutoEnGrilla(fecha, r.fin);
   const bloqueoUrl = `jugadores_bloqueados?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&jugador_id=eq.${r.jugador_id}`;
@@ -10017,11 +10021,33 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
     supabaseTable(bloqueoUrl, { accessToken }).then((rows) => setBloqueado(rows.length > 0)).catch(() => {});
   }, [bloqueoUrl, r.jugador_id, accessToken, dueno]);
 
+  const cargarConsumos = useCallback(async () => {
+    if (r.tipo === "bloqueo") return;
+    try {
+      const rows = await supabaseRpc("consumos_de_turnos", { p_complejo: r.complejo_id, p_fecha: fecha }, accessToken);
+      setConsumos((rows || []).find((x) => x.reserva_id === r.id) || null);
+    } catch { setConsumos(null); }
+  }, [r.id, r.tipo, r.complejo_id, fecha, accessToken]);
+  useEffect(() => { cargarConsumos(); }, [cargarConsumos]);
+
   const run = async (fn) => {
-    setBusy(true); setError("");
-    try { await fn(); await onChanged(); } catch (e) { setError(reservaErrorText(e)); }
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); await onChanged(); await cargarConsumos(); } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
+  const cobrarConsumos = (medio) => run(async () => {
+    const n = await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medio }, accessToken);
+    setAviso(`Consumos cobrados: ${formatoPrecio(n) || "$0"}.`);
+  });
+  // No vinieron o se cancela: lo pendiente pasa a la cuenta del titular (por WhatsApp o nombre; si no tiene, se le crea)
+  const pasarACuenta = () => run(async () => {
+    const base = `cuentas?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&select=id`;
+    let [c] = r.telefono ? await supabaseTable(`${base}&telefono=eq.${r.telefono}`, { accessToken }) : [];
+    if (!c) [c] = await supabaseTable(`${base}&nombre=eq.${encodeURIComponent(r.nombre)}`, { accessToken });
+    if (!c) [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: r.complejo_id, nombre: r.nombre, telefono: r.telefono || null }, accessToken, prefer: "return=representation" });
+    const n = await supabaseRpc("pasar_consumos_a_cuenta", { p_reserva: r.id, p_cuenta: c.id }, accessToken);
+    setAviso(`${formatoPrecio(n) || "$0"} pasaron a la cuenta de ${r.nombre}.`);
+  });
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
   const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
@@ -10029,7 +10055,10 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
   const confirmar = () => patch({ estado: "confirmada" });
   const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
-  const cobro = (medio) => patch({ medio_pago: medio });
+  const cobro = (medio) => run(async () => {
+    await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" });
+    if (medio && !r.medio_pago && pendiente > 0) await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medio }, accessToken);
+  });
   const cambiarBloqueo = async () => {
     setBusy(true); setError("");
     try {
@@ -10070,17 +10099,38 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                   <a href={waLink(r.telefono, mensajeTurno(r, venueName, cancha?.nombre, true))} target="_blank" rel="noopener noreferrer" className="block text-lime-400 underline">Avisarle por WhatsApp que está confirmado</a>
                 )}
                 <div>
-                  <p className="text-xs text-teal-400 mb-1">Cobro</p>
-                  <div className="flex gap-2">
+                  <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                     {MEDIOS_PAGO.map(([k, l]) => (
-                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`flex-1 ${btn} ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`${btn} px-2 ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
                     ))}
                   </div>
                 </div>
+                {pendiente > 0 && (
+                  <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b66" }}>
+                    <p className="text-amber-300 font-semibold">Consumos sin cobrar: {formatoPrecio(pendiente)}</p>
+                    {consumos?.detalle && <p className="text-xs text-slate-400">{consumos.detalle}</p>}
+                    {r.medio_pago ? (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {MEDIOS_PAGO.filter(([k]) => k).map(([k, l]) => (
+                          <button key={k} type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className={`${btn} px-2 border-teal-700 text-slate-100`}>{l}</button>
+                        ))}
+                      </div>
+                    ) : <p className="text-xs text-slate-400">Se cobran junto con la cancha, o solos:{" "}
+                      {MEDIOS_PAGO.filter(([k]) => k).map(([k, l], i) => <span key={k}>{i > 0 && " · "}<button type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className="underline text-slate-200">{l}</button></span>)}
+                    </p>}
+                    <button type="button" disabled={busy} onClick={pasarACuenta} className="text-xs text-cyan-300 underline">Pasar a la cuenta de {r.nombre}</button>
+                  </div>
+                )}
+                {aviso && <p className="text-lime-400">{aviso}</p>}
                 <label className="flex items-center gap-2 text-teal-200">
                   <input type="checkbox" checked={r.no_vino} disabled={busy} onChange={(e) => patch({ no_vino: e.target.checked })} /> No vino
                 </label>
-                {confirmCancel ? (
+                {confirmCancel && pendiente > 0 ? (
+                  <p className="text-amber-300">Este turno tiene {formatoPrecio(pendiente)} de consumos sin cobrar: cobralos o pasalos a la cuenta de {r.nombre} antes de cancelar.{" "}
+                    <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">Entendido</button>
+                  </p>
+                ) : confirmCancel ? (
                   <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
                     <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
                     {r.serie_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
@@ -11296,6 +11346,8 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onP
 /* ---------- Cobro de inscripciones (ver 20261018_cobros_inscripciones.sql) ---------- */
 
 const MEDIOS_COBRO = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"]];
+// Cuentas e inscripciones también aceptan débito (ver 20261029_cargar_a_turno.sql)
+const MEDIOS_CUENTA = [...MEDIOS_COBRO, ["debito", "Débito"]];
 const medioCobroLabel = (m) => MEDIOS_VENTA.find(([k]) => k === m)?.[1] || m;
 
 /* Precio por jugador de una categoría: el suyo o, si no tiene, el del torneo (null = sin precio) */
@@ -11366,7 +11418,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
   const esperado = conPrecio.reduce((s, f) => s + f.precio, 0);
   const cobrado = (pagos || []).reduce((s, p) => s + Number(p.monto), 0);
   const falta = conPrecio.reduce((s, f) => s + f.debe, 0);
-  const porMedio = MEDIOS_COBRO.map(([m, l]) => [l, (pagos || []).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, v]) => v > 0);
+  const porMedio = MEDIOS_CUENTA.map(([m, l]) => [l, (pagos || []).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, v]) => v > 0);
   const sinPrecio = tournament.categories.some((c) => c.pairs.length > 0 && precioJugador(tournament, c) == null);
 
   const visibles = filas.filter((f) => filtro === "todos" || (filtro === "deben" ? f.debe == null ? f.pagado === 0 : f.debe > 0 : f.debe === 0 || (f.debe == null && f.pagado > 0)));
@@ -11589,7 +11641,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                               <p className="text-teal-400">Inscripción {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
                               <div className="flex flex-wrap gap-2 items-center">
                                 <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-                                {MEDIOS_COBRO.map(([m, l]) => (
+                                {MEDIOS_CUENTA.map(([m, l]) => (
                                   <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
                                 ))}
                               </div>
@@ -11606,7 +11658,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                       <div className="mt-3 space-y-2">
                         <div className="flex flex-wrap gap-2 items-center">
                           <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
-                          {MEDIOS_COBRO.map(([m, l]) => (
+                          {MEDIOS_CUENTA.map(([m, l]) => (
                             <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
                           ))}
                         </div>
@@ -13710,12 +13762,110 @@ function RubroIcono({ rubro, className = "w-6 h-6" }) {
   );
 }
 
+/* "Cargar a" del ticket: a qué turno de hoy (Cancha) o a qué persona (Cliente) va el consumo.
+   destino: { tipo: "cancha", turno } | { tipo: "cliente", cuentaId?, nombre, telefono? } | null */
+function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
+  const [turnos, setTurnos] = useState(null);
+  const [cuentas, setCuentas] = useState(null);
+  const [agenda, setAgenda] = useState([]); // personas de la agenda (si se puede ver)
+  const [buscar, setBuscar] = useState("");
+  const [error, setError] = useState("");
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  useEffect(() => {
+    setError("");
+    if (tipo === "cancha") {
+      setTurnos(null);
+      supabaseRpc("turnos_para_cargar", { p_complejo: complejoId }, accessToken).then((r) => setTurnos(r || [])).catch(() => { setTurnos([]); setError("No se pudieron cargar los turnos de hoy."); });
+    } else {
+      setCuentas(null);
+      supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).then((r) => setCuentas(r || [])).catch(() => { setCuentas([]); setError("No se pudieron cargar las cuentas."); });
+      // Los clientes de la agenda (últimos 6 meses); si no tiene acceso a la agenda, solo las cuentas
+      supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&tipo=eq.turno&fecha=gte.${sumarDias(hoyArgentina(), -180)}&select=nombre,telefono&order=fecha.desc&limit=500`, { accessToken })
+        .then((rows) => setAgenda(rows || [])).catch(() => setAgenda([]));
+    }
+  }, [tipo, complejoId, accessToken]);
+
+  if (tipo === "cancha") {
+    if (error) return <p className="text-red-400">{error}</p>;
+    if (turnos === null) return <p className="text-slate-400">Cargando turnos de hoy…</p>;
+    if (turnos.length === 0) return <p className="text-slate-400">No hay turnos confirmados hoy.</p>;
+    return (
+      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1" style={{ colorScheme: "dark" }} role="radiogroup" aria-label="Turno">
+        {turnos.map((t) => {
+          const elegido = destino?.turno?.id === t.id;
+          return (
+            <button key={t.id} type="button" role="radio" aria-checked={elegido} onClick={() => onElegir({ tipo: "cancha", turno: t })}
+              className="w-full text-left px-3 py-2 rounded-lg border transition" style={elegido ? { borderColor: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44" }}>
+              <span className="block text-slate-100"><span className="font-semibold">{t.cancha} · {hora(t.inicio)}</span> · {t.nombre}</span>
+              <span className="block text-xs text-slate-400">{t.cobrado ? "Cancha pagada" : "Cancha sin cobrar"}{Number(t.pendiente) > 0 && <span className="text-amber-300"> · {formatoPrecio(t.pendiente)} de consumos sin cobrar</span>}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Cliente: cuentas y personas de la agenda, sin repetir (por WhatsApp o por nombre)
+  if (destino?.tipo === "cliente") {
+    return (
+      <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border" style={{ borderColor: BRAND.lime, backgroundColor: `${BRAND.lime}14` }}>
+        <span className="min-w-0">
+          <span className="block font-semibold text-slate-100 truncate">{destino.nombre}</span>
+          <span className="block text-xs text-slate-400">{destino.cuentaId ? `Cuenta${Number(destino.debe) > 0 ? ` · ya debe ${formatoPrecio(destino.debe)}` : " al día"}` : "Se le crea la cuenta"}</span>
+        </span>
+        <button type="button" onClick={() => onElegir(null)} className="text-xs text-slate-400 underline shrink-0">Cambiar</button>
+      </div>
+    );
+  }
+  const texto = claveNombre(buscar);
+  const opciones = [];
+  const vistos = new Set();
+  for (const c of cuentas || []) {
+    opciones.push({ cuentaId: c.id, nombre: c.nombre, telefono: c.telefono, debe: Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0) });
+    vistos.add(c.telefono ? `t${c.telefono}` : `n${claveNombre(c.nombre)}`);
+    vistos.add(`n${claveNombre(c.nombre)}`);
+  }
+  for (const r of agenda) {
+    if (!r.nombre) continue;
+    const k = r.telefono ? `t${r.telefono}` : `n${claveNombre(r.nombre)}`;
+    if (vistos.has(k) || vistos.has(`n${claveNombre(r.nombre)}`)) continue;
+    vistos.add(k); vistos.add(`n${claveNombre(r.nombre)}`);
+    opciones.push({ cuentaId: null, nombre: r.nombre, telefono: r.telefono || null, debe: 0 });
+  }
+  const coinciden = texto ? opciones.filter((o) => claveNombre(o.nombre).includes(texto) || (o.telefono || "").includes(buscar.replace(/\D/g, "") || "~")) : [];
+  const exacta = coinciden.some((o) => claveNombre(o.nombre) === texto);
+  return (
+    <div className="space-y-2">
+      <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar cliente por nombre o WhatsApp" aria-label="Buscar cliente" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+      {error && <p className="text-red-400">{error}</p>}
+      {cuentas === null ? <p className="text-slate-400">Cargando clientes…</p> : texto && (
+        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1" style={{ colorScheme: "dark" }}>
+          {coinciden.slice(0, 8).map((o) => (
+            <button key={o.cuentaId || `${o.nombre}|${o.telefono}`} type="button" onClick={() => onElegir({ tipo: "cliente", ...o })} className="w-full text-left px-3 py-2 rounded-lg border hover:bg-white/5" style={{ borderColor: "#1f3a44" }}>
+              <span className="block text-slate-100">{o.nombre}</span>
+              <span className="block text-xs text-slate-400">{o.telefono ? `WhatsApp …${o.telefono.slice(-4)} · ` : ""}{o.cuentaId ? (o.debe > 0 ? `debe ${formatoPrecio(o.debe)}` : "cuenta al día") : "de la agenda, sin cuenta"}</span>
+            </button>
+          ))}
+          {!exacta && buscar.trim().length >= 2 && (
+            <button type="button" onClick={() => onElegir({ tipo: "cliente", cuentaId: null, nombre: buscar.trim().slice(0, 80), telefono: null, debe: 0 })} className="w-full text-left px-3 py-2 rounded-lg border border-dashed text-cyan-300" style={{ borderColor: "#1f3a44" }}>
+              + Cuenta nueva: {buscar.trim()}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const MEDIOS_MOSTRADOR = [["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"]];
 const MAS_VENDIDOS = "__mas_vendidos";
 
 /* Mostrador: productos a la izquierda (buscador, categorías y tarjetas) y el ticket a la derecha.
-   Se cobra en el momento con un medio de pago; descuento, pago dividido, crédito o saldo a cuenta
-   van por "Descuento / dividir pago". Las ventas del día se ven en Caja del día. */
+   "Cargar a": Mostrador (se cobra en el momento con un medio de pago; descuento, pago dividido,
+   crédito o seña van por "Descuento / dividir pago"), Cancha (queda en el turno de hoy y se cobra
+   desde la agenda; ver 20261029_cargar_a_turno.sql) o Cliente (queda en su cuenta).
+   Las ventas del día se ven en Caja del día. */
 function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) {
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [productos, setProductos] = useState(null);
@@ -13733,6 +13883,9 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
   const [dividiendo, setDividiendo] = useState(false);
   const [aviso, setAviso] = useState(null); // { texto, tono: "ok" | "alerta" }
   const [vacio, setVacio] = useState(false); // tocó Cobrar sin productos: se avisa abajo del botón
+  const [cargarA, setCargarA] = useState("mostrador"); // mostrador | cancha | cliente
+  const [destino, setDestino] = useState(null); // el turno o el cliente elegido
+  const [sinDestino, setSinDestino] = useState(false); // tocó "Cargar a la cuenta" sin elegir
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
 
   const load = useCallback(async () => {
@@ -13801,12 +13954,46 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
     setSuelto(null); setVacio(false);
   };
   const vendido = (r, conVuelto = null) => {
-    setDividiendo(false); vaciar(); setMedio("efectivo");
+    setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setSinDestino(false);
     setAviso({ texto: `Venta #${r.numero} cobrada: ${formatoPrecio(r.total) || "$0"}${Number(r.a_cuenta) > 0 ? ` (${formatoPrecio(r.a_cuenta)} a cuenta)` : ""}${conVuelto ? ` · Vuelto ${formatoPrecio(conVuelto)}` : ""}.`, tono: "ok" });
     load();
   };
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+  // Cancha o Cliente: no se cobra ahora, queda en el turno o en la cuenta
+  const cargarALaCuenta = async () => {
+    if (!destino) { setSinDestino(true); return; }
+    setBusy(true);
+    try {
+      const items = itemsParaVender(carrito, sueltos);
+      if (destino.tipo === "cancha") {
+        const r = await supabaseRpc("vender", { p_complejo: complejoId, p_items: items, p_pagos: [], p_ajuste: 0, p_cuenta: null, p_reserva: destino.turno.id }, accessToken);
+        const t = destino.turno;
+        vendido(r);
+        setAviso({ texto: `Cargado al turno de ${t.nombre} (${t.cancha} · ${hora(t.inicio)}): ${formatoPrecio(r.total) || "$0"}. Se cobra desde la agenda.`, tono: "ok" });
+      } else {
+        let cuentaId = destino.cuentaId;
+        if (!cuentaId) {
+          try {
+            const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: destino.nombre, telefono: destino.telefono || null }, accessToken, prefer: "return=representation" });
+            cuentaId = c.id;
+          } catch (e) {
+            // Ya hay una cuenta con ese WhatsApp: se usa esa
+            if (e.pgCode !== "23505" || !destino.telefono) throw e;
+            const [c] = await supabaseTable(`cuentas?complejo_id=eq.${encodeURIComponent(complejoId)}&telefono=eq.${destino.telefono}&select=id`, { accessToken });
+            cuentaId = c.id;
+          }
+        }
+        const r = await supabaseRpc("vender", { p_complejo: complejoId, p_items: items, p_pagos: [], p_ajuste: 0, p_cuenta: cuentaId }, accessToken);
+        const nombre = destino.nombre;
+        vendido(r);
+        setAviso({ texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Cuentas.`, tono: "ok" });
+      }
+    } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
+    finally { setBusy(false); }
+  };
   const cobrar = async () => {
     if (renglones.length === 0) { setVacio(true); return; }
+    if (cargarA !== "mostrador") { await cargarALaCuenta(); return; }
     setBusy(true);
     try {
       const r = await supabaseRpc("vender", {
@@ -13820,7 +14007,19 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
 
   const ticket = (
     <div className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.75)" }}>
-      <div className="flex items-center justify-between">
+      <div className="space-y-2">
+        <p className="text-sm text-slate-400">Cargar a</p>
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl border border-teal-900" role="radiogroup" aria-label="Cargar a">
+          {[["mostrador", "Mostrador"], ["cancha", "Cancha"], ["cliente", "Cliente"]].map(([k, l]) => (
+            <button key={k} type="button" role="radio" aria-checked={cargarA === k} onClick={() => { setCargarA(k); setDestino(null); setSinDestino(false); }}
+              className="py-2 rounded-lg text-sm transition" style={cargarA === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+        {cargarA !== "mostrador" && (
+          <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
+        )}
+      </div>
+      <div className="flex items-center justify-between border-t border-teal-900 pt-3">
         <h2 className="text-sm text-slate-400">Ticket{cantidadTotal > 0 ? ` · ${cantidadTotal} producto${cantidadTotal === 1 ? "" : "s"}` : ""}</h2>
         {renglones.length > 0 && <button type="button" onClick={vaciar} className="text-xs text-slate-400 hover:text-red-300">Vaciar</button>}
       </div>
@@ -13857,12 +14056,12 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
         <span className="text-slate-300">Total</span>
         <span className="text-3xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal) || "$0"}</span>
       </div>
-      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Medio de pago">
+      {cargarA === "mostrador" && <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Medio de pago">
         {MEDIOS_MOSTRADOR.map(([m, l]) => (
           <button key={m} type="button" role="radio" aria-checked={medio === m} onClick={() => setMedio(m)} className="py-2.5 rounded-xl border text-sm transition" style={medio === m ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
         ))}
-      </div>
-      {medio === "efectivo" && renglones.length > 0 && (
+      </div>}
+      {cargarA === "mostrador" && medio === "efectivo" && renglones.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-slate-400">
           <span>Paga con</span>
           <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$ (opcional)" aria-label="Paga con" className="w-32 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
@@ -13870,10 +14069,11 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
         </div>
       )}
       <button type="button" disabled={busy} onClick={cobrar} className="w-full py-3.5 rounded-xl font-bold text-lg disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-        {busy ? "Cobrando…" : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
+        {busy ? "Guardando…" : cargarA !== "mostrador" ? `Cargar a la cuenta${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
       </button>
+      {sinDestino && renglones.length > 0 && <p role="alert" className="text-center text-amber-300">{cargarA === "cancha" ? "Elegí a qué turno lo cargás." : "Elegí o escribí el cliente."}</p>}
       {vacio && renglones.length === 0 && <p role="alert" className="text-center text-amber-300">Agregá al menos un producto.</p>}
-      {renglones.length > 0 && (
+      {renglones.length > 0 && cargarA === "mostrador" && (
         <button type="button" onClick={() => setDividiendo(true)} className="block mx-auto text-xs text-slate-400 hover:text-slate-200 underline">Descuento / dividir pago</button>
       )}
     </div>
@@ -14476,7 +14676,7 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
           {cobrandoTodo && <p className="text-xs text-teal-400">Primero se cancela la inscripción y lo que sobra va a los consumos.</p>}
           <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
           <div className="flex flex-wrap gap-2">
-            {MEDIOS_COBRO.map(([m, l]) => (
+            {MEDIOS_CUENTA.map(([m, l]) => (
               <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
             ))}
           </div>
