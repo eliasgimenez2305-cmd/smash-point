@@ -11,3 +11,7 @@
 @media (prefers-reduced-motion: reduce) {
   .sp-fade-in { animation: none; }
 }
+
+/* Filas que se deslizan sin mostrar la barra (días del buscador de turnos) */
+.sp-sin-barra { scrollbar-width: none; }
+.sp-sin-barra::-webkit-scrollbar { display: none; }

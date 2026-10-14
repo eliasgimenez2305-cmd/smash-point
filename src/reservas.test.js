@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
+import { aMinutos, etiquetaHora, horarioCancha, duracionesOfrecidas, iniciosPosibles, instante, minutoEnGrilla, motivoNoEntra, filasAgenda, fechasSemanales, sumarDias, hoyArgentina, leerPrecio, etiquetaFecha, iniciosLibres, horariosConLibres, franjaDe, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 const cancha1 = { id: "c1", apertura: "14:00:00", cierre: "22:00:00", precio_60: 10000, precio_90: 14000, precio_120: null };
 const nocturna = { id: "c2", apertura: "18:00", cierre: "01:00", precio_90: 15000 };
@@ -119,4 +119,25 @@ test("turnos fijos: agrupa por serie con la próxima y la última fecha", () => 
   assert.equal(g[1].ultima.id, "a");
   assert.equal(g[1].cantidad, 2);
   assert.deepEqual(g[1].fechas, ["2026-10-20", "2026-10-27"]);
+});
+
+test("cada horario con todas sus canchas libres", () => {
+  const a = { id: "a", apertura: "18:00", cierre: "21:00", precio_90: 15000 };
+  const b = { id: "b", apertura: "18:00", cierre: "21:00", precio_90: 18000 };
+  const ocupado = [{ cancha_id: "a", estado: "confirmada", inicio: instante("2026-10-16", 18 * 60), fin: instante("2026-10-16", 19 * 60 + 30) }];
+  const ahora = Date.parse("2026-10-16T12:00:00-03:00");
+  const h = horariosConLibres([a, b], "2026-10-16", 90, ocupado, { ahora });
+  assert.deepEqual(h.map((x) => [etiquetaHora(x.desde), x.canchas.map((c) => c.id).join("")]), [
+    ["18:00", "b"], ["18:30", "b"], ["19:00", "b"], ["19:30", "ab"],
+  ]);
+  assert.deepEqual(horariosConLibres([a], "2026-10-16", 120, [], { ahora }), []);
+});
+
+test("franjas del día", () => {
+  assert.equal(franjaDe(9 * 60), "manana");
+  assert.equal(franjaDe(12 * 60 + 30), "manana");
+  assert.equal(franjaDe(14 * 60 + 30), "tarde");
+  assert.equal(franjaDe(17 * 60 + 30), "tarde");
+  assert.equal(franjaDe(18 * 60 + 30), "noche");
+  assert.equal(franjaDe(24 * 60 + 30), "noche");
 });

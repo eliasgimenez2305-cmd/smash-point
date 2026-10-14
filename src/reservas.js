@@ -112,6 +112,29 @@ export function iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin = 0,
   return [...porInicio.entries()].sort((a, b) => a[0] - b[0]).map(([desde, cancha]) => ({ desde, cancha }));
 }
 
+/* Cada horario con todas las canchas libres en ese momento (para mostrar "2 libres" y elegir cancha) */
+export function horariosConLibres(canchas, fecha, duracion, ocupado, { ahora = Date.now() } = {}) {
+  const porInicio = new Map();
+  for (const c of canchas) {
+    if (!duracionesOfrecidas(c).includes(duracion)) continue;
+    for (const m of iniciosPosibles(c, duracion)) {
+      if (Date.parse(instante(fecha, m)) <= ahora) continue;
+      if (motivoNoEntra(c, fecha, m, duracion, ocupado) !== null) continue;
+      if (!porInicio.has(m)) porInicio.set(m, []);
+      porInicio.get(m).push(c);
+    }
+  }
+  return [...porInicio.entries()].sort((a, b) => a[0] - b[0]).map(([desde, libres]) => ({ desde, canchas: libres }));
+}
+
+/* Franja del día de un horario: mañana (antes de las 13), tarde (hasta las 18) o noche */
+export const FRANJAS = [["manana", "Mañana"], ["tarde", "Tarde"], ["noche", "Noche"]];
+export function franjaDe(minuto) {
+  if (minuto < 13 * 60) return "manana";
+  if (minuto < 18 * 60) return "tarde";
+  return "noche";
+}
+
 /* Precio más barato de esa duración entre las canchas ("desde $…") */
 export function precioDesde(canchas, duracion) {
   const precios = canchas.map((c) => precioDe(c, duracion)).filter((p) => p != null);

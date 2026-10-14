@@ -12,7 +12,7 @@ import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre } from "./clientes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -5739,21 +5739,20 @@ function DirectoryAvatar({ url, name, color, size = 64 }) {
   return <span className="rounded-full flex items-center justify-center shrink-0" style={{ ...style, ...F.display, color, fontSize: size * 0.4 }}>{(name || "?").trim().charAt(0).toUpperCase()}</span>;
 }
 
-/* Pestaña pública "Canchas": fichas de los complejos (logo, nombre, dirección, Instagram, WhatsApp) */
-function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisReservas }) {
+/* Pestaña pública "Complejos": el buscador de turnos (filtros arriba y una tarjeta por complejo con
+   reserva online) y, abajo, el resto de los complejos de la ciudad */
+function VenuesPublicView({ venues, complejos = [], organizers = [], jugador, onReservar, onMisReservas }) {
   const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
   const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas && c.modulo_reservas !== false);
   return (
-    <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-      <div className="flex items-start justify-between gap-3">
-        <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
-        {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline" style={F.body}>Mis reservas</button>}
+    <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-6" style={F.body}>
+      <div className="flex items-end justify-between gap-3 pt-2">
+        <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>Reservá tu cancha</h1>
+        {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline">Mis reservas</button>}
       </div>
-      <div className="mt-4">
-        <BuscadorTurnos venues={venues} complejos={complejos} onElegir={onReservar} />
-      </div>
-      <p className="text-sm text-teal-300 mb-5" style={F.body}>Dónde jugar en Gualeguaychú.</p>
-      {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá los complejos de la ciudad.</p>}
+      <BuscadorTurnos venues={venues} complejos={complejos} organizers={organizers} sinReservaOnline={sorted.filter((v) => !conReservas(v.id)).length} onElegir={onReservar} />
+      <h2 className="text-base font-semibold text-slate-100 mt-8 mb-3">Dónde jugar en Gualeguaychú</h2>
+      {sorted.length === 0 && <p className="opacity-60">Pronto vas a encontrar acá los complejos de la ciudad.</p>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {sorted.map((v, i) => {
           const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
@@ -5764,14 +5763,14 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
                 <div className="min-w-0">
                   <h2 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{v.name}</h2>
                   {v.address && (
-                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${v.address}, Gualeguaychú`)}`} target="_blank" rel="noopener noreferrer" className="text-sm text-teal-300 underline decoration-teal-700" style={F.body}>
+                    <a href={mapsLink(v.address)} target="_blank" rel="noopener noreferrer" className="text-sm text-teal-300 underline decoration-teal-700">
                       📍 {v.address}
                     </a>
                   )}
                 </div>
               </div>
               {conReservas(v.id) && (
-                <button type="button" onClick={() => onReservar(v.id)} className="w-full mt-3 px-3 py-2.5 rounded-full text-sm font-semibold" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+                <button type="button" onClick={() => onReservar(v.id)} className="w-full mt-3 px-3 py-2.5 rounded-full text-sm font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
                   Reservar cancha
                 </button>
               )}
@@ -5784,27 +5783,61 @@ function VenuesPublicView({ venues, complejos = [], jugador, onReservar, onMisRe
   );
 }
 
+const mapsLink = (address) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${address}, Gualeguaychú`)}`;
+
 /* ---------- Reservas: lado del jugador ---------- */
 
-/* Buscador de turnos en todos los complejos a la vez: día, desde qué hora y duración; una tarjeta
-   por complejo con sus horarios libres. Tocar un horario lleva directo a confirmar (onElegir). */
-function BuscadorTurnos({ venues, complejos, onElegir }) {
+/* "hoy", "mañana", "el viernes 16" */
+function diaEnTexto(fecha, hoy) {
+  if (fecha === hoy) return "hoy";
+  if (fecha === sumarDias(hoy, 1)) return "mañana";
+  const [dia, num] = etiquetaFecha(fecha).split(" ");
+  return `el ${dia.toLowerCase()} ${num.slice(0, 2)}`;
+}
+
+/* Portada de un complejo sin foto: una cancha de pádel vista desde arriba, con los colores de la marca */
+function CanchaDibujo({ className = "" }) {
+  return (
+    <svg viewBox="0 0 320 130" preserveAspectRatio="xMidYMid slice" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id="sp-cancha-fondo" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#0b2a33" />
+          <stop offset="1" stopColor="#0f3d48" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="130" fill="url(#sp-cancha-fondo)" />
+      <rect x="80" y="15" width="160" height="100" rx="2" fill="#1d5a68" stroke="#d8f3f6" strokeWidth="2" />
+      <line x1="124.5" y1="15" x2="124.5" y2="115" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="195.5" y1="15" x2="195.5" y2="115" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="124.5" y1="65" x2="195.5" y2="65" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="160" y1="10" x2="160" y2="120" stroke="#ffffff" strokeWidth="2.6" />
+      <circle cx="160" cy="10" r="2.5" fill={BRAND.lime} />
+      <circle cx="160" cy="120" r="2.5" fill={BRAND.lime} />
+    </svg>
+  );
+}
+
+/* Buscador de turnos en todos los complejos a la vez: día, franja del día y duración (fijos arriba al
+   bajar) y una tarjeta por complejo con sus horarios libres. Elegir un horario abre adentro de la
+   tarjeta el resumen con "Reservar" (onElegir sigue con el flujo de siempre). */
+function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline = 0, onElegir }) {
   const hoy = hoyArgentina();
   const habilitados = complejos.filter((c) => c.reservas_habilitadas && c.modulo_reservas !== false && venues.some((v) => v.id === c.id));
   const ids = habilitados.map((c) => c.id).join(",");
-  const [canchas, setCanchas] = useState(null);
+  const [canchas, setCanchas] = useState(null); // todas las activas (las de reserva online, para los turnos)
   const [fecha, setFecha] = useState(hoy);
-  const [hora, setHora] = useState(""); // "" = cualquier hora
+  const [franja, setFranja] = useState("todo"); // todo | manana | tarde | noche
   const [duracion, setDuracion] = useState(null);
   const [ocupado, setOcupado] = useState(null); // { [complejoId]: [...] }
   const [error, setError] = useState("");
+  const diasRef = useRef(null);
 
   useEffect(() => {
     if (!ids) return;
-    supabaseTable(`canchas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})&activa=is.true&reserva_online=is.true&order=orden.asc,created_at.asc`)
+    supabaseTable(`canchas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})&activa=is.true&order=orden.asc,created_at.asc`)
       .then((rows) => {
         setCanchas(rows || []);
-        const durs = DURACIONES.filter((d) => (rows || []).some((c) => duracionesOfrecidas(c).includes(d)));
+        const durs = DURACIONES.filter((d) => (rows || []).some((c) => c.reserva_online && duracionesOfrecidas(c).includes(d)));
         setDuracion((cur) => cur ?? (durs.includes(90) ? 90 : durs[0] ?? null));
       })
       .catch(() => setError("No se pudieron cargar los turnos. Revisá la conexión."));
@@ -5822,80 +5855,175 @@ function BuscadorTurnos({ venues, complejos, onElegir }) {
 
   if (habilitados.length === 0) return null;
   const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
-  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
-  const desdeMin = hora ? Number(hora) : 0;
+  const online = (canchas || []).filter((c) => c.reserva_online);
+  const duraciones = DURACIONES.filter((d) => online.some((c) => duracionesOfrecidas(c).includes(d)));
   const tarjetas = canchas && ocupado && duracion
     ? habilitados.map((c) => {
         const venue = venues.find((v) => v.id === c.id);
-        const suyas = canchas.filter((x) => x.complejo_id === c.id);
-        return { venue, libres: iniciosLibres(suyas, fecha, duracion, ocupado[c.id] || [], { desdeMin }), precio: precioDesde(suyas, duracion), ofrece: suyas.some((x) => duracionesOfrecidas(x).includes(duracion)) };
-      }).filter((t) => t.ofrece).sort((a, b) => (b.libres.length > 0) - (a.libres.length > 0) || a.venue.name.localeCompare(b.venue.name, "es"))
+        const suyas = online.filter((x) => x.complejo_id === c.id);
+        const horarios = horariosConLibres(suyas, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+        return {
+          venue, complejo: c, horarios,
+          totalCanchas: canchas.filter((x) => x.complejo_id === c.id).length,
+          portada: organizers.find((o) => o.id === c.dueno_id)?.coverUrl || "",
+          precio: precioDesde(suyas, duracion), ofrece: suyas.some((x) => duracionesOfrecidas(x).includes(duracion)),
+        };
+      }).filter((t) => t.ofrece).sort((a, b) => (b.horarios.length > 0) - (a.horarios.length > 0) || a.venue.name.localeCompare(b.venue.name, "es"))
     : null;
-  const chip = "shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border";
+  const conLibres = (tarjetas || []).filter((t) => t.horarios.length > 0).length;
+  const segmento = (activo) => (activo ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1" });
+  const moverDias = (d) => diasRef.current?.scrollBy({ left: d * 260, behavior: "smooth" });
+  const nombreFranja = FRANJAS.find(([k]) => k === franja)?.[1];
 
   return (
-    <section className="mb-8" style={F.body}>
-      <h2 className="text-lg uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Reservá tu cancha</h2>
-      <p className="text-sm text-teal-300 mb-3">Elegí el día y la hora, y mirá dónde hay lugar.</p>
-      <div className="flex gap-2 overflow-x-auto pb-2 mb-2" style={{ scrollbarWidth: "none", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
-        {dias.map((d) => (
-          <button key={d} type="button" onClick={() => setFecha(d)} className={`${chip} ${fecha === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{etiquetaDiaCorta(d, hoy)}</button>
-        ))}
+    <div className="mt-3">
+      {/* Filtros: quedan fijos arriba al bajar */}
+      <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 space-y-2 border-b border-teal-900/70" style={{ backgroundColor: "rgba(6,15,20,0.94)", backdropFilter: "blur(6px)" }}>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => moverDias(-1)} className="hidden sm:flex shrink-0 w-9 h-9 rounded-full border border-teal-800 text-slate-300 items-center justify-center hover:border-teal-600" aria-label="Días anteriores">‹</button>
+          <div ref={diasRef} className="flex-1 min-w-0 flex gap-2 overflow-x-auto sp-sin-barra">
+            {dias.map((d) => (
+              <button key={d} type="button" onClick={() => setFecha(d)} aria-pressed={fecha === d} className="shrink-0 whitespace-nowrap px-3.5 py-1.5 rounded-full text-sm border transition" style={fecha === d ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{etiquetaDiaCorta(d, hoy)}</button>
+            ))}
+          </div>
+          <button type="button" onClick={() => moverDias(1)} className="hidden sm:flex shrink-0 w-9 h-9 rounded-full border border-teal-800 text-slate-300 items-center justify-center hover:border-teal-600" aria-label="Días siguientes">›</button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex gap-1 p-1 rounded-full border border-teal-900" role="radiogroup" aria-label="Hora">
+            {[["todo", "Todo el día"], ...FRANJAS].map(([k, l]) => (
+              <button key={k} type="button" role="radio" aria-checked={franja === k} onClick={() => setFranja(k)} className="px-3 py-1 rounded-full text-sm whitespace-nowrap" style={segmento(franja === k)}>{l}</button>
+            ))}
+          </div>
+          {duraciones.length > 1 && (
+            <div className="flex gap-1 p-1 rounded-full border border-teal-900" role="radiogroup" aria-label="Duración">
+              {duraciones.map((d) => (
+                <button key={d} type="button" role="radio" aria-checked={duracion === d} onClick={() => setDuracion(d)} className="px-3 py-1 rounded-full text-sm whitespace-nowrap" style={segmento(duracion === d)}>{d} min</button>
+              ))}
+            </div>
+          )}
+        </div>
+        {tarjetas && (
+          <p className="text-sm text-slate-400">
+            {conLibres === 0 ? "Ningún complejo" : conLibres === 1 ? "1 complejo" : `${conLibres} complejos`} con turnos libres {diaEnTexto(fecha, hoy)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}
+            {sinReservaOnline > 0 && ` · ${sinReservaOnline} más reservan por WhatsApp`}
+          </p>
+        )}
       </div>
-      <div className="flex flex-wrap gap-2 mb-4">
-        <select value={hora} onChange={(e) => setHora(e.target.value)} className={`px-3 py-1.5 rounded-full border text-sm outline-none focus:border-lime-400 ${hora ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`} style={{ ...F.body, backgroundColor: "rgba(8,18,24,0.7)", colorScheme: "dark" }} aria-label="Desde qué hora">
-          <option value="">Cualquier hora</option>
-          {Array.from({ length: 17 }, (_, i) => (i + 7) * 60).map((m) => <option key={m} value={m}>Desde las {etiquetaHora(m)}</option>)}
-        </select>
-        {duraciones.length > 1 && (
-          <div className="flex gap-1 p-1 rounded-full border border-teal-800" style={{ backgroundColor: "rgba(8,18,24,0.7)" }}>
-            {duraciones.map((d) => (
-              <button key={d} type="button" onClick={() => setDuracion(d)} className={`px-3 py-0.5 rounded-full text-sm ${duracion === d ? "text-[#14181f] font-semibold" : "text-teal-300"}`} style={duracion === d ? { backgroundColor: BRAND.lime } : undefined}>{d} min</button>
+
+      <div className="mt-4">
+        {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+        {!tarjetas ? (
+          !error && <p className="text-sm text-slate-400">Buscando turnos…</p>
+        ) : tarjetas.length === 0 ? (
+          <p className="text-sm text-slate-400">Ningún complejo ofrece turnos de {duracion} min.</p>
+        ) : (
+          <div className={`grid gap-4 ${tarjetas.length > 1 ? "lg:grid-cols-2" : ""}`}>
+            {tarjetas.map((t) => (
+              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} fecha={fecha} hoy={hoy} duracion={duracion} franja={franja} onReservar={onElegir} />
             ))}
           </div>
         )}
       </div>
-      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
-      {!tarjetas ? (
-        !error && <p className="text-sm opacity-60">Buscando turnos…</p>
-      ) : tarjetas.length === 0 ? (
-        <p className="text-sm text-teal-300">Ningún complejo ofrece turnos de {duracion} min.</p>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {tarjetas.map(({ venue, libres, precio }, i) => {
-            const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
-            return (
-              <article key={venue.id} className="rounded-2xl p-4 min-w-0" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
-                <div className="flex items-center gap-3 mb-3">
-                  <DirectoryAvatar url={venue.logoUrl} name={venue.name} color={color} size={52} />
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{venue.name}</h3>
-                    {venue.address && <p className="text-xs text-teal-400 truncate">📍 {venue.address}</p>}
-                  </div>
-                  {precio != null && (
-                    <div className="text-right shrink-0">
-                      <p className="text-[10px] uppercase text-teal-500">desde</p>
-                      <p className="text-sm font-semibold" style={{ color }}>{formatoPrecio(precio)}</p>
-                    </div>
-                  )}
-                </div>
-                {libres.length === 0 ? (
-                  <p className="text-sm text-teal-500">Sin turnos libres{hora ? " desde esa hora" : " este día"}.</p>
-                ) : (
-                  <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "thin", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
-                    {libres.map(({ desde }) => (
-                      <button key={desde} type="button" onClick={() => onElegir(venue.id, { fecha, duracion, desde })} className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold border border-lime-400 text-lime-400 hover:bg-lime-400/10">
-                        {etiquetaHora(desde)}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </article>
-            );
-          })}
+    </div>
+  );
+}
+
+/* Tarjeta de un complejo con reserva online: portada, logo, datos, precio, horarios libres en grilla
+   (Mañana / Tarde / Noche, con cuántas canchas quedan) y, al elegir uno, el resumen con "Reservar" */
+function TarjetaComplejo({ venue, horarios, totalCanchas, portada, precio, fecha, hoy, duracion, franja, onReservar }) {
+  const [elegido, setElegido] = useState(null); // { desde, canchas }
+  const [canchaId, setCanchaId] = useState(null); // null = cualquiera de las libres
+  const cancha = elegido && canchaId ? elegido.canchas.find((c) => c.id === canchaId) : null;
+  const precioElegido = elegido ? (cancha ? precioDe(cancha, duracion) : precioDesde(elegido.canchas, duracion)) : null;
+  const grupos = FRANJAS.map(([k, l]) => [l, horarios.filter((h) => franjaDe(h.desde) === k)]).filter(([, hs]) => hs.length > 0);
+  const elegir = (h) => {
+    if (elegido?.desde === h.desde) { setElegido(null); return; }
+    setElegido(h); setCanchaId(h.canchas.length === 1 ? h.canchas[0].id : null);
+  };
+  const reservar = () => onReservar(venue.id, { fecha, duracion, desde: elegido.desde, canchaId: canchaId || elegido.canchas[0].id });
+  const nombreFranja = FRANJAS.find(([k]) => k === franja)?.[1];
+
+  return (
+    <article className="rounded-2xl overflow-hidden border min-w-0" style={{ borderColor: `${BRAND.lime}40`, backgroundColor: "rgba(10,24,30,0.85)" }}>
+      <div className="relative h-36 sm:h-44">
+        {portada
+          ? <img src={portada} alt="" className="absolute inset-0 w-full h-full object-cover" />
+          : <CanchaDibujo className="absolute inset-0 w-full h-full" />}
+        <span className="absolute top-3 left-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
+          Reserva online
+        </span>
+      </div>
+      <div className="px-4 pb-4">
+        <div className="relative z-10 -mt-9 mb-2">
+          <span className="inline-block rounded-full p-0.5" style={{ backgroundColor: "#0a181e" }}>
+            <DirectoryAvatar url={venue.logoUrl} name={venue.name} color={BRAND.lime} size={68} />
+          </span>
         </div>
-      )}
-    </section>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-lg font-bold text-slate-100 leading-tight break-words">{venue.name}</h3>
+            {venue.address && (
+              <a href={mapsLink(venue.address)} target="_blank" rel="noopener noreferrer" className="text-sm text-cyan-300 hover:underline">📍 {venue.address} · Cómo llegar</a>
+            )}
+          </div>
+          {precio != null && (
+            <div className="text-right shrink-0">
+              <p className="text-xs text-slate-400">{duracion} min desde</p>
+              <p className="text-xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(precio)}</p>
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2 mt-3">
+          {totalCanchas > 0 && <span className="px-2.5 py-1 rounded-full text-xs text-slate-300 border border-teal-900">{totalCanchas} cancha{totalCanchas === 1 ? "" : "s"}</span>}
+        </div>
+
+        <div className="border-t border-teal-900/70 mt-4 pt-3 space-y-3">
+          {horarios.length === 0 ? (
+            <p className="text-sm text-slate-400">No hay turnos libres {diaEnTexto(fecha, hoy)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}.</p>
+          ) : grupos.map(([nombre, hs]) => (
+            <div key={nombre}>
+              <p className="text-xs text-slate-400 mb-1.5">{nombre}</p>
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(4.75rem, 1fr))" }}>
+                {hs.map((h) => {
+                  const sel = elegido?.desde === h.desde;
+                  const ultima = h.canchas.length === 1;
+                  return (
+                    <button key={h.desde} type="button" onClick={() => elegir(h)} aria-pressed={sel} aria-label={`${etiquetaHora(h.desde)}, ${ultima ? "última cancha libre" : `${h.canchas.length} canchas libres`}`}
+                      className="rounded-xl border py-1.5 text-center transition" style={sel ? { backgroundColor: BRAND.lime, borderColor: BRAND.lime } : { borderColor: "#1f3a44" }}>
+                      <span className="block font-bold tabular-nums" style={{ color: sel ? "#14181f" : BRAND.lime }}>{etiquetaHora(h.desde)}</span>
+                      <span className="block text-[11px]" style={{ color: sel ? "#14181f" : ultima ? "#fbbf24" : "#94a3b8" }}>{ultima ? "Última" : `${h.canchas.length} libres`}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {elegido && (
+          <div className="mt-4 rounded-xl border p-3 space-y-3" style={{ borderColor: `${BRAND.lime}55`, backgroundColor: `${BRAND.lime}0f` }}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-100">
+                <span className="font-semibold">{etiquetaDiaCorta(fecha, hoy)} · {etiquetaHora(elegido.desde)} a {etiquetaHora(elegido.desde + duracion)}</span>
+                {" · "}{cancha ? cancha.nombre : elegido.canchas.length > 1 ? "Cancha a elegir" : elegido.canchas[0].nombre}
+                {precioElegido != null && <span className="font-semibold" style={{ color: BRAND.lime }}> · {formatoPrecio(precioElegido)}</span>}
+              </p>
+              <button type="button" onClick={reservar} className="px-5 py-2.5 rounded-xl font-bold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Reservar</button>
+            </div>
+            {elegido.canchas.length > 1 && (
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Cancha">
+                {elegido.canchas.map((c) => (
+                  <button key={c.id} type="button" role="radio" aria-checked={canchaId === c.id} onClick={() => setCanchaId(canchaId === c.id ? null : c.id)} className="px-3 py-1.5 rounded-full text-sm border" style={canchaId === c.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>
+                    {c.nombre} · {formatoPrecio(precioDe(c, duracion))}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -6171,7 +6299,10 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
     const ini = pendienteInicial.current;
     if (!ini || !canchas || !ocupado || duracion !== ini.duracion || fecha !== ini.fecha) return;
     pendienteInicial.current = null;
-    const libre = iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin: ini.desde }).find((l) => l.desde === ini.desde);
+    const elegida = ini.canchaId ? canchas.find((c) => c.id === ini.canchaId) : null;
+    const libre = elegida
+      ? (motivoNoEntra(elegida, fecha, ini.desde, duracion, ocupado) === null ? { cancha: elegida, desde: ini.desde } : null)
+      : iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin: ini.desde }).find((l) => l.desde === ini.desde);
     if (libre) elegir(libre.cancha, libre.desde);
     else setError("Ese horario se acaba de ocupar. Elegí otro.");
   }, [canchas, ocupado, duracion, fecha]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6615,7 +6746,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   } else if (tab === "canchas" && reservarVenue) {
     body = <ReservarCancha key={reservarVenue.id} venue={reservarVenue} inicial={reservarInicial} jugadorApi={jugadorApi} onBack={volverAComplejos} onMisReservas={verMisReservas} />;
   } else if (tab === "canchas") {
-    body = <VenuesPublicView venues={venues} complejos={complejos} jugador={jugadorApi?.jugador} onReservar={(id, inicial = null) => { setReservarId(id); setReservarInicial(inicial); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
+    body = <VenuesPublicView venues={venues} complejos={complejos} organizers={organizers} jugador={jugadorApi?.jugador} onReservar={(id, inicial = null) => { setReservarId(id); setReservarInicial(inicial); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
   } else if (selectedEvent && eventTournaments.length > 0) {
@@ -16319,7 +16450,7 @@ function SmashPointAppInner() {
 
   return (
     <ComplexesContext.Provider value={venues}>
-    <div className="min-h-screen overflow-x-hidden" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
+    <div className="min-h-screen overflow-x-clip" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
       {showFooterAds && (
         // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
