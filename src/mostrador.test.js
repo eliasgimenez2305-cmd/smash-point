@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender } from "./mostrador.js";
+import { rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos } from "./mostrador.js";
 
 test("rubros: primero los sugeridos en su orden, después los propios", () => {
   const ps = [{ rubro: "Paletas" }, { rubro: "Grips" }, { rubro: "Bebidas" }, { rubro: "" }, { rubro: "Paletas" }, {}];
@@ -39,4 +39,27 @@ test("items para vender", () => {
     { producto_id: "a", cantidad: 2 },
     { descripcion: "Encordado", precio: 8000, cantidad: 1 },
   ]);
+});
+
+test("nombres en formato normal", () => {
+  assert.equal(nombreLindo("AGUA X 500"), "Agua x 500");
+  assert.equal(nombreLindo("PAPAS FRITAS"), "Papas fritas");
+  assert.equal(nombreLindo("Remera Black"), "Remera Black");
+  assert.equal(nombreLindo("7UP 500"), "7up 500");
+  assert.equal(nombreLindo("500"), "500");
+});
+
+test("stock de la tarjeta: cocina, sin, poco y normal (mínimo 3 por defecto)", () => {
+  assert.deepEqual(estadoStock({ stock: null }), { estado: "cocina", quedan: null });
+  assert.deepEqual(estadoStock({ stock: 17 }), { estado: "normal", quedan: 17 });
+  assert.deepEqual(estadoStock({ stock: 3 }), { estado: "poco", quedan: 3 });
+  assert.deepEqual(estadoStock({ stock: 5, aviso_stock: 5 }, 1), { estado: "poco", quedan: 4 });
+  assert.deepEqual(estadoStock({ stock: 2 }, 2), { estado: "sin", quedan: 0 });
+  assert.deepEqual(estadoStock({ stock: 0 }), { estado: "sin", quedan: 0 });
+});
+
+test("más vendidos primero, el resto en su orden", () => {
+  const ps = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  assert.deepEqual(masVendidos(ps, [{ producto_id: "c", cantidad: 2 }, { producto_id: "b", cantidad: 5 }, { producto_id: null, cantidad: 9 }]).map((p) => p.id), ["b", "c", "a"]);
+  assert.deepEqual(masVendidos(ps, []).map((p) => p.id), ["a", "b", "c"]);
 });

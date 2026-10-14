@@ -46,3 +46,32 @@ export function itemsParaVender(carrito, sueltos) {
     ...sueltos.map((s) => ({ descripcion: s.descripcion.trim(), precio: Number(s.precio), cantidad: s.cantidad || 1 })),
   ];
 }
+
+/* Nombre para mostrar: si lo cargaron todo en mayúsculas ("AGUA X 500"), en formato normal
+   ("Agua x 500"); si no, tal cual lo escribieron */
+export function nombreLindo(nombre) {
+  const s = String(nombre || "").trim();
+  if (!/\p{L}/u.test(s) || s !== s.toLocaleUpperCase("es")) return s;
+  const l = s.toLocaleLowerCase("es");
+  return l.charAt(0).toLocaleUpperCase("es") + l.slice(1);
+}
+
+/* Stock mínimo de un producto: el que tenga cargado o 3 */
+export const minimoStock = (p) => (p.aviso_stock == null ? 3 : Number(p.aviso_stock));
+
+/* Estado del stock en la tarjeta, descontando lo que ya está en el ticket:
+   cocina (no controla stock) | sin | poco | normal, con lo que queda */
+export function estadoStock(p, enTicket = 0) {
+  if (p.stock == null) return { estado: "cocina", quedan: null };
+  const quedan = Number(p.stock) - enTicket;
+  if (quedan <= 0) return { estado: "sin", quedan: 0 };
+  return { estado: quedan <= minimoStock(p) ? "poco" : "normal", quedan };
+}
+
+/* Más vendidos: los productos ordenados por unidades vendidas (items: [{ producto_id, cantidad }]);
+   los que no se vendieron quedan después, en su orden de siempre */
+export function masVendidos(productos, items) {
+  const vendidos = new Map();
+  for (const i of items) if (i.producto_id) vendidos.set(i.producto_id, (vendidos.get(i.producto_id) || 0) + Number(i.cantidad));
+  return productos.map((p, orden) => ({ p, n: vendidos.get(p.id) || 0, orden })).sort((a, b) => b.n - a.n || a.orden - b.orden).map((x) => x.p);
+}
