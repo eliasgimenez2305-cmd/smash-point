@@ -757,6 +757,7 @@ function compareByStart(a, b) {
    y acá se traduce: la 4 es "Club Norte · Cancha 1". Sin sedes: "Cancha 4". */
 function courtName(t, court, short = false) {
   const label = short ? "C" : "Cancha ";
+  if ((t?.venues || []).length < 2) return `${label}${court}`;
   let offset = 0;
   for (const v of t?.venues || []) {
     if (court <= offset + v.courts) return `${v.name} · ${label}${court - offset}`;
@@ -5067,37 +5068,39 @@ function SchedulePublicView({ tournament }) {
             <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill></div>
             <div className="rounded-xl border divide-y min-w-0" style={{ borderColor: dateColor + "40" }}>
               {Object.keys(byTime).sort().map((time) => (
-                <div key={time} id={slotId(byTime[time][0])} className="flex gap-3 px-3 py-2 scroll-mt-4" style={{ borderColor: dateColor + "22" }}>
-                  <span className="text-sm font-extrabold w-11 shrink-0 pt-0.5" style={{ color: dateColor, ...F.body }}>{time}</span>
-                  <div className="flex-1 min-w-0 space-y-1.5">
-                    {byTime[time].map((m) => {
+                <div key={time} id={slotId(byTime[time][0])} className="px-3 py-2 scroll-mt-4 space-y-2.5" style={{ borderColor: dateColor + "22" }}>
+                    {byTime[time].map((m, i) => {
                       const hasResult = !m.placeholder && matchIsPlayed(m, tournament.matchFormat);
                       const w = hasResult ? matchWinnerId(m, tournament.matchFormat) : null;
                       const live = !hasResult && m.liveStatus === "en_curso";
                       const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
+                      // Columna izquierda: la hora (en el primer partido del horario) y el "vs"; a la
+                      // derecha, la cancha y la categoría arriba y cada pareja en su propio renglón
                       return (
-                        <div key={m.key} className="text-sm min-w-0" style={F.body}>
-                          {hasResult ? (
-                            <div className="flex items-start gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
-                              <div className="flex-1 min-w-0"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div>
-                            </div>
-                          ) : (
-                            <div className="flex items-baseline gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
-                              {m.placeholder
-                                ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
-                                : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
-                              {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
-                            </div>
-                          )}
-                          <div className="text-[10px] truncate pl-7" style={{ color: categoryColor[m.categoryId] }}>
-                            {m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
+                        <div key={m.key} className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-x-2 text-sm" style={F.body}>
+                          <span className="text-sm font-extrabold" style={{ color: dateColor }}>{i === 0 ? time : ""}</span>
+                          <div className="flex items-baseline gap-2 min-w-0 text-[11px] pt-0.5">
+                            <span className="min-w-0 truncate">
+                              <span className="font-bold" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
+                              <span style={{ color: categoryColor[m.categoryId] }}> · {m.number ? `#${m.number} · ` : ""}{m.categoryName}</span>
+                              {m.label && <span className="text-teal-500"> · {m.label}</span>}
+                            </span>
+                            {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
                           </div>
+                          {hasResult ? (
+                            <><span /><div className="min-w-0 mt-0.5"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div></>
+                          ) : m.placeholder ? (
+                            <><span /><span className="italic opacity-70 break-words">{m.placeholder}</span></>
+                          ) : (
+                            <>
+                              <span className="row-span-2 self-center text-xs text-teal-500 text-right pr-1">vs</span>
+                              <span className="min-w-0 break-words leading-snug">{name(m.pairA)}</span>
+                              <span className="min-w-0 break-words leading-snug">{name(m.pairB)}</span>
+                            </>
+                          )}
                         </div>
                       );
                     })}
-                  </div>
                 </div>
               ))}
             </div>
