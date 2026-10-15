@@ -4995,9 +4995,10 @@ function Scoreboard({ match, pairsById, format }) {
     const id = side === "a" ? match.pairA : match.pairB;
     const other = side === "a" ? "b" : "a";
     const won = winner === id;
+    // Los nombres largos bajan de renglón (no se cortan); los games quedan arriba, a la derecha
     return (
-      <div className="flex items-center gap-2 min-w-0">
-        <span className={`flex-1 min-w-0 truncate ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
+      <div className="flex items-start gap-2 min-w-0">
+        <span className={`flex-1 min-w-0 break-words ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
           {pairsById[id]?.name || "—"}
           {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
           {match.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
