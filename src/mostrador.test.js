@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, claveTicket, deClave, tallesDe, buscarPorCodigo } from "./mostrador.js";
+import { rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, claveTicket, deClave, tallesDe, buscarPorCodigo } from "./mostrador.js";
 
 test("rubros: primero los sugeridos en su orden, después los propios", () => {
   const ps = [{ rubro: "Paletas" }, { rubro: "Grips" }, { rubro: "Bebidas" }, { rubro: "" }, { rubro: "Paletas" }, {}];
@@ -83,4 +83,11 @@ test("talles en orden y búsqueda por código", () => {
   assert.deepEqual(buscarPorCodigo([agua, remera], "c-l"), { p: remera, talle: "L" });
   assert.equal(buscarPorCodigo([agua, remera], "nada"), null);
   assert.equal(buscarPorCodigo([agua], ""), null);
+});
+
+test("porcentaje con coma decimal: 12,5% es 12,5, no 125", () => {
+  assert.equal(leerPorcentaje("12,5"), 12.5);
+  assert.equal(leerPorcentaje("10%"), 10);
+  assert.equal(leerPorcentaje(""), 0);
+  assert.equal(ajusteDe(10000, { modo: "%", valor: leerPorcentaje("12,5") }), -1250);
 });

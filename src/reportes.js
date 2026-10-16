@@ -68,8 +68,10 @@ export function sumarPorMes(filas) {
 export function rankingProductos(items) {
   const mapa = new Map();
   for (const i of items) {
-    const k = i.descripcion;
-    if (!mapa.has(k)) mapa.set(k, { descripcion: k, cantidad: 0, facturado: 0, ganancia: 0, conCosto: false });
+    // Los talles de un mismo producto van juntos (la descripción de la venta termina con el talle)
+    const k = i.producto_id || i.descripcion;
+    const nombre = i.talle && i.descripcion.endsWith(` ${i.talle}`) ? i.descripcion.slice(0, -(i.talle.length + 1)) : i.descripcion;
+    if (!mapa.has(k)) mapa.set(k, { descripcion: nombre, cantidad: 0, facturado: 0, ganancia: 0, conCosto: false });
     const x = mapa.get(k);
     x.cantidad += i.cantidad;
     x.facturado += i.cantidad * Number(i.precio_unitario);

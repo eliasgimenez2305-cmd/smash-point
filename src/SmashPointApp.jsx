@@ -3,7 +3,7 @@ import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
-import { findNameDuplicates, splitPair, nameMatch } from "./names.js";
+import { findNameDuplicates, splitPair, nameMatch, normalizeName } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
@@ -11,7 +11,7 @@ import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtC
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
-import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
+import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
@@ -287,6 +287,7 @@ async function supabaseTable(path, { method = "GET", body, accessToken, prefer }
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error(data?.message || "No se pudo completar la operación.");
+    err.code = data?.message; // el motivo que manda un trigger (ej: "turno_cobrado")
     err.pgCode = data?.code;
     throw err;
   }
@@ -298,8 +299,9 @@ const RESERVA_ERRORES = {
   "23503": "La cancha tiene reservas cargadas: en vez de borrarla, desactivala.",
   "23514": "Revisá los datos: hay alguno inválido.",
   "42501": "No tenés permiso para hacer eso.",
+  turno_cobrado: "Ese turno ya está cobrado: solo el dueño puede sacarle el cobro, cambiarle el precio, cancelarlo o borrarlo.",
 };
-const reservaErrorText = (e) => RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
+const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
 
 /* Complejos con dueño y Reservas habilitadas. Si la base todavía no tiene la tabla, lista vacía. */
 async function fetchComplejosReserva() {
@@ -380,6 +382,7 @@ const PEDIDO_ERRORES = {
   muy_adelante: "Se puede reservar hasta 30 días antes.",
   bloqueado: "No podés pedir turnos en este complejo. Comunicate con ellos.",
   ocupado: "Alguien acaba de tomar ese turno. Elegí otro horario.",
+  demasiados_pedidos: "Ya tenés 2 pedidos esperando que el complejo los confirme. Cuando te respondan, podés pedir otro.",
   no_encontrada: "No encontramos esa reserva.",
   no_cancelable: "Esa reserva ya no se puede cancelar.",
   fuera_de_plazo: "Falta menos de 24 h para el turno: para cancelarlo, escribile al complejo.",
@@ -542,7 +545,7 @@ function registrationStatus(t) {
 const IMAGES_BUCKET = "images";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
-/* Achica una foto antes de subirla: como mucho maxAncho de ancho, en JPEG. Así una portada ancha o una
+/* Achica una foto antes de subirla: como mucho maxAncho de ancho, en JPEG (en PNG si puede tener transparencia). Así una portada ancha o una
    foto de la galería se ve nítida y carga rápido en el celular. Los GIF y SVG se suben como están. */
 async function achicarImagen(file, maxAncho) {
   if (!maxAncho || /gif|svg/.test(file.type) || typeof createImageBitmap !== "function") return file;
@@ -555,8 +558,11 @@ async function achicarImagen(file, maxAncho) {
   canvas.height = Math.round(bitmap.height * escala);
   canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   bitmap.close?.();
-  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
-  return blob ? new File([blob], (file.name || "foto").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
+  // Los PNG y WEBP pueden tener fondo transparente (logos): se guardan en PNG para no quedar con fondo negro
+  const conAlfa = /png|webp/.test(file.type);
+  const tipo = conAlfa ? "image/png" : "image/jpeg";
+  const blob = await new Promise((res) => canvas.toBlob(res, tipo, 0.85));
+  return blob ? new File([blob], (file.name || "foto").replace(/\.[^.]+$/, "") + (conAlfa ? ".png" : ".jpg"), { type: tipo }) : file;
 }
 
 async function uploadImageToSupabase(original, accessToken, folder = "misc", { maxAncho = null } = {}) {
@@ -721,7 +727,7 @@ function weeklyScheduleLines(availability) {
 function instagramLink(input) {
   const raw = String(input || "").trim();
   if (!raw) return null;
-  const handle = raw.replace(/^https?:\/\/(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
+  const handle = raw.replace(/^(https?:\/\/)?(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
   return handle ? { url: `https://instagram.com/${handle}`, handle: `@${handle}` } : null;
 }
 
@@ -823,43 +829,6 @@ function withTournamentStart(t, { date, startTime, courtsCount }) {
     next.playDates = [{ date, from: startTime, to: first?.to || "23:59" }, ...rest.filter((d) => d.date !== date)];
   }
   return next;
-}
-
-function seedTournaments(organizerId) {
-  const playDates = [
-    { date: "2026-10-01", from: "18:00", to: "23:00" },
-    { date: "2026-10-02", from: "18:00", to: "23:00" },
-    { date: "2026-10-03", from: "09:00", to: "20:00" },
-    { date: "2026-10-04", from: "09:00", to: "20:00" },
-  ];
-  const avail = playDates.slice(2).map((d) => ({ date: d.date, from: "09:00", to: "20:00" })); // sáb y dom por defecto
-  return [
-    {
-      id: uid(),
-      name: "Copa Apertura Smash Point",
-      date: "2026-09-20",
-      status: STATUS.EN_CURSO,
-      organizerId,
-      matchFormat: { ...DEFAULT_MATCH_FORMAT },
-      courtsCount: 6,
-      matchDurationMinutes: DEFAULT_MATCH_DURATION,
-      playDates,
-      categories: [
-        {
-          id: uid(),
-          name: "4ta Caballeros",
-          pairs: [
-            { id: uid(), name: "Gómez / Ibáñez", availability: avail },
-            { id: uid(), name: "Rossi / Peralta", availability: avail },
-            { id: uid(), name: "Funes / Aquino", availability: avail },
-            { id: uid(), name: "Vidal / Lucero", availability: avail },
-          ],
-          groups: [],
-          bracket: null,
-        },
-      ],
-    },
-  ];
 }
 
 /* Round robin: todos contra todos dentro de un grupo */
@@ -1400,7 +1369,7 @@ function roundStageLabel(totalRounds, roundIndex) {
    manualmente un cruce distinto al automático). Solo tiene sentido antes de que esos partidos
    se hayan jugado; si alguno de los dos ya tiene resultado cargado, no se debería ofrecer esta
    opción en la interfaz. */
-function swapBracketPairs(bracket, pairIdA, pairIdB) {
+function swapBracketPairs(bracket, pairIdA, pairIdB, format) {
   const rounds = bracket.map((r) => r.map((m) => ({ ...m })));
   rounds[0].forEach((m) => {
     if (m.pairA === pairIdA) m.pairA = pairIdB;
@@ -1408,7 +1377,7 @@ function swapBracketPairs(bracket, pairIdA, pairIdB) {
     if (m.pairB === pairIdA) m.pairB = pairIdB;
     else if (m.pairB === pairIdB) m.pairB = pairIdA;
   });
-  return propagateBracket(rounds);
+  return propagateBracket(rounds, format);
 }
 
 /* Completa cada ronda de la llave con los ganadores de la anterior. Solo avanza quien ganó de
@@ -1471,7 +1440,7 @@ function formatSummary(format) {
     `${f.gamesPerSet} games por set`,
   ];
   if (f.setTiebreak) parts.push(`tie break a 7 en ${f.gamesPerSet}-${f.gamesPerSet}`);
-  parts.push(f.finalSuperTiebreak ? "super tie-break a 10 en el set decisivo" : "sin super tie-break (se juega el set completo)");
+  if (f.setsToPlay >= 3) parts.push(f.finalSuperTiebreak ? "super tie-break a 10 en el set decisivo" : "sin super tie-break (se juega el set completo)");
   return parts.join(" · ");
 }
 
@@ -1910,10 +1879,8 @@ function compareBySchedule(a, b) {
   return a.schedule.court - b.schedule.court;
 }
 
-function todayISO() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+/* El mismo "hoy" que reservas y caja: el día de Argentina, sin importar la zona del dispositivo */
+const todayISO = () => hoyArgentina();
 
 /* Partidos ya ubicados (de cualquier categoría) en una fecha/cancha puntual, excluyendo opcionalmente
    uno en particular (el que se está por mover) */
@@ -2170,8 +2137,10 @@ function computeCircuitStandings(circuit, tournaments) {
   const table = {}; // { [categoryName]: { [playerKey]: { name, points, fechas } } }
   circuit.categoryNames.forEach((cn) => { table[cn] = {}; });
 
-  // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito
-  tournaments.filter((t) => t.circuitId === circuit.id && !isInfoOnly(t)).forEach((t) => {
+  // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito; uno Próximo
+  // tampoco hasta que tenga algún resultado (anotarse no da puntos de "fase de grupos")
+  const jugado = (t) => t.status !== STATUS.PROXIMO || tournamentProgress(t).played > 0 || tournamentHasScores(t);
+  tournaments.filter((t) => t.circuitId === circuit.id && !isInfoOnly(t) && jugado(t)).forEach((t) => {
     t.categories.forEach((cat) => {
       if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
@@ -2181,8 +2150,9 @@ function computeCircuitStandings(circuit, tournaments) {
       placed.forEach(({ name, tier }) => {
         if (!name) return;
         const pts = points[tier] ?? 0;
-        name.split("/").map((s) => s.trim()).filter(Boolean).forEach((playerName) => {
-          const key = playerName.toLowerCase();
+        // "Gómez / Ibáñez" o "Gómez - Ibáñez"; "Ibáñez" e "Ibanez" son la misma persona
+        splitPair(name).forEach((playerName) => {
+          const key = normalizeName(playerName);
           if (!table[matchName][key]) table[matchName][key] = { name: playerName, points: 0, fechas: 0 };
           table[matchName][key].points += pts;
           table[matchName][key].fechas += 1;
@@ -2638,7 +2608,7 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
                 <legend className="px-1 text-xs text-teal-300">Disponibilidad horaria de la pareja</legend>
                 <p className="text-[11px] text-teal-500">Marcá los días que pueden jugar y en qué horario.</p>
                 {playDates.map((d) => {
-                  const day = availability[d.date];
+                  const day = availability[d.date] || { on: false, from: d.from, to: d.to }; // un día agregado con el formulario abierto
                   return (
                     <div key={d.date} className="flex flex-wrap items-center gap-2">
                       <label className="flex items-center gap-2 w-28 text-sm">
@@ -3027,7 +2997,7 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
     <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap gap-2">
         {rows.map((s, i) => {
-          const isTiebreak = format?.finalSuperTiebreak && i === total - 1;
+          const isTiebreak = isSuperTiebreakSet(i, format);
           return (
             <div key={i} className="flex flex-col items-center">
               <span className="text-[10px] text-teal-500 mb-0.5" style={F.body}>
@@ -3199,10 +3169,10 @@ function ClassicMatchFormatFields({ format, onChange }) {
         <input type="checkbox" checked={f.setTiebreak} onChange={(e) => onChange({ ...f, setTiebreak: e.target.checked })} />
         Tie break a 7 puntos dentro del set
       </label>
-      <label className="flex items-center gap-2 text-sm" style={F.body}>
+      {f.setsToPlay >= 3 && <label className="flex items-center gap-2 text-sm" style={F.body}>
         <input type="checkbox" checked={f.finalSuperTiebreak} onChange={(e) => onChange({ ...f, finalSuperTiebreak: e.target.checked })} />
         Super tie-break a 10 en el set decisivo
-      </label>
+      </label>}
     </div>
   );
 }
@@ -3693,8 +3663,9 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
             <div className="flex items-center gap-2">
               <input type="time" lang="es-AR" value={d.from} onChange={(e) => updateDateRange(d.date, "from", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
               <span className="text-xs text-teal-500 shrink-0">a</span>
-              <input type="time" lang="es-AR" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+              <input type="time" lang="es-AR" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} aria-invalid={!!(d.from && d.to && d.to <= d.from)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
             </div>
+            {d.from && d.to && d.to <= d.from && <p className="text-xs text-amber-400 mt-1" style={F.body}>Ese día no tiene turnos: tiene que terminar después de que empieza. Si se juega hasta medianoche, poné 23:59.</p>}
           </div>
         ))}
         {dates.length === 0 && <p className="text-xs opacity-60" style={F.body}>Todavía no agregaste fechas.</p>}
@@ -3833,6 +3804,7 @@ function VenueDaysField({ venue, dates, onChange, onWidenDay }) {
                     <input type="time" lang="es-AR" value={own.from} onChange={(e) => setDay(d.date, { from: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
                     <span className="text-teal-500">a</span>
                     <input type="time" lang="es-AR" value={own.to} onChange={(e) => setDay(d.date, { to: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
+                    {own.from && own.to && own.to <= own.from && <span className="text-amber-400">Tiene que terminar después de que empieza (hasta medianoche: 23:59).</span>}
                     {(own.from < d.from || own.to > d.to) && own.from < own.to && (
                       <span className="text-amber-400">
                         El torneo ese día va de {d.from} a {d.to}.{" "}
@@ -5572,7 +5544,7 @@ function PublicTournamentCard({ t, big, organizerLabel, onOpen, onRegister, clas
             {progress.total > 0 && (
               <>
                 <p className="text-[11px] sm:text-sm text-teal-400 mt-1" style={F.body}>Avance: {progress.played} / {progress.total}</p>
-                <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct.toFixed(2)} %</p>
+                <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct} %</p>
               </>
             )}
             <div className="mt-2 space-y-2">
@@ -5862,7 +5834,8 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
   const [duracion, setDuracion] = useState(null);
   const [ocupado, setOcupado] = useState(null); // { [complejoId]: [...] }
   const [fichas, setFichas] = useState({}); // { [complejoId]: ficha }
-  const [error, setError] = useState("");
+  const [error, setError] = useState(""); // de los horarios del día
+  const [errorCanchas, setErrorCanchas] = useState("");
   const diasRef = useRef(null);
 
   useEffect(() => {
@@ -5880,7 +5853,7 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
         const durs = DURACIONES.filter((d) => (rows || []).some((c) => c.reserva_online && duracionesOfrecidas(c).includes(d)));
         setDuracion((cur) => cur ?? (durs.includes(90) ? 90 : durs[0] ?? null));
       })
-      .catch(() => setError("No se pudieron cargar los turnos. Revisá la conexión."));
+      .catch(() => setErrorCanchas("No se pudieron cargar los turnos. Revisá la conexión."));
   }, [ids]);
 
   useEffect(() => {
@@ -5952,16 +5925,18 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
       </div>
 
       <div className="mt-4">
-        {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
-        {!tarjetas ? (
-          !error && <p className="text-sm text-slate-400">Buscando turnos…</p>
+        {(errorCanchas || error) && <p className="text-sm text-red-400 mb-3">{errorCanchas || error}</p>}
+        {canchas && duracion == null ? (
+          <p className="text-sm text-slate-400">Todavía ningún complejo ofrece turnos online.</p>
+        ) : !tarjetas ? (
+          !error && !errorCanchas && <p className="text-sm text-slate-400">Buscando turnos…</p>
         ) : tarjetas.length === 0 ? (
           <p className="text-sm text-slate-400">Ningún complejo ofrece turnos de {duracion} min.</p>
         ) : (
           <div className={`grid gap-4 ${tarjetas.length > 1 ? "lg:grid-cols-2" : ""}`}>
             {tarjetas.map((t) => (
               // El logo: el que el dueño cargó en su Perfil; si no tiene, el de la ficha del complejo
-              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} ultimoDia={dias[dias.length - 1]} duracion={duracion} franja={franja} onReservar={onElegir} onIrAFecha={(d) => { setFecha(d); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}|${franja}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} ultimoDia={dias[dias.length - 1]} duracion={duracion} franja={franja} onReservar={onElegir} onIrAFecha={(d) => { setFecha(d); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
             ))}
           </div>
         )}
@@ -6165,7 +6140,9 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
     if (elegido?.desde === h.desde) { setElegido(null); return; }
     setElegido(h); setCanchaId(h.canchas.length === 1 ? h.canchas[0].id : null);
   };
-  const reservar = () => onReservar(venue.id, { fecha, duracion, desde: elegido.desde, canchaId: canchaId || elegido.canchas[0].id });
+  // Sin cancha elegida va la libre más barata: la del precio "desde" que muestra la tarjeta
+  const masBarata = () => [...elegido.canchas].sort((a, b) => (precioDe(a, duracion) ?? Infinity) - (precioDe(b, duracion) ?? Infinity))[0];
+  const reservar = () => onReservar(venue.id, { fecha, duracion, desde: elegido.desde, canchaId: canchaId || masBarata().id });
   const nombreFranja = FRANJAS.find(([k]) => k === franja)?.[1];
 
   return (
@@ -6982,7 +6959,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
   const [pickingEventRegistration, setPickingEventRegistration] = useState(false);
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
-  const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
+  const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(defaultStatusFilter(tournaments.filter((t) => t.organizerId === id))); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
   const backLink = (
     <button type="button" onClick={backHome} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al inicio</button>
@@ -7568,8 +7545,8 @@ function NewOrganizerForm({ onCreate }) {
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
 
   const submit = async () => {
-    if (!name.trim() || !username.trim() || !email.trim() || password.length < 6) {
-      setError("Completá todos los campos (la contraseña necesita al menos 6 caracteres).");
+    if (!name.trim() || !username.trim() || !email.trim() || password.length < 8) {
+      setError("Completá todos los campos (la contraseña necesita al menos 8 caracteres).");
       return;
     }
     setSaving(true);
@@ -7611,7 +7588,7 @@ function NewOrganizerForm({ onCreate }) {
       </button>
       {error && <p className="text-xs text-red-400 mt-2" style={F.body}>{error}</p>}
       {okMsg && <p className="text-xs text-lime-400 mt-2" style={F.body}>{okMsg}</p>}
-      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "¿Olvidaste tu contraseña?" en el login.</p>
+      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "Olvidé mi contraseña" en el login.</p>
     </div>
   );
 }
@@ -8118,7 +8095,7 @@ function CoachManager({ coaches, onSave, onDelete, accessToken }) {
 function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const info = isInfoOnly(t);
-  const totalPairs = t.categories.reduce((sum, c) => sum + c.pairs.length, 0);
+  const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
   return (
     <div className="border border-teal-800 rounded-lg p-3 flex justify-between items-center flex-wrap gap-2">
       <div>
@@ -8475,7 +8452,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
     );
   }
 
-  const totalPairs = t.categories.reduce((sum, c) => sum + c.pairs.length, 0);
+  const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
   const bracketsGenerated = t.categories.filter((c) => c.bracket).length;
   const circuit = (circuits || []).find((c) => c.id === t.circuitId);
   const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[t.status];
@@ -9146,15 +9123,20 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`venta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto,ventas!inner(anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : nada,
-    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas, pagosVentas]) => {
+      // Lo mismo que suma la Caja: clases, compras pagadas hoy, pagos a profes y lo cargado en las cajas del día
+      verPlata && idsTodos ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=eq.${hoy}&select=monto:total`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`pagos_profes?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${desdeHoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
+    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas, pagosVentas, cuotas, compras, pagosProfes, movCajas]) => {
       if (!vivo) return;
       const suma = (rows) => rows.reduce((s, r) => s + Number(r.monto ?? r.precio ?? 0), 0);
       setDatos({
         turnos, canchas,
         pocoStock: productos.filter(pocoStock),
         deudores: cuentas.map((c) => ({ ...c, saldo: totalDe(c) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
-        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(pagosVentas) + suma(manuales.filter((m) => m.tipo === "ingreso")),
-        egresos: suma(manuales.filter((m) => m.tipo === "gasto")),
+        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(pagosVentas) + suma(cuotas) + suma([...manuales, ...movCajas].filter((m) => m.tipo === "ingreso")),
+        egresos: suma([...manuales, ...movCajas].filter((m) => m.tipo === "gasto")) + suma(compras) + suma(pagosProfes),
       });
       setError("");
     }).catch(() => { if (vivo) setError("No se pudo cargar el resumen. Revisá la conexión."); });
@@ -9177,7 +9159,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
 
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
         {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, mostrador, cuentas, inscripciones" onClick={() => onIr("caja")} />}
-        {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos cargados en Caja" onClick={() => onIr("caja")} />}
+        {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos, compras y pagos a profes" onClick={() => onIr("caja")} />}
         {verAgenda && <TarjetaResumen titulo="Turnos de hoy" tono="cyan" valor={cargando ? "…" : String(datos?.turnos.filter((r) => r.estado === "confirmada").length || 0)} detalle={pedidosPendientes > 0 ? `${pedidosPendientes} pedido${pedidosPendientes === 1 ? "" : "s"} por confirmar` : "Sin pedidos pendientes"} onClick={() => onIr("reservas")} />}
         {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("consumos")} />}
       </div>
@@ -9295,7 +9277,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const complejoIds = complejosReservas.map((c) => c.id).join(",");
   useEffect(() => {
     if (!complejoIds) return;
-    const load = () => supabaseTable(`reservas?complejo_id=in.(${complejoIds.split(",").map(encodeURIComponent).join(",")})&estado=eq.pendiente&select=id`, { accessToken: organizer.accessToken })
+    const load = () => supabaseTable(`reservas?complejo_id=in.(${complejoIds.split(",").map(encodeURIComponent).join(",")})&estado=eq.pendiente&or=(vence_at.is.null,vence_at.gt.${encodeURIComponent(new Date().toISOString())})&select=id`, { accessToken: organizer.accessToken })
       .then((rows) => setPedidosPendientes(rows.length)).catch(() => {});
     load();
     const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
@@ -9356,7 +9338,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "clases" && verReservas && permisos.agenda ? (
         <ClasesPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "reportes" && !colaborador && complejos.length > 0 ? (
-        <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} venues={venues} />
+        <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} />
       ) : seccion === "clientes" && verClientes ? (
         <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
       ) : seccion === "compras" && verConsumos && !colaborador ? (
@@ -9516,7 +9498,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
       ) : (
         <>
           <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
-          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
         </>
       )}
     </div>
@@ -9565,7 +9547,7 @@ function TurnosFijos({ complejoId, canchas, venueName, accessToken, onChanged })
   const darDeBaja = async (s, desde) => {
     setBusy(true); setError(""); setAviso("");
     try {
-      await supabaseTable(`reservas?serie_id=eq.${s.serieId}&fecha=gte.${desde}&estado=eq.confirmada`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" });
+      await supabaseTable(`reservas?serie_id=eq.${s.serieId}&fecha=gte.${desde}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" });
       setAviso(`Se dieron de baja los turnos de ${s.proxima.nombre} desde el ${etiquetaFecha(desde).toLowerCase()}.`);
       setAccion(null);
       await load(); onChanged();
@@ -9683,7 +9665,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
         Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
-        A cada uno le elegís qué puede hacer. Siempre quedan para vos: borrar torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
+        A cada uno le elegís qué puede hacer. Siempre quedan para vos: la Caja, los Reportes y las Compras, anular cobros y ventas, borrar canchas, torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
@@ -9933,7 +9915,7 @@ function estiloReserva(r) {
 }
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
-function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno" }) {
+function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -10080,7 +10062,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
           onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol}
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
           onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
@@ -10389,7 +10371,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
 
 /* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
    bloquear al jugador si lo pidió online */
-function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno" }) {
+function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
   const dueno = rol === "dueno";
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -10440,7 +10422,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
   const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
   // Turno fijo: este y todos los que siguen de la serie
-  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
   const confirmar = () => patch({ estado: "confirmada" });
   const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
   const cobro = (medio) => run(async () => {
@@ -10507,7 +10489,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                     ) : <p className="text-xs text-slate-400">Se cobran junto con la cancha, o solos:{" "}
                       {MEDIOS_PAGO.filter(([k]) => k).map(([k, l], i) => <span key={k}>{i > 0 && " · "}<button type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className="underline text-slate-200">{l}</button></span>)}
                     </p>}
-                    <button type="button" disabled={busy} onClick={pasarACuenta} className="text-xs text-cyan-300 underline">Pasar a la cuenta de {r.nombre}</button>
+                    {verCuentas && <button type="button" disabled={busy} onClick={pasarACuenta} className="text-xs text-cyan-300 underline">Pasar a la cuenta de {r.nombre}</button>}
                   </div>
                 )}
                 {aviso && <p className="text-lime-400">{aviso}</p>}
@@ -10564,7 +10546,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   const categoriesById = Object.fromEntries(tournament.categories.map((c) => [c.id, c]));
   const pending = inscripciones.filter((i) => i.estado === "pendiente").sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
   const history = inscripciones.filter((i) => i.estado !== "pendiente");
-  const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "America/Argentina/Buenos_Aires" });
   const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
 
   // Aceptadas o rechazadas recién ({ ...inscripcion, estado }), para ofrecer el aviso por WhatsApp
@@ -10823,9 +10805,8 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
 
 /* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
    pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
-function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
-  const [ownTab, setTab] = useState("parejas");
-  const tab = section || ownTab;
+function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
+  const tab = section || "parejas"; // la sección la elige el menú del torneo
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
@@ -11039,7 +11020,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
   const applySwap = () => {
     if (!swapA || !swapB || swapA === swapB) return;
-    onUpdateCategory({ ...category, bracket: swapBracketPairs(category.bracket, swapA, swapB) });
+    onUpdateCategory({ ...category, bracket: swapBracketPairs(category.bracket, swapA, swapB, format) });
     setSwapA(""); setSwapB("");
   };
 
@@ -11058,10 +11039,6 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
-  const categoryTabs = super8
-    ? [["parejas", individual ? "1. Jugadores" : "1. Parejas"], ["super8", "2. Partidos y posiciones"]]
-    : [["parejas", "1. Parejas"], ["grupos", "2. Grupos"], ["llave", "3. Llave final"]];
-
   return (
     <div>
       {super8 && (
@@ -11071,14 +11048,6 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.
         </p>
       )}
-      {!section && <div className="flex gap-2 mb-6 border-b border-teal-800">
-        {categoryTabs.map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-lime-400 text-lime-400" : "text-teal-400"}`} style={F.body}>
-            {label}
-          </button>
-        ))}
-      </div>}
-
       {tab === "parejas" && (
         <div>
           <div className="flex gap-2 mb-1">
@@ -11511,98 +11480,27 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   );
 }
 
-/* Botones de categoría. Sin onAdd / onRename / onDelete sirven solo para elegir una (en
-   Inscripciones, Grupos y Llaves); las categorías se crean y editan en Configuración. */
-function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelete }) {
-  const editable = !!(onRename && onDelete);
-  const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [editingId, setEditingId] = useState(null);
-  const submitNew = () => {
-    if (!newName.trim()) return;
-    onAdd(newName.trim());
-    setNewName(""); setAdding(false);
-  };
-  const [editName, setEditName] = useState("");
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
-
+/* Botones para elegir la categoría (en Inscripciones, Grupos y Llaves); las categorías se crean y
+   editan en Configuración. */
+function CategoryTabs({ categories, activeId, onSelect }) {
   return (
     <div className="mb-6">
       <div className="flex gap-2 items-center overflow-x-auto pb-1 sm:flex-wrap">
         {categories.map((c, ci) => {
           const color = GROUP_COLORS[ci % GROUP_COLORS.length];
           return (
-          <div key={c.id} className="flex items-center shrink-0">
-            {editingId === c.id ? (
-              <span className="flex items-center gap-1">
-                <input
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className="px-2 py-1 rounded border text-sm w-32" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                />
-                <button type="button" onClick={() => { if (editName.trim()) { onRename(c.id, editName.trim()); setEditingId(null); } }} className="text-xs text-lime-400">✓</button>
-                <button type="button" onClick={() => setEditingId(null)} className="text-xs text-teal-400">✕</button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onSelect(c.id)}
-                onDoubleClick={editable ? () => { setEditingId(c.id); setEditName(c.name); } : undefined}
-                className="whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
-                style={
-                  c.id === activeId
-                    ? { backgroundColor: color, color: "#14181f", borderColor: color }
-                    : { backgroundColor: color + "14", color, borderColor: color + "40" }
-                }
-              >
-                {c.name}
-              </button>
-            )}
-            {editable && c.id === activeId && editingId !== c.id && (
-              confirmingDeleteId === c.id ? (
-                <span className="ml-1 text-xs">
-                  <button type="button" onClick={() => { onDelete(c.id); setConfirmingDeleteId(null); }} className="text-red-400 font-semibold mr-1">Confirmar</button>
-                  <button type="button" onClick={() => setConfirmingDeleteId(null)} className="text-teal-400">✕</button>
-                </span>
-              ) : (
-                <span className="ml-1 flex gap-1">
-                  <button type="button" onClick={() => { setEditingId(c.id); setEditName(c.name); }} className="text-xs text-teal-400 hover:text-lime-400" title="Renombrar">✎</button>
-                  <button type="button" onClick={() => setConfirmingDeleteId(c.id)} className="text-xs text-red-400" title="Eliminar categoría">🗑</button>
-                </span>
-              )
-            )}
-          </div>
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => onSelect(c.id)}
+              className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
+              style={c.id === activeId ? { backgroundColor: color, color: "#14181f", borderColor: color } : { backgroundColor: color + "14", color, borderColor: color + "40" }}
+            >
+              {c.name}
+            </button>
           );
         })}
-
-        {!onAdd ? null : adding ? (
-          <span className="flex items-center gap-1 shrink-0">
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitNew(); }}
-              placeholder="Ej: 4ta Caballeros"
-              autoFocus
-              className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-            <button
-              type="button"
-              onClick={submitNew}
-              className="px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
-            >
-              Agregar
-            </button>
-            <button type="button" onClick={() => { setAdding(false); setNewName(""); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
-          </span>
-        ) : (
-          <button type="button" onClick={() => setAdding(true)} className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border border-dashed border-teal-700 text-teal-400 hover:border-lime-400 hover:text-lime-400" style={F.body}>
-            + Agregar categoría
-          </button>
-        )}
       </div>
-      {editable && categories.length > 0 && (
-        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Tip: doble clic en una categoría para renombrarla.</p>
-      )}
     </div>
   );
 }
@@ -11826,13 +11724,10 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const vincular = async (f, cuentaId, nuevaNombre = null) => {
+  const vincular = async (f, cuentaId) => {
     setBusy(true); setError("");
     try {
-      let cuenta = cuentas.find((c) => c.id === cuentaId);
-      if (nuevaNombre) {
-        [cuenta] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoIds[0], nombre: nuevaNombre }, accessToken, prefer: "return=representation" });
-      }
+      const cuenta = cuentas.find((c) => c.id === cuentaId);
       await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: cuenta.id, complejo_id: cuenta.complejo_id }, accessToken, prefer: "return=minimal" });
       setVinculando(null);
       await load();
@@ -11901,7 +11796,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
   const filtroBtn = (key, label) => (
     <button type="button" onClick={() => setFiltro(key)} className={`px-3 py-1 rounded-full text-sm border ${filtro === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
   );
@@ -12143,26 +12038,26 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
 
   const load = useCallback(async () => {
     const { desde, hasta } = rango;
-    if (!desde || !hasta || hasta < desde) return;
+    if (!desde || !hasta || hasta < desde) { setDatos(null); setError("Revisá las fechas: \"hasta\" tiene que ser el mismo día o después de \"desde\"."); return; }
     try {
       const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
       const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
       const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes] = await Promise.all([
-        supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc`, { accessToken }),
+        traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc,id.asc`, accessToken),
         supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
-        complejoIds ? supabaseTable(`reservas?complejo_id=in.(${inList})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc`, { accessToken }) : [],
+        complejoIds ? traerTodo(`reservas?complejo_id=in.(${inList})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc,id.asc`, accessToken) : [],
         complejoIds ? supabaseTable(`canchas?complejo_id=in.(${inList})&select=id,nombre`) : [],
         // Pagos de las cuentas de consumos (si la base todavía no tiene la tabla, nada)
-        complejoIds ? supabaseTable(`cuenta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,cuentas(nombre)`, { accessToken }).catch(() => []) : [],
+        complejoIds ? traerTodo(`cuenta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,cuentas(nombre)&order=id.asc`, accessToken).catch(() => []) : [],
         // Mostrador: pagos de las ventas no anuladas y lo vendido con su costo (para la ganancia)
-        complejoIds ? supabaseTable(`venta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,ventas!inner(numero,anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : [],
-        complejoIds ? supabaseTable(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}`, { accessToken }).catch(() => []) : [],
+        complejoIds ? traerTodo(`venta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,ventas!inner(numero,anulada)&ventas.anulada=is.false&order=id.asc`, accessToken).catch(() => []) : [],
+        complejoIds ? traerTodo(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken).catch(() => []) : [],
         // Gastos y otros ingresos cargados en las cajas del día (los retiros no son gasto: es plata que pasa al dueño)
         complejoIds ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${inList})&tipo=in.(gasto,ingreso)&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,tipo,concepto,monto,created_at,hecho_por_email`, { accessToken }).catch(() => []) : [],
         // Compras a proveedores, el día que se pagaron
         complejoIds ? supabaseTable(`compras?complejo_id=in.(${inList})&anulada=is.false&pagada_at=gte.${desde}&pagada_at=lte.${hasta}&select=id,total,medio,pagada_at,proveedores(nombre)`, { accessToken }).catch(() => []) : [],
         // Clases: cuotas de alumnos (ingreso) y pagos a los profes (gasto)
-        complejoIds ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,alumnos(nombre)`, { accessToken }).catch(() => []) : [],
+        complejoIds ? traerTodo(`cuotas_alumnos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,alumnos(nombre)&order=id.asc`, accessToken).catch(() => []) : [],
         complejoIds ? supabaseTable(`pagos_profes?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,profes_complejo(nombre)`, { accessToken }).catch(() => []) : [],
       ]);
       setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes });
@@ -12177,7 +12072,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
   const movimientos = datos ? [
     ...datos.pagos.map((p) => ({ key: `p${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "inscripcion", concepto: conceptoInscripcion(p, tournaments), monto: Number(p.monto), medio: p.medio })),
     ...datos.turnos.filter((r) => r.precio != null).map((r) => ({
-      key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: "turno", monto: Number(r.precio), medio: r.medio_pago,
+      key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: r.tipo === "clase" ? "clases" : "turno", monto: Number(r.precio), medio: r.medio_pago,
       concepto: [r.tipo === "clase" ? "Clase" : "Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
     })),
     ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
@@ -12239,12 +12134,6 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
 
   const chip = (key, label) => (
     <button key={key} type="button" onClick={() => elegirTipo(key)} className={`px-3 py-1.5 rounded-full text-sm border ${tipo === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
-  );
-  const tarjeta = (label, valor, color) => (
-    <div className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
-      <p className="text-[11px] uppercase text-teal-400">{label}</p>
-      <p className="text-base font-semibold" style={{ color }}>{conSigno(valor)}</p>
-    </div>
   );
 
   return (
@@ -12787,32 +12676,37 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
     return () => { vivo = false; };
   }, [complejoId, accessToken, esDueno, hoy, mes, version]);
 
+  const [guardandoProfe, setGuardandoProfe] = useState(false);
   const guardarProfe = async () => {
+    if (guardandoProfe) return;
     const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
     if (!form.nombre.trim()) { setError("Poné el nombre del profe."); return; }
     if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
     const body = { nombre: form.nombre.trim(), telefono, modo: form.modo, precio_hora: form.modo === "alquila" ? leerPrecio(form.precio) : null, pago_clase: form.modo === "complejo" ? leerPrecio(form.precio) : null, activo: form.activo };
+    setGuardandoProfe(true);
     try {
       if (form.id) await supabaseTable(`profes_complejo?id=eq.${form.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
       else await supabaseTable("profes_complejo", { method: "POST", body: { ...body, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
       setForm(null); setError(""); recargar();
     } catch (e) { setError(reservaErrorText(e)); }
+    finally { setGuardandoProfe(false); }
   };
   const editar = (p) => setForm(p
-    ? { id: p.id, nombre: p.nombre, telefono: p.telefono ? formatArPhone(p.telefono) : "", modo: p.modo, precio: String(Math.round((p.modo === "alquila" ? p.precio_hora : p.pago_clase) || "")) || "", activo: p.activo }
+    ? { id: p.id, nombre: p.nombre, telefono: p.telefono ? formatArPhone(p.telefono) : "", modo: p.modo, precio: (p.modo === "alquila" ? p.precio_hora : p.pago_clase) != null ? String(Math.round(p.modo === "alquila" ? p.precio_hora : p.pago_clase)) : "", activo: p.activo }
     : { nombre: "", telefono: "", modo: "alquila", precio: "", activo: true });
 
+  const ahora = Date.now(); // una clase de hoy que todavía no empezó no está dictada ni se debe
   const resumen = (p) => {
     const clases = datos.clases.filter((r) => r.profe_id === p.id);
     if (p.modo === "alquila") {
-      const sinCobrar = clases.filter((r) => r.fecha <= hoy && !r.medio_pago && r.precio != null);
-      return { debe: sinCobrar.reduce((s, r) => s + Number(r.precio), 0), sinCobrar, proximas: clases.filter((r) => r.fecha > hoy).length };
+      const sinCobrar = clases.filter((r) => yaEmpezo(r, hoy, ahora) && !r.medio_pago && r.precio != null);
+      return { debe: sinCobrar.reduce((s, r) => s + Number(r.precio), 0), sinCobrar, proximas: clases.filter((r) => !yaEmpezo(r, hoy, ahora)).length };
     }
     const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id && a.activo);
     const pagaron = alumnos.filter((a) => datos.cuotas.some((q) => q.alumno_id === a.id)).length;
-    const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && r.fecha <= hoy).length;
+    const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && yaEmpezo(r, hoy, ahora)).length;
     const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
-    return { alumnos: alumnos.length, pagaron, dictadas, aPagar: Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado), proximas: clases.filter((r) => r.fecha > hoy).length };
+    return { alumnos: alumnos.length, pagaron, dictadas, aPagar: Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado), proximas: clases.filter((r) => !yaEmpezo(r, hoy, ahora)).length };
   };
   const profe = datos?.profes.find((p) => p.id === abierto);
 
@@ -12848,7 +12742,7 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
               </label>
               {form.id && <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={form.activo} onChange={(e) => setForm({ ...form, activo: e.target.checked })} /> Activo</label>}
               <div className="flex gap-3 items-center">
-                <button type="button" onClick={guardarProfe} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={guardarProfe} disabled={guardandoProfe} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
                 <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
               </div>
             </section>
@@ -12887,13 +12781,14 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
   const [cobrando, setCobrando] = useState(null); // alumno id o "profe" o "deuda"
   const [alumnoForm, setAlumnoForm] = useState(null);
   const nombreCancha = (id) => datos.canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const ahora = Date.now();
   const clases = datos.clases.filter((r) => r.profe_id === p.id);
-  const proximas = clases.filter((r) => r.fecha >= hoy).slice(0, 10);
-  const sinCobrar = clases.filter((r) => r.fecha <= hoy && !r.medio_pago && r.precio != null);
+  const proximas = clases.filter((r) => !yaEmpezo(r, hoy, ahora)).slice(0, 10);
+  const sinCobrar = clases.filter((r) => yaEmpezo(r, hoy, ahora) && !r.medio_pago && r.precio != null);
   const debe = sinCobrar.reduce((s, r) => s + Number(r.precio), 0);
   const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id);
   const cuotaDe = (a) => datos.cuotas.find((q) => q.alumno_id === a.id);
-  const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && r.fecha <= hoy).length;
+  const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && yaEmpezo(r, hoy, ahora)).length;
   const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
   const aPagar = Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado);
   const horario = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id)}`;
@@ -12928,7 +12823,7 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
     onChanged();
   };
   const cobrarDeuda = (medio) => run(() => supabaseTable(`reservas?id=in.(${sinCobrar.map((r) => r.id).join(",")})`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" }), `Cobrado ${formatoPrecio(debe)} a ${p.nombre}.`).then(() => setCobrando(null));
-  const cobrarCuota = (a, medio) => run(() => supabaseTable("cuotas_alumnos", { method: "POST", body: { complejo_id: complejoId, alumno_id: a.id, periodo: mes, monto: Number(a.cuota), medio }, accessToken, prefer: "return=minimal" }), `Cuota de ${a.nombre} cobrada.`).then(() => setCobrando(null));
+  const cobrarCuota = (a, medio) => !(Number(a.cuota) > 0) ? setError(`Cargale la cuota a ${a.nombre} antes de cobrarla.`) : run(() => supabaseTable("cuotas_alumnos", { method: "POST", body: { complejo_id: complejoId, alumno_id: a.id, periodo: mes, monto: Number(a.cuota), medio }, accessToken, prefer: "return=minimal" }), `Cuota de ${a.nombre} cobrada.`).then(() => setCobrando(null));
   const pagarProfe = (medio) => run(() => supabaseTable("pagos_profes", { method: "POST", body: { complejo_id: complejoId, profe_id: p.id, periodo: mes, monto: aPagar, medio, nota: `${dictadas} clases` }, accessToken, prefer: "return=minimal" }), `Le pagaste ${formatoPrecio(aPagar)} a ${p.nombre}.`).then(() => setCobrando(null));
   const guardarAlumno = () => {
     const telefono = alumnoForm.telefono.trim() ? normalizeArPhone(alumnoForm.telefono) : null;
@@ -13129,7 +13024,7 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
         <>
           <div className={`grid grid-cols-2 ${verCuentas ? "lg:grid-cols-4" : "lg:grid-cols-3"} gap-3`}>
             <TarjetaResumen titulo="Clientes" tono="cyan" valor={String(clientes.length)} detalle="Últimos 6 meses" onClick={() => setFiltro("todos")} />
-            <TarjetaResumen titulo="Activos" tono="lime" valor={String(activos)} detalle="Vinieron en 30 días" onClick={() => setFiltro("frecuentes")} />
+            <TarjetaResumen titulo="Vienen seguido" tono="lime" valor={String(clientes.filter(frecuente).length)} detalle={`4 o más turnos en 60 días · ${activos} vinieron en 30`} onClick={() => setFiltro("frecuentes")} />
             <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
             {/* Sin acceso a las cuentas no hay deudas para mostrar */}
             {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="Cantina o inscripciones" onClick={() => setFiltro("deben")} />}
@@ -13248,7 +13143,7 @@ function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
 
 const DIAS_CORTOS = [[1, "Lun"], [2, "Mar"], [3, "Mié"], [4, "Jue"], [5, "Vie"], [6, "Sáb"], [0, "Dom"]];
 
-function ReportesPanel({ organizer, complejos, complejosReservas, complejosCantina, venues }) {
+function ReportesPanel({ organizer, complejos, complejosReservas, complejosCantina }) {
   const accessToken = organizer.accessToken;
   const hoy = hoyArgentina();
   const [mes, setMes] = useState(hoy.slice(0, 7));
@@ -13278,7 +13173,7 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
       suave(traerTodo(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,tipo,monto&order=fecha.asc`, accessToken)),
       idsTodos ? suave(traerTodo(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=gte.${desde6}&pagada_at=lte.${hasta}&select=pagada_at,total&order=pagada_at.asc`, accessToken)) : nada,
       idsTodos ? suave(traerTodo(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${creado}&select=tipo,monto,created_at&order=created_at.asc`, accessToken)) : nada,
-      idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
+      idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=producto_id,talle,descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
       idsReservas ? suave(traerTodo(`cuotas_alumnos?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
       idsReservas ? suave(traerTodo(`pagos_profes?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
     ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos, cuotas, pagosProfes]) => {
@@ -13494,7 +13389,7 @@ function ComprasPanel({ complejos, venues, accessToken }) {
     <span className="flex flex-wrap gap-x-3 gap-y-1 justify-end text-xs">
       {!x.pagada_at && (pagando?.id === x.id ? (
         <span className="flex flex-wrap items-center gap-1">
-          {MEDIOS_VENTA.slice(0, 3).map(([m, l]) => <button key={m} type="button" onClick={() => setPagando({ ...pagando, medio: m })} className={`px-2 py-1 rounded border ${pagando.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+          {MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" onClick={() => setPagando({ ...pagando, medio: m })} className={`px-2 py-1 rounded border ${pagando.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
           <button type="button" disabled={busy} onClick={pagar} className="px-2 py-1 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Pagar</button>
           <button type="button" onClick={() => setPagando(null)} className="text-teal-400">✕</button>
         </span>
@@ -13838,7 +13733,7 @@ function GastosFijos({ organizer, mes, onChanged }) {
 
 /* ---------- Caja del día: abrir y cerrar la caja de cada persona (ver 20261025_cierre_caja.sql) ---------- */
 
-const ORIGEN_TURNO_CAJA = { mostrador: "Mostrador", cuentas: "Cuentas", inscripciones: "Inscripciones", turnos: "Turnos" };
+const ORIGEN_TURNO_CAJA = { mostrador: "Mostrador", cuentas: "Cuentas", inscripciones: "Inscripciones", turnos: "Turnos", clases: "Clases" };
 const MOV_CAJA = { retiro: "Retiro de efectivo", gasto: "Gasto pagado con la caja", ingreso: "Otro ingreso en efectivo" };
 const CAJA_ERRORES = {
   caja_ya_abierta: "Ya tenés una caja abierta.",
@@ -13866,7 +13761,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
 
   const load = useCallback(async () => {
     try {
-      setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=abierta_at.desc&limit=40`, { accessToken }));
+      setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&or=(cerrada_at.is.null,abierta_at.gte.${encodeURIComponent(new Date(Date.now() - 60 * 86400000).toISOString())})&order=abierta_at.desc&limit=200`, { accessToken }));
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [complejoId, accessToken]);
@@ -14305,7 +14200,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
       const desde = encodeURIComponent(`${sumarDias(hoyArgentina(), -30)}T00:00:00-03:00`);
       const [ps, vs, rs] = await Promise.all([
         supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&activo=eq.true&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
-        supabaseTable(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&anulada=is.false&created_at=gte.${desde}&select=total,created_at,venta_items(producto_id,cantidad)`, { accessToken }).catch(() => null),
+        traerTodo(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&anulada=is.false&created_at=gte.${desde}&select=total,created_at,venta_items(producto_id,cantidad)&order=created_at.asc,id.asc`, accessToken).catch(() => null),
         supabaseTable(`rubros?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken }).catch(() => []),
       ]);
       setProductos(ps);
@@ -14501,7 +14396,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
         </div>
       )}
       <button type="button" disabled={busy} onClick={cobrar} className="w-full py-3.5 rounded-xl font-bold text-lg disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-        {busy ? "Guardando…" : cargarA !== "mostrador" ? `Cargar a la cuenta${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
+        {busy ? "Guardando…" : cargarA !== "mostrador" ? `${cargarA === "cancha" ? "Cargar al turno" : "Cargar a la cuenta"}${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
       </button>
       {sinDestino && renglones.length > 0 && <p role="alert" className="text-center text-amber-300">{cargarA === "cancha" ? "Elegí a qué turno lo cargás." : "Elegí o escribí el cliente."}</p>}
       {vacio && renglones.length === 0 && <p role="alert" className="text-center text-amber-300">Agregá al menos un producto.</p>}
@@ -14521,7 +14416,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
         )}
         {hoy && (
           <button type="button" onClick={onVerCaja || undefined} disabled={!onVerCaja} className="ml-auto px-4 py-2 rounded-full border border-teal-800 text-slate-300 hover:border-teal-600 disabled:hover:border-teal-800">
-            Hoy: {hoy.ventas} venta{hoy.ventas === 1 ? "" : "s"} · <span style={{ color: BRAND.lime }}>{formatoPrecio(hoy.total) || "$0"}</span>{onVerCaja && " · Ver caja →"}
+            Hoy: {hoy.ventas} venta{hoy.ventas === 1 ? "" : "s"} · <span style={{ color: BRAND.lime }}>{formatoPrecio(hoy.total) || "$0"}</span> vendido{onVerCaja && " · Ver caja →"}
           </button>
         )}
       </div>
@@ -14627,7 +14522,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
    cuenta de alguien (seña, cuotas) */
 function CobrarVenta({ complejoId, accessToken, subtotal, items, onClose, onVendido }) {
   const [ajusteForm, setAjusteForm] = useState({ tipo: "descuento", modo: "%", valor: "" });
-  const ajuste = ajusteDe(subtotal, { ...ajusteForm, valor: leerPrecio(ajusteForm.valor) || 0 });
+  const ajuste = ajusteDe(subtotal, { ...ajusteForm, valor: ajusteForm.modo === "%" ? leerPorcentaje(ajusteForm.valor) : leerPrecio(ajusteForm.valor) || 0 });
   const total = subtotal + ajuste;
   const [pagos, setPagos] = useState([{ medio: "efectivo", monto: String(subtotal) }]);
   const [tocoMonto, setTocoMonto] = useState(false); // si no tocó el monto, sigue al total (al poner un descuento)
@@ -14689,7 +14584,7 @@ function CobrarVenta({ complejoId, accessToken, subtotal, items, onClose, onVend
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className={chip(ajusteForm.tipo === "descuento")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "descuento" })}>Descuento</button>
             <button type="button" className={chip(ajusteForm.tipo === "recargo")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "recargo" })}>Recargo</button>
-            <input inputMode="numeric" value={ajusteForm.valor} onChange={(e) => setAjusteForm({ ...ajusteForm, valor: e.target.value })} placeholder="0" aria-label="Valor del ajuste" className="w-20 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+            <input inputMode={ajusteForm.modo === "%" ? "decimal" : "numeric"} value={ajusteForm.valor} onChange={(e) => setAjusteForm({ ...ajusteForm, valor: e.target.value })} placeholder="0" aria-label="Valor del ajuste" className="w-20 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
             <button type="button" className={chip(ajusteForm.modo === "%")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "%" })}>%</button>
             <button type="button" className={chip(ajusteForm.modo === "$")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "$" })}>$</button>
           </div>
@@ -14814,7 +14709,8 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
                   <span className="flex-1 min-w-0">
                     <span className={`block text-slate-100 ${v.anulada ? "line-through" : ""}`}>{v.venta_items.map((i) => `${i.cantidad > 1 ? `${i.cantidad} ` : ""}${i.descripcion}`).join(", ")}</span>
                     <span className="block text-xs text-teal-500">
-                      #{v.numero} · {v.venta_pagos.map((p) => `${medioCobroLabel(p.medio)} ${formatoPrecio(p.monto)}`).join(" + ") || "sin pago"}
+                      #{v.numero} · {v.venta_pagos.map((p) => `${medioCobroLabel(p.medio)} ${formatoPrecio(p.monto)}`).join(" + ") || (Number(v.pendiente) > 0 || Number(v.a_cuenta) > 0 ? "" : "sin pago")}
+                      {Number(v.pendiente) > 0 && ` · ${formatoPrecio(v.pendiente)} se cobra con el turno`}
                       {Number(v.a_cuenta) > 0 && ` · ${formatoPrecio(v.a_cuenta)} a cuenta de ${v.cuentas?.nombre || "una cuenta"}`}
                       {Number(v.ajuste) !== 0 && ` · ${Number(v.ajuste) < 0 ? "descuento" : "recargo"} ${formatoPrecio(Math.abs(v.ajuste))}`}
                       {esDueno && v.vendido_por_email && ` · ${v.vendido_por_email}`}
@@ -14841,10 +14737,10 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
   );
 }
 
-/* Cuentas (fiado) y Productos y stock. vistaFija: cada una es una sección del menú */
-function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = null }) {
+/* Cuentas (fiado) o Productos y stock: cada una es una sección del menú */
+function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija }) {
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [vista, setVista] = useState(vistaFija || "cuentas"); // cuentas | productos
+  const vista = vistaFija; // cuentas | productos
   const [productos, setProductos] = useState(null);
   const [cuentas, setCuentas] = useState(null);
   const [error, setError] = useState("");
@@ -14887,9 +14783,6 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = nu
     .sort((a, b) => (totalDe(b) > 0) - (totalDe(a) > 0) || (a.ultimo < b.ultimo ? 1 : -1));
   const totalDeuda = (cuentas || []).reduce((s, c) => s + totalDe(c), 0);
   const avisos = (productos || []).filter(pocoStock);
-  const pill = (key, label) => (
-    <button type="button" onClick={() => { setVista(key); setAbierta(null); }} className={`px-3 py-1.5 rounded-full text-sm border ${vista === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
-  );
 
   return (
     <div className="space-y-4 text-sm" style={F.body}>
@@ -14898,7 +14791,6 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija = nu
           {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
         </select>
       )}
-      {!vistaFija && <div className="flex flex-wrap gap-2">{pill("cuentas", "Cuentas")}{pill("productos", "Productos y stock")}</div>}
       {error && <p className="text-red-400">{error}</p>}
       {avisos.length > 0 && (
         <p className="text-xs text-amber-300">⚠ Queda poco: {avisos.map((p) => `${p.nombre} (${p.stock})`).join(", ")}</p>
@@ -15085,10 +14977,13 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
     }).then(() => { if (detalle) setAviso(`Cobrado ${formatoPrecio(monto)}: ${detalle}.`); });
   };
   const anular = (m) => run(async () => {
-    await supabaseTable(`${m.tipo === "pago" ? "cuenta_pagos" : "cuenta_consumos"}?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+    // Un renglón "Venta #N" del mostrador se anula con la venta entera (vuelve el stock y la venta queda anulada)
+    const venta = m.tipo === "consumo" ? (await supabaseTable(`ventas?consumo_id=eq.${m.id}&anulada=is.false&select=id`, { accessToken }))[0] : null;
+    if (venta) await supabaseRpc("anular_venta", { p_venta: venta.id }, accessToken);
+    else await supabaseTable(`${m.tipo === "pago" ? "cuenta_pagos" : "cuenta_consumos"}?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
     setAnulando(null);
   });
-  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
   // Detalle para el WhatsApp: lo consumido desde el último pago
   const ultimoPago = (movs || []).find((m) => m.tipo === "pago");
   const pendientes = (movs || []).filter((m) => m.tipo === "consumo" && (!ultimoPago || m.created_at > ultimoPago.created_at)).reverse();
@@ -15187,7 +15082,6 @@ function CategoriasEditor({ complejoId, accessToken, rubrosTabla, productos, onC
     try { await fn(); await onChanged(); } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una categoría con ese nombre." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const base = `rubros?complejo_id=eq.${encodeURIComponent(complejoId)}`;
   const enUso = (nombre) => productos.filter((p) => p.rubro === nombre).length;
   // La primera vez: las que ya usan los productos y las sugeridas
   const armar = () => run(async () => {
@@ -15306,7 +15200,7 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       stock: p?.stock != null ? String(p.stock) : "", aviso: p?.aviso_stock != null ? String(p.aviso_stock) : "3", activo: p ? p.activo : true,
       codigo: p?.codigo || "",
       conTalles: talles.length > 0,
-      talles: talles.map((t) => ({ talle: t.talle, stock: String(t.stock), codigo: t.codigo || "" })),
+      talles: talles.map((t) => ({ talle: t.talle, stock: String(t.stock), codigo: t.codigo || "", stockAntes: String(t.stock) })),
     });
     setError("");
   };
@@ -15325,7 +15219,7 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
     if (precio == null) { setError("Poné el precio."); return; }
     const entero = (t) => (String(t).trim() === "" ? null : parseInt(String(t).replace(/[^\d-]/g, ""), 10));
     const conTalles = form.controla && form.conTalles;
-    const talles = conTalles ? form.talles.map((t, i) => ({ talle: t.talle.trim().slice(0, 10), stock: entero(t.stock) ?? 0, codigo: t.codigo.trim() || null, orden: i })).filter((t) => t.talle) : [];
+    const talles = conTalles ? form.talles.map((t, i) => ({ talle: t.talle.trim().slice(0, 10), stock: entero(t.stock) ?? 0, codigo: t.codigo.trim() || null, orden: i, tocado: t.stockAntes == null || t.stock !== t.stockAntes })).filter((t) => t.talle) : [];
     if (conTalles && talles.length === 0) { setError("Cargá al menos un talle (o destildá \"Tiene talles\")."); return; }
     if (new Set(talles.map((t) => t.talle.toUpperCase())).size !== talles.length) { setError("Hay talles repetidos."); return; }
     const body = {
@@ -15334,6 +15228,10 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       aviso_stock: form.controla ? entero(form.aviso) ?? 3 : null, activo: form.activo,
       codigo: conTalles ? null : form.codigo.trim() || null,
     };
+    // Al editar, el stock solo se manda si se cambió a mano: si no, una venta hecha con el formulario abierto se perdería
+    // (con talles, el total lo calcula la base)
+    const stockAntes = editando !== "nuevo" && editando?.stock != null ? String(editando.stock) : null;
+    if (editando !== "nuevo" && form.controla && stockAntes != null && (conTalles ? tallesDe(editando).length > 0 : form.stock === stockAntes)) delete body.stock;
     run(async () => {
       let id = editando?.id;
       const antes = editando === "nuevo" ? [] : tallesDe(editando).map((t) => t.talle);
@@ -15346,7 +15244,11 @@ function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChange
       if (conTalles) {
         const quitados = antes.filter((t) => !talles.some((x) => x.talle === t));
         if (quitados.length > 0) await supabaseTable(`producto_talles?producto_id=eq.${id}&talle=in.(${quitados.map((t) => `"${t.replace(/"/g, "")}"`).join(",")})`, { method: "DELETE", accessToken, prefer: "return=minimal" });
-        await supabaseTable("producto_talles?on_conflict=producto_id,talle", { method: "POST", body: talles.map((t) => ({ ...t, producto_id: id, complejo_id: complejoId })), accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+        // Los talles nuevos o con stock cambiado a mano se graban enteros; a los demás solo se les actualiza código y orden
+        const sinTocar = talles.filter((t) => !t.tocado && antes.includes(t.talle));
+        const grabar = talles.filter((t) => !sinTocar.includes(t)).map(({ tocado, ...t }) => ({ ...t, producto_id: id, complejo_id: complejoId }));
+        if (grabar.length > 0) await supabaseTable("producto_talles?on_conflict=producto_id,talle", { method: "POST", body: grabar, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+        for (const t of sinTocar) await supabaseTable(`producto_talles?producto_id=eq.${id}&talle=eq.${encodeURIComponent(t.talle)}`, { method: "PATCH", body: { codigo: t.codigo, orden: t.orden }, accessToken, prefer: "return=minimal" });
       }
       if (costo != null) await supabaseTable("producto_costos?on_conflict=producto_id", { method: "POST", body: { producto_id: id, complejo_id: complejoId, costo, updated_at: new Date().toISOString() }, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
       else if (costos[id] != null) await supabaseTable(`producto_costos?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
@@ -15802,7 +15704,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
                 : tournament.categories.length > 1 && <CategoryTabs categories={tournament.categories} activeId={category?.id} onSelect={setCategoryId} />}
               {category && (
                 <CategoryAdminView
-                  key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament}
+                  key={category.id} category={category} format={tournament.matchFormat} tournament={tournament}
                   onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update}
                   section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]}
                 />
@@ -16103,8 +16005,9 @@ function SmashPointAppInner() {
           if (tours === null) tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
         } catch { tours = null; }
         if (!Array.isArray(tours)) {
-          const firstOrganizer = orgs.find((o) => o.role === "organizador") || orgs[0] || { id: "sin-organizador" };
-          tours = seedTournaments(firstOrganizer.id);
+          // Sin conexión o la base no respondió: lista vacía y aviso (nunca torneos de ejemplo, que se podrían guardar)
+          tours = [];
+          setSaveNotice("No se pudieron cargar los torneos. Revisá la conexión y recargá la página.");
         } else {
           tours = normalizeLoadedTournaments(tours);
         }
@@ -16151,8 +16054,9 @@ function SmashPointAppInner() {
               setSession(restored);
               const home = profile.role === "creador" ? "creator-home" : "admin-home";
               const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
-              // Con #complejo o #privacidad en la dirección se queda en esa pantalla
-              if (!routeFromHash()) setRoute(canResume ? "admin-tournament" : home);
+              // Con #complejo o #privacidad en la dirección se queda en esa pantalla; si se entró por el link de un mail
+              // (contraseña nueva, confirmación), manda ese link
+              if (!routeFromHash() && !LINK_DE_MAIL) setRoute(canResume ? "admin-tournament" : home);
               if (canResume) setSelectedId(stored.selectedId);
             } else {
               writeStoredAuth(null);

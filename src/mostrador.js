@@ -19,6 +19,12 @@ export function subtotalDe(items) {
   return items.reduce((s, i) => s + Number(i.precio) * Number(i.cantidad), 0);
 }
 
+/* Porcentaje escrito a mano, con coma o punto decimal ("12,5", "12.5%") → 12.5; vacío → 0 */
+export function leerPorcentaje(texto) {
+  const n = Number.parseFloat(String(texto ?? "").replace(",", ".").replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 /* Descuento (negativo) o recargo (positivo) en pesos enteros. valor en % o en $. Nunca más que el subtotal. */
 export function ajusteDe(subtotal, { tipo = "descuento", modo = "%", valor = 0 } = {}) {
   const v = Math.max(0, Number(valor) || 0);

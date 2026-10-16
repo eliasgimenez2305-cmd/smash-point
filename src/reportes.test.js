@@ -46,3 +46,13 @@ test("sumar por mes y ranking de productos", () => {
   assert.equal(r[1].facturado, 18000);
   assert.equal(r[1].ganancia, 10000 + 1900);
 });
+
+test("ranking: los talles del mismo producto van juntos", () => {
+  const r = rankingProductos([
+    { producto_id: "p1", talle: "S", descripcion: "Remera S", cantidad: 1, precio_unitario: 100 },
+    { producto_id: "p1", talle: "M", descripcion: "Remera M", cantidad: 2, precio_unitario: 100 },
+  ]);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].descripcion, "Remera");
+  assert.equal(r[0].cantidad, 3);
+});

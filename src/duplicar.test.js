@@ -59,3 +59,12 @@ test("nombre de la fecha siguiente", () => {
   assert.equal(nombreSiguiente("Torneo 9"), "Torneo 10");
   assert.equal(nombreSiguiente("Torneo de Primavera"), "Torneo de Primavera (copia)");
 });
+
+test("no copia los datos calculados del resumen (claves con _)", () => {
+  const t = { id: "a", name: "Fecha 1", date: "2026-10-10", _light: true, _stats: { progress: 1 }, categories: [{ id: "c", name: "4ta", _pairsCount: 12, _placements: [1], pairs: [] }] };
+  let n = 0;
+  const copia = duplicarTorneo(t, { name: "Fecha 2", date: "2026-10-17", estado: "Próximo", nuevoId: () => `n${n++}` });
+  assert.equal(copia._stats, undefined);
+  assert.equal(copia.categories[0]._pairsCount, undefined);
+  assert.equal(copia.categories[0]._placements, undefined);
+});

@@ -15,7 +15,8 @@ function correr(fecha, dias) {
   d.setUTCDate(d.getUTCDate() + dias);
   return d.toISOString().slice(0, 10);
 }
-const sin = (obj, claves) => Object.fromEntries(Object.entries(obj).filter(([k]) => !claves.includes(k)));
+// Las claves con "_" adelante son datos calculados del resumen (parejas, avance, podio): no se copian
+const sin = (obj, claves) => Object.fromEntries(Object.entries(obj).filter(([k]) => !claves.includes(k) && !k.startsWith("_")));
 
 /* "Fecha 3" → "Fecha 4"; "Torneo de Primavera" → "Torneo de Primavera (copia)" */
 export function nombreSiguiente(nombre) {
