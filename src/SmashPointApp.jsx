@@ -542,9 +542,28 @@ function registrationStatus(t) {
 const IMAGES_BUCKET = "images";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
-async function uploadImageToSupabase(file, accessToken, folder = "misc") {
+/* Achica una foto antes de subirla: como mucho maxAncho de ancho, en JPEG. Así una portada ancha o una
+   foto de la galería se ve nítida y carga rápido en el celular. Los GIF y SVG se suben como están. */
+async function achicarImagen(file, maxAncho) {
+  if (!maxAncho || /gif|svg/.test(file.type) || typeof createImageBitmap !== "function") return file;
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) return file;
+  if (bitmap.width <= maxAncho && file.size <= 1.5 * 1024 * 1024) { bitmap.close?.(); return file; }
+  const escala = Math.min(1, maxAncho / bitmap.width);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * escala);
+  canvas.height = Math.round(bitmap.height * escala);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+  return blob ? new File([blob], (file.name || "foto").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
+}
+
+async function uploadImageToSupabase(original, accessToken, folder = "misc", { maxAncho = null } = {}) {
   if (!accessToken) throw new Error("Tenés que iniciar sesión de nuevo para subir imágenes.");
-  if (!file.type || !file.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+  if (!original.type || !original.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+  if (original.size > (maxAncho ? 20 : 5) * 1024 * 1024) throw new Error(`La imagen pesa demasiado (máximo ${maxAncho ? 20 : 5} MB).`);
+  const file = await achicarImagen(original, maxAncho);
   if (file.size > MAX_IMAGE_BYTES) throw new Error("La imagen pesa demasiado (máximo 5 MB).");
   const extMatch = /\.([a-zA-Z0-9]+)$/.exec(file.name || "");
   const ext = (extMatch ? extMatch[1] : "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
@@ -5755,30 +5774,39 @@ function VenuesPublicView({ venues, complejos = [], organizers = [], jugador, on
         {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline">Mis reservas</button>}
       </div>
       <BuscadorTurnos venues={venues} complejos={complejos} organizers={organizers} sinReservaOnline={sorted.filter((v) => !conReservas(v.id)).length} onElegir={onReservar} />
-      <h2 className="text-base font-semibold text-slate-100 mt-8 mb-3">Dónde jugar en Gualeguaychú</h2>
-      {sorted.length === 0 && <p className="opacity-60">Pronto vas a encontrar acá los complejos de la ciudad.</p>}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {sorted.map((v, i) => {
-          const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
+      <MasComplejos venues={sorted.filter((v) => !conReservas(v.id))} titulo={sorted.some((v) => conReservas(v.id)) ? "Más complejos en Gualeguaychú" : "Complejos en Gualeguaychú"} />
+    </section>
+  );
+}
+
+/* Complejos que reservan por WhatsApp (sin reserva online): logo, nombre y botones de WhatsApp e Instagram */
+function MasComplejos({ venues, titulo }) {
+  if (venues.length === 0) return null;
+  const boton = "w-10 h-10 shrink-0 rounded-full border flex items-center justify-center hover:brightness-125";
+  return (
+    <section className="mt-8">
+      <h2 className="text-base font-semibold text-slate-100 mb-3">{titulo}</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {venues.map((v) => {
+          const wa = normalizeArPhone(v.whatsapp);
+          const ig = instagramLink(v.instagram);
           return (
-            <article key={v.id} className="rounded-2xl p-4" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
-              <div className="flex items-center gap-3">
-                <DirectoryAvatar url={v.logoUrl} name={v.name} color={color} />
-                <div className="min-w-0">
-                  <h2 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{v.name}</h2>
-                  {v.address && (
-                    <a href={mapsLink(v.address)} target="_blank" rel="noopener noreferrer" className="text-sm text-teal-300 underline decoration-teal-700">
-                      📍 {v.address}
-                    </a>
-                  )}
-                </div>
+            <article key={v.id} className="flex items-center gap-3 rounded-2xl border px-3 py-3 min-w-0" style={{ borderColor: "#1f3a44", backgroundColor: "rgba(10,24,30,0.7)" }}>
+              <DirectoryAvatar url={v.logoUrl} name={v.name} color={BRAND.cyan} size={48} />
+              <div className="flex-1 min-w-0">
+                <h3 className="font-semibold text-slate-100 leading-tight break-words">{v.name}</h3>
+                <p className="text-xs text-slate-400">{wa ? "Reserva por WhatsApp" : ig ? "Consultá por Instagram" : v.address || "Sin reserva online"}</p>
               </div>
-              {conReservas(v.id) && (
-                <button type="button" onClick={() => onReservar(v.id)} className="w-full mt-3 px-3 py-2.5 rounded-full text-sm font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-                  Reservar cancha
-                </button>
+              {wa && (
+                <a href={`https://wa.me/${wa}`} target="_blank" rel="noopener noreferrer" className={boton} style={{ borderColor: "#25d36655", color: "#25d366" }} aria-label={`WhatsApp de ${v.name}`}>
+                  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 00-8.6 15.1L2 22l5-1.3A10 10 0 1012 2zm0 18.2a8.2 8.2 0 01-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1112 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1-.7.8-.8 1-.3.2-.5.1a6.7 6.7 0 01-3.3-2.9c-.2-.4.2-.4.7-1.3.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 00-.7.3 3 3 0 00-.9 2.2 5.2 5.2 0 001.1 2.7 11.8 11.8 0 004.5 4c1.7.7 2.3.8 3.2.6a2.7 2.7 0 001.8-1.3 2.2 2.2 0 00.2-1.3c-.1-.1-.3-.2-.6-.3z" /></svg>
+                </a>
               )}
-              <SocialButtons instagram={v.instagram} whatsapp={v.whatsapp} color={color} />
+              {ig && (
+                <a href={ig.url} target="_blank" rel="noopener noreferrer" className={boton} style={{ borderColor: "#1f3a44", color: "#e2e8f0" }} aria-label={`Instagram de ${v.name}`}>
+                  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5" /><circle cx="12" cy="12" r="4" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
+                </a>
+              )}
             </article>
           );
         })}
@@ -5833,8 +5861,16 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
   const [franja, setFranja] = useState("todo"); // todo | manana | tarde | noche
   const [duracion, setDuracion] = useState(null);
   const [ocupado, setOcupado] = useState(null); // { [complejoId]: [...] }
+  const [fichas, setFichas] = useState({}); // { [complejoId]: ficha }
   const [error, setError] = useState("");
   const diasRef = useRef(null);
+
+  useEffect(() => {
+    if (!ids) return;
+    supabaseTable(`complejo_fichas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})`)
+      .then((rows) => setFichas(Object.fromEntries((rows || []).map((r) => [r.complejo_id, r]))))
+      .catch(() => setFichas({}));
+  }, [ids]);
 
   useEffect(() => {
     if (!ids) return;
@@ -5867,9 +5903,10 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
         const suyas = online.filter((x) => x.complejo_id === c.id);
         const horarios = horariosConLibres(suyas, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
         return {
-          venue, complejo: c, horarios,
+          venue, complejo: c, horarios, canchasSuyas: suyas,
           totalCanchas: canchas.filter((x) => x.complejo_id === c.id).length,
-          portada: organizers.find((o) => o.id === c.dueno_id)?.coverUrl || "",
+          ficha: fichas[c.id] || null,
+          portada: fichas[c.id]?.portada_url || organizers.find((o) => o.id === c.dueno_id)?.coverUrl || "",
           precio: precioDesde(suyas, duracion), ofrece: suyas.some((x) => duracionesOfrecidas(x).includes(duracion)),
         };
       }).filter((t) => t.ofrece).sort((a, b) => (b.horarios.length > 0) - (a.horarios.length > 0) || a.venue.name.localeCompare(b.venue.name, "es"))
@@ -5924,7 +5961,7 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
           <div className={`grid gap-4 ${tarjetas.length > 1 ? "lg:grid-cols-2" : ""}`}>
             {tarjetas.map((t) => (
               // El logo: el que el dueño cargó en su Perfil; si no tiene, el de la ficha del complejo
-              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} duracion={duracion} franja={franja} onReservar={onElegir} />
+              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} ultimoDia={dias[dias.length - 1]} duracion={duracion} franja={franja} onReservar={onElegir} onIrAFecha={(d) => { setFecha(d); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
             ))}
           </div>
         )}
@@ -5933,10 +5970,193 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
   );
 }
 
+/* ---------- Ficha pública del complejo (ver 20261031_fichas_complejos.sql) ---------- */
+
+const TIPOS_CANCHA = [["cristal", "Cristal"], ["muro", "Muro"], ["mixto", "Cristal y muro"]];
+const TECHADAS = [["techadas", "Techadas"], ["descubiertas", "Descubiertas"], ["mixto", "Techadas y descubiertas"]];
+const ILUMINACION = [["led", "Iluminación LED"], ["comun", "Con iluminación"], ["sin", "Sin iluminación"]];
+const SERVICIOS = [
+  ["cantina", "Cantina", "M5 8h12v5a6 6 0 01-12 0zM17 9h1.5a2.5 2.5 0 010 5H17M8 3v2M11 3v2M14 3v2"],
+  ["vestuarios", "Vestuarios", "M8 3L3 6l2 4 3-1v12h8V9l3 1 2-4-5-3a4 4 0 01-8 0z"],
+  ["duchas", "Duchas", "M4 21V8a4 4 0 018 0M9 8h6M12 12v.01M15 12v.01M18 12v.01M12 15v.01M15 15v.01M18 15v.01"],
+  ["estacionamiento", "Estacionamiento", "M4 4h16v16H4zM10 16V8h3a2.5 2.5 0 010 5h-3"],
+  ["paletas", "Venta y alquiler de paletas", "M10 2a7 7 0 017 7c0 3.5-2.5 6-5.5 6.8L10 17l-5 5-2-2 5-5 1.2-1.5C6.5 12.5 3 12 3 9a7 7 0 017-7z"],
+  ["wifi", "Wi-Fi", "M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01"],
+];
+const etiquetaDe = (lista, k) => lista.find(([x]) => x === k)?.[1] || null;
+
+function ServicioIcono({ d }) {
+  return <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>;
+}
+
+/* Galería de fotos de un complejo, a pantalla completa: flechas, deslizar con el dedo y miniaturas */
+function GaleriaModal({ fotos, nombre, onClose }) {
+  const [i, setI] = useState(0);
+  const toque = useRef(null);
+  const mover = useCallback((d) => setI((x) => (x + d + fotos.length) % fotos.length), [fotos.length]);
+  useEffect(() => {
+    const tecla = (e) => { if (e.key === "Escape") onClose(); if (e.key === "ArrowRight") mover(1); if (e.key === "ArrowLeft") mover(-1); };
+    window.addEventListener("keydown", tecla);
+    const antes = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", tecla); document.body.style.overflow = antes; };
+  }, [mover, onClose]);
+  return (
+    <div className="fixed inset-0 z-[70] flex flex-col" style={{ backgroundColor: "rgba(3,8,11,0.96)", ...F.body }} role="dialog" aria-modal="true" aria-label={`Fotos de ${nombre}`}>
+      <div className="flex items-center justify-between px-4 py-3">
+        <p className="text-sm text-slate-300">{nombre} · {i + 1} de {fotos.length}</p>
+        <button type="button" onClick={onClose} className="w-10 h-10 rounded-full text-slate-200 hover:bg-white/10 text-xl" aria-label="Cerrar">✕</button>
+      </div>
+      <div className="flex-1 min-h-0 relative flex items-center justify-center px-2"
+        onTouchStart={(e) => { toque.current = e.touches[0].clientX; }}
+        onTouchEnd={(e) => { const dx = e.changedTouches[0].clientX - (toque.current ?? 0); if (Math.abs(dx) > 40) mover(dx < 0 ? 1 : -1); toque.current = null; }}>
+        <img src={fotos[i]} alt={`Foto ${i + 1} de ${nombre}`} className="max-w-full max-h-full object-contain rounded-lg" />
+        {fotos.length > 1 && (
+          <>
+            <button type="button" onClick={() => mover(-1)} className="hidden sm:flex absolute left-4 w-11 h-11 rounded-full items-center justify-center text-2xl text-slate-100" style={{ backgroundColor: "rgba(15,30,38,0.8)" }} aria-label="Foto anterior">‹</button>
+            <button type="button" onClick={() => mover(1)} className="hidden sm:flex absolute right-4 w-11 h-11 rounded-full items-center justify-center text-2xl text-slate-100" style={{ backgroundColor: "rgba(15,30,38,0.8)" }} aria-label="Foto siguiente">›</button>
+          </>
+        )}
+      </div>
+      {fotos.length > 1 && (
+        <div className="flex justify-center gap-2 px-4 py-3 overflow-x-auto sp-sin-barra">
+          {fotos.map((f, j) => (
+            <button key={f + j} type="button" onClick={() => setI(j)} className="shrink-0 rounded-md overflow-hidden border-2" style={{ borderColor: j === i ? BRAND.lime : "transparent" }} aria-label={`Ver la foto ${j + 1}`}>
+              <img src={f} alt="" className="w-16 h-12 object-cover" />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Perfil del complejo: lo que se ve en su tarjeta pública (portada, fotos, canchas y servicios) */
+function FichaComplejoForm({ complejoId, nombre, accessToken }) {
+  const vacia = { portada_url: "", fotos: [], tipo_canchas: null, techadas: null, iluminacion: null, servicios: [] };
+  const [ficha, setFicha] = useState(null);
+  const [subiendo, setSubiendo] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [estado, setEstado] = useState(""); // "" | "guardado" | mensaje de error
+  const fotoRef = useRef(null);
+
+  useEffect(() => {
+    supabaseTable(`complejo_fichas?complejo_id=eq.${encodeURIComponent(complejoId)}`, { accessToken })
+      .then((rows) => setFicha(rows?.[0] ? { ...vacia, ...rows[0], portada_url: rows[0].portada_url || "" } : vacia))
+      .catch(() => { setFicha(vacia); setEstado("No se pudo cargar la ficha. Revisá la conexión."); });
+  }, [complejoId, accessToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!ficha) return <p className="text-sm opacity-60">Cargando…</p>;
+  const set = (cambio) => { setFicha((f) => ({ ...f, ...cambio })); setEstado(""); };
+  const opcion = (lista, campo) => (
+    <div className="flex flex-wrap gap-2">
+      {lista.map(([k, l]) => (
+        <button key={k} type="button" onClick={() => set({ [campo]: ficha[campo] === k ? null : k })} aria-pressed={ficha[campo] === k} className="px-3 py-1.5 rounded-full text-sm border" style={ficha[campo] === k ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
+      ))}
+    </div>
+  );
+  const sumarFoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSubiendo(true); setEstado("");
+    try {
+      const url = await uploadImageToSupabase(file, accessToken, "complejos", { maxAncho: 1600 });
+      set({ fotos: [...ficha.fotos, url].slice(0, 5) });
+    } catch (err) { setEstado(err.message || "No se pudo subir la foto."); }
+    setSubiendo(false);
+    if (fotoRef.current) fotoRef.current.value = "";
+  };
+  const guardar = async () => {
+    setBusy(true); setEstado("");
+    try {
+      await supabaseTable("complejo_fichas?on_conflict=complejo_id", {
+        method: "POST", accessToken, prefer: "resolution=merge-duplicates,return=minimal",
+        body: { complejo_id: complejoId, portada_url: ficha.portada_url.trim() || null, fotos: ficha.fotos, tipo_canchas: ficha.tipo_canchas, techadas: ficha.techadas, iluminacion: ficha.iluminacion, servicios: ficha.servicios },
+      });
+      setEstado("guardado");
+    } catch (e) { setEstado(e.message === "foto_invalida" ? "Una de las fotos no es válida: quitala y subila de nuevo." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-4 text-sm">
+      <p className="text-xs text-slate-400">Es lo que ve la gente en la tarjeta de {nombre} en "Reservá tu cancha".</p>
+      <ImageUploadField label="Portada (horizontal: se ve ancha arriba de la tarjeta)" value={ficha.portada_url} onChange={(v) => set({ portada_url: v })} accessToken={accessToken} folder="complejos" maxAncho={1600} ancha />
+      <div>
+        <p className="text-xs text-teal-400 mb-1">Galería ({ficha.fotos.length} de 5 fotos)</p>
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+          {ficha.fotos.map((f, i) => (
+            <div key={f + i} className="relative">
+              <img src={f} alt={`Foto ${i + 1}`} className="w-full aspect-[4/3] object-cover rounded-lg border border-teal-800" />
+              <button type="button" onClick={() => set({ fotos: ficha.fotos.filter((_, j) => j !== i) })} className="absolute top-1 right-1 w-6 h-6 rounded-full text-xs text-white" style={{ backgroundColor: "rgba(0,0,0,0.65)" }} aria-label={`Quitar la foto ${i + 1}`}>✕</button>
+            </div>
+          ))}
+          {ficha.fotos.length < 5 && (
+            <label className={`flex flex-col items-center justify-center aspect-[4/3] rounded-lg border border-dashed border-teal-700 text-slate-400 text-xs text-center cursor-pointer hover:border-teal-500 ${subiendo ? "opacity-60" : ""}`}>
+              <span className="text-xl">+</span>{subiendo ? "Subiendo…" : "Sumar foto"}
+              <input ref={fotoRef} type="file" accept="image/*" disabled={subiendo} onChange={sumarFoto} className="sr-only" />
+            </label>
+          )}
+        </div>
+      </div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Tipo de canchas</p>{opcion(TIPOS_CANCHA, "tipo_canchas")}</div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Techo</p>{opcion(TECHADAS, "techadas")}</div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Iluminación</p>{opcion(ILUMINACION, "iluminacion")}</div>
+      <div className="space-y-1.5">
+        <p className="text-xs text-teal-400">Servicios</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {SERVICIOS.map(([k, l, d]) => {
+            const on = ficha.servicios.includes(k);
+            return (
+              <label key={k} className="flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer" style={on ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>
+                <input type="checkbox" checked={on} onChange={(e) => set({ servicios: e.target.checked ? [...ficha.servicios, k] : ficha.servicios.filter((x) => x !== k) })} className="sr-only" />
+                <ServicioIcono d={d} /> {l}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <button type="button" disabled={busy || subiendo} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar ficha"}</button>
+        {estado === "guardado" ? <span className="text-lime-400">Guardado ✓</span> : estado && <span className="text-red-400">{estado}</span>}
+      </div>
+    </div>
+  );
+}
+
 /* Tarjeta de un complejo con reserva online: portada, logo, datos, precio, horarios libres en grilla
    (Mañana / Tarde / Noche, con cuántas canchas quedan) y, al elegir uno, el resumen con "Reservar" */
-function TarjetaComplejo({ venue, horarios, totalCanchas, portada, precio, fecha, hoy, duracion, franja, onReservar }) {
+function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
+  // Si ese día no hay lugar: el primer turno libre de los días siguientes (undefined = buscando, null = no hay)
+  const [proximo, setProximo] = useState(undefined);
+  useEffect(() => {
+    if (horarios.length > 0 || canchasSuyas.length === 0 || !ultimoDia) return;
+    let vigente = true;
+    setProximo(undefined);
+    (async () => {
+      for (let d = sumarDias(fecha, 1); d <= ultimoDia; d = sumarDias(d, 1)) {
+        try {
+          const ocupado = ((await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: d })) || []).map((r) => ({ ...r, estado: "confirmada" }));
+          const libres = horariosConLibres(canchasSuyas, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+          if (libres.length > 0) { if (vigente) setProximo({ fecha: d, desde: libres[0].desde }); return; }
+        } catch { break; }
+        if (!vigente) return;
+      }
+      if (vigente) setProximo(null);
+    })();
+    return () => { vigente = false; };
+  }, [venue.id, fecha, duracion, franja, horarios.length, ultimoDia]); // eslint-disable-line react-hooks/exhaustive-deps
+  const elDia = (d) => (d === hoy ? "hoy" : d === sumarDias(hoy, 1) ? "mañana" : `el ${etiquetaDiaCorta(d, hoy).toLowerCase()}`);
   const [elegido, setElegido] = useState(null); // { desde, canchas }
+  const [viendoFotos, setViendoFotos] = useState(false);
+  const galeria = [ficha?.portada_url, ...(ficha?.fotos || [])].filter(Boolean);
+  const etiquetas = [
+    totalCanchas > 0 && `${totalCanchas} cancha${totalCanchas === 1 ? "" : "s"}`,
+    etiquetaDe(TIPOS_CANCHA, ficha?.tipo_canchas),
+    etiquetaDe(TECHADAS, ficha?.techadas),
+    ficha?.iluminacion !== "sin" && etiquetaDe(ILUMINACION, ficha?.iluminacion),
+  ].filter(Boolean);
+  const servicios = SERVICIOS.filter(([k]) => ficha?.servicios?.includes(k));
   const [canchaId, setCanchaId] = useState(null); // null = cualquiera de las libres
   const cancha = elegido && canchaId ? elegido.canchas.find((c) => c.id === canchaId) : null;
   const precioElegido = elegido ? (cancha ? precioDe(cancha, duracion) : precioDesde(elegido.canchas, duracion)) : null;
@@ -5958,7 +6178,14 @@ function TarjetaComplejo({ venue, horarios, totalCanchas, portada, precio, fecha
           <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
           Reserva online
         </span>
+        {galeria.length > 0 && (
+          <button type="button" onClick={() => setViendoFotos(true)} className="absolute top-3 right-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold text-slate-100" style={{ backgroundColor: "rgba(6,15,20,0.75)" }}>
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 5h18v14H3zM3 15l5-5 5 5 3-3 5 5" /><circle cx="15.5" cy="8.5" r="1.5" /></svg>
+            Ver {galeria.length} foto{galeria.length === 1 ? "" : "s"}
+          </button>
+        )}
       </div>
+      {viendoFotos && <GaleriaModal fotos={galeria} nombre={venue.name} onClose={() => setViendoFotos(false)} />}
       <div className="px-4 pb-4">
         <div className="relative z-10 -mt-9 mb-2">
           <span className="inline-block rounded-full p-0.5" style={{ backgroundColor: "#0a181e" }}>
@@ -5979,13 +6206,32 @@ function TarjetaComplejo({ venue, horarios, totalCanchas, portada, precio, fecha
             </div>
           )}
         </div>
-        <div className="flex flex-wrap gap-2 mt-3">
-          {totalCanchas > 0 && <span className="px-2.5 py-1 rounded-full text-xs text-slate-300 border border-teal-900">{totalCanchas} cancha{totalCanchas === 1 ? "" : "s"}</span>}
-        </div>
+        {etiquetas.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {etiquetas.map((e) => <span key={e} className="px-2.5 py-1 rounded-full text-xs text-slate-200" style={{ backgroundColor: "rgba(148,163,184,0.12)" }}>{e}</span>)}
+          </div>
+        )}
+        {servicios.length > 0 && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-2.5">
+            {servicios.map(([k, l, d]) => <span key={k} className="inline-flex items-center gap-1.5 text-xs text-slate-400"><ServicioIcono d={d} />{l}</span>)}
+          </div>
+        )}
 
         <div className="border-t border-teal-900/70 mt-4 pt-3 space-y-3">
           {horarios.length === 0 ? (
-            <p className="text-sm text-slate-400">No hay turnos libres {diaEnTexto(fecha, hoy)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}.</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-300">
+                No hay turnos libres {elDia(fecha)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}.
+                {proximo === undefined && <span className="text-slate-400"> Buscando el próximo libre…</span>}
+                {proximo && <> Próximo libre: <span className="font-semibold text-slate-100">{elDia(proximo.fecha).replace(/^el /, "")} a las {etiquetaHora(proximo.desde)}</span></>}
+                {proximo === null && <span className="text-slate-400"> Tampoco hay en los próximos días{franja !== "todo" ? " en ese horario" : ""}.</span>}
+              </p>
+              {proximo && (
+                <button type="button" onClick={() => onIrAFecha(proximo.fecha)} className="px-4 py-2 rounded-xl text-sm font-semibold border" style={{ borderColor: BRAND.lime, color: BRAND.lime }}>
+                  Ver {elDia(proximo.fecha).replace(/^el /, "")}
+                </button>
+              )}
+            </div>
           ) : grupos.map(([nombre, hs]) => (
             <div key={nombre}>
               <p className="text-xs text-slate-400 mb-1.5">{nombre}</p>
@@ -7254,7 +7500,7 @@ function Login({ jugadorApi, onEntro, onBack, aviso }) {
 /* Campo de imagen: permite elegir un archivo desde la compu o la galería del celular
    (el input type="file" con accept="image/*" abre la cámara/galería en mobile automáticamente),
    lo sube a Supabase Storage y guarda la URL pública resultante mediante onChange. */
-function ImageUploadField({ label, value, onChange, accessToken, folder }) {
+function ImageUploadField({ label, value, onChange, accessToken, folder, maxAncho = null, ancha = false }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef(null);
@@ -7266,7 +7512,7 @@ function ImageUploadField({ label, value, onChange, accessToken, folder }) {
     setUploading(true);
     setError("");
     try {
-      const url = await uploadImageToSupabase(file, accessToken, folder);
+      const url = await uploadImageToSupabase(file, accessToken, folder, { maxAncho });
       onChange(url);
     } catch (err) {
       setError(err.message || "No se pudo subir la imagen.");
@@ -7297,7 +7543,7 @@ function ImageUploadField({ label, value, onChange, accessToken, folder }) {
       </div>
       {error && <p className="text-xs text-red-400 mt-1" style={F.body}>{error}</p>}
       {value && (
-        <img src={value} alt="" className="mt-2 w-16 h-16 rounded object-cover border border-teal-700" />
+        <img src={value} alt="" className={`mt-2 rounded object-cover border border-teal-700 ${ancha ? "w-full max-w-sm aspect-[21/9]" : "w-16 h-16"}`} />
       )}
       <input
         value={value}
@@ -7448,7 +7694,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
             <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={accessToken} folder="logos" />
           </div>
           <div className="min-w-[220px]">
-            <ImageUploadField label="Foto de portada" value={profileCover} onChange={setProfileCover} accessToken={accessToken} folder="covers" />
+            <ImageUploadField label="Foto de portada" value={profileCover} onChange={setProfileCover} accessToken={accessToken} folder="covers" maxAncho={1600} ancha />
           </div>
           <button type="button" disabled={saving} onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: saving ? 0.6 : 1 }}>
             {saving ? "Guardando…" : "Guardar"}
@@ -9134,14 +9380,20 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
               <input id="perfil-nombre" value={profileName} onChange={(e) => { setProfileName(e.target.value); setPerfilGuardado(false); }} className="w-full max-w-sm px-3 py-2 rounded border outline-none focus:border-lime-400" style={adminInput} />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
-              <ImageUploadField label="Logo" value={profileLogo} onChange={(v) => { setProfileLogo(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="logos" />
-              <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={(v) => { setProfileCover(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="covers" />
+              <ImageUploadField label="Logo" value={profileLogo} onChange={(v) => { setProfileLogo(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="logos" maxAncho={600} />
+              <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={(v) => { setProfileCover(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="covers" maxAncho={1600} ancha />
             </div>
             <div className="flex items-center gap-3">
               <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
               {perfilGuardado && <span className="text-sm text-lime-400">Guardado ✓</span>}
             </div>
           </div>
+          {complejos.map((c) => (
+            <div key={`ficha-${c.id}`} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Ficha del complejo · {nombreComplejo(c.id)}</h2>
+              <FichaComplejoForm complejoId={c.id} nombre={nombreComplejo(c.id)} accessToken={organizer.accessToken} />
+            </div>
+          ))}
           {complejos.map((c) => (
             <div key={c.id} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Empleados{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
