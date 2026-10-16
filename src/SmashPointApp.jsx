@@ -5923,7 +5923,8 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
         ) : (
           <div className={`grid gap-4 ${tarjetas.length > 1 ? "lg:grid-cols-2" : ""}`}>
             {tarjetas.map((t) => (
-              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} fecha={fecha} hoy={hoy} duracion={duracion} franja={franja} onReservar={onElegir} />
+              // El logo: el que el dueño cargó en su Perfil; si no tiene, el de la ficha del complejo
+              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} duracion={duracion} franja={franja} onReservar={onElegir} />
             ))}
           </div>
         )}
