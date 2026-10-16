@@ -9,7 +9,7 @@ import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
-import { armarClientes, noVienenHace, claveNombre } from "./clientes.js";
+import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
@@ -9152,7 +9152,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       setDatos({
         turnos, canchas,
         pocoStock: productos.filter(pocoStock),
-        deudores: cuentas.map((c) => ({ ...c, saldo: Number(c.consumido) - Number(c.pagado) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
+        deudores: cuentas.map((c) => ({ ...c, saldo: totalDe(c) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
         ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(pagosVentas) + suma(manuales.filter((m) => m.tipo === "ingreso")),
         egresos: suma(manuales.filter((m) => m.tipo === "gasto")),
       });
@@ -9682,7 +9682,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
   return (
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
-        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, en <span className="text-teal-100 break-all">{entrada}</span>, y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
+        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
         A cada uno le elegís qué puede hacer. Siempre quedan para vos: borrar torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
@@ -10488,9 +10488,9 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                 )}
                 <div>
                   <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
-                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                  <div className="flex flex-wrap gap-2">
                     {MEDIOS_PAGO.map(([k, l]) => (
-                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`${btn} px-2 ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`${btn} px-3 flex-auto ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
                     ))}
                   </div>
                 </div>
@@ -12835,7 +12835,7 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
                 <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
                 <input type="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="grid sm:grid-cols-2 gap-2">
                 {Object.entries(MODOS_PROFE).map(([k, l]) => (
                   <button key={k} type="button" onClick={() => setForm({ ...form, modo: k })} className={`px-3 py-2 rounded-lg border text-left ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
                     <span className="block font-semibold">{l}</span>
@@ -13102,7 +13102,7 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
     return () => { vivo = false; };
   }, [complejoId, accessToken, verCuentas, hoy]);
 
-  const clientes = useMemo(() => (datos ? armarClientes({ reservas: datos.reservas, cuentas: datos.cuentas, inscripciones, hoy }) : []), [datos, inscripciones, hoy]);
+  const clientes = useMemo(() => (datos ? armarClientes({ reservas: datos.reservas, cuentas: datos.cuentas, inscripciones, hoy, ahora: Date.now() }) : []), [datos, inscripciones, hoy]);
   const frecuente = (c) => c.historial.filter((r) => r.fecha <= hoy && r.fecha >= sumarDias(hoy, -60) && !r.no_vino).length >= 4;
   const texto = claveNombre(buscar);
   const visibles = clientes
@@ -13132,7 +13132,7 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
             <TarjetaResumen titulo="Activos" tono="lime" valor={String(activos)} detalle="Vinieron en 30 días" onClick={() => setFiltro("frecuentes")} />
             <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
             {/* Sin acceso a las cuentas no hay deudas para mostrar */}
-            {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="En la cantina" onClick={() => setFiltro("deben")} />}
+            {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="Cantina o inscripciones" onClick={() => setFiltro("deben")} />}
           </div>
           <div className="flex flex-wrap gap-2 items-center">
             {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || verCuentas).map(([k, l]) => (
@@ -13191,11 +13191,12 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
 
 function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
   const nombreCancha = (id) => canchas.find((x) => x.id === id)?.nombre || "Cancha";
-  const pasados = c.historial.filter((r) => r.fecha <= hoy).slice(0, 12);
-  const proximos = c.historial.filter((r) => r.fecha > hoy).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+  const ahora = Date.now();
+  const pasados = c.historial.filter((r) => yaEmpezo(r, hoy, ahora)).slice(0, 12);
+  const proximos = c.historial.filter((r) => !yaEmpezo(r, hoy, ahora)).sort((a, b) => (a.inicio < b.inicio ? -1 : 1));
   const primerNombre = c.nombre.split(" ")[0];
   const mensajeVolver = `Hola ${primerNombre}! ¿Cómo andás? Hace rato no te vemos por ${venueName} 🎾 ¿Armamos un partido esta semana? Avisanos qué día te queda bien y te reservamos la cancha.`;
-  const mensajeDeuda = `Hola ${primerNombre}! Te escribimos de ${venueName}: te quedó un saldo de ${formatoPrecio(c.deuda)} en la cantina. Cuando puedas pasá a regularizarlo. ¡Gracias!`;
+  const mensajeDeuda = `Hola ${primerNombre}! Te escribimos de ${venueName}: te quedó un saldo de ${formatoPrecio(c.deuda)} con nosotros. Cuando puedas pasá a regularizarlo. ¡Gracias!`;
   const horario = (r) => `${etiquetaFecha(r.fecha)} · ${etiquetaHora(minutoEnGrilla(r.fecha, r.inicio))} · ${nombreCancha(r.cancha_id)}`;
 
   return (
@@ -13218,7 +13219,7 @@ function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
         <TarjetaResumen titulo="Turnos jugados" tono="cyan" valor={String(c.turnos)} detalle={c.noVino ? `${c.noVino} vez${c.noVino === 1 ? "" : "es"} no vino` : "Últimos 6 meses"} />
         <TarjetaResumen titulo="Última vez" tono={noVienenHace(c) ? "ambar" : "lime"} valor={c.ultimaVisita ? (c.diasSinVenir === 0 ? "Hoy" : `${c.diasSinVenir} días`) : "—"} detalle={c.ultimaVisita ? etiquetaFecha(c.ultimaVisita) : "Todavía no jugó"} />
         <TarjetaResumen titulo="Gastó en turnos" tono="lime" valor={formatoPrecio(c.gastado) || "$0"} detalle={c.torneos ? `Jugó ${c.torneos} torneo${c.torneos === 1 ? "" : "s"}` : "Cobrados"} />
-        <TarjetaResumen titulo="Debe" tono={c.deuda > 0 ? "rojo" : "gris"} valor={formatoPrecio(c.deuda) || "$0"} detalle={c.cuentaId ? "Cuenta de la cantina" : "Sin cuenta"} />
+        <TarjetaResumen titulo="Debe" tono={c.deuda > 0 ? "rojo" : "gris"} valor={formatoPrecio(c.deuda) || "$0"} detalle={c.cuentaId ? "Cantina e inscripciones" : "Sin cuenta"} />
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -13328,7 +13329,7 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {datos.ocupacion && <TarjetaResumen titulo="Ocupación" tono="lime" valor={`${datos.ocupacion.pctTotal}%`} detalle="De las horas abiertas" />}
-            {datos.ocupacion && <TarjetaResumen titulo="Horas jugadas" tono="cyan" valor={String(Math.round(datos.ocupacion.horasOcupadas))} detalle="Turnos confirmados" />}
+            {datos.ocupacion && <TarjetaResumen titulo="Horas reservadas" tono="cyan" valor={String(Math.round(datos.ocupacion.horasOcupadas))} detalle="Turnos confirmados" />}
             <TarjetaResumen titulo="Ingresos" tono="lime" valor={formatoPrecio(ingresoDe(mes)) || "$0"} detalle={variacion == null ? "Sin mes anterior" : `${variacion >= 0 ? "▲" : "▼"} ${Math.abs(variacion)}% vs ${corto(sumarMeses(mes, -1)).toLowerCase()}`} />
             <TarjetaResumen titulo="Resultado" tono={ingresoDe(mes) - gastoDe(mes) < 0 ? "rojo" : "cyan"} valor={conSigno(ingresoDe(mes) - gastoDe(mes))} detalle={`Gastos ${formatoPrecio(gastoDe(mes)) || "$0"}`} />
           </div>

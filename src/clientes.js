@@ -5,6 +5,9 @@
 export const claveNombre = (nombre) => String(nombre || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 const claveDe = (telefono, nombre) => (telefono ? `t:${telefono}` : `n:${claveNombre(nombre)}`);
 
+/* ¿El turno ya empezó? Con "ahora" (ms) mira la hora de inicio; sin eso, solo la fecha */
+export const yaEmpezo = (r, hoy, ahora) => (ahora != null && r.inicio ? Date.parse(r.inicio) <= ahora : r.fecha <= hoy);
+
 function diasEntre(desde, hasta) {
   return Math.round((Date.parse(`${hasta}T12:00:00Z`) - Date.parse(`${desde}T12:00:00Z`)) / 86400000);
 }
@@ -12,7 +15,7 @@ function diasEntre(desde, hasta) {
 /* reservas: turnos (tipo turno) con nombre, telefono, fecha, estado, no_vino, precio, medio_pago
    cuentas: [{ id, nombre, telefono, consumido, pagado }]
    inscripciones: [{ jugador1_nombre, telefono, estado, torneo_id }] */
-export function armarClientes({ reservas = [], cuentas = [], inscripciones = [], hoy }) {
+export function armarClientes({ reservas = [], cuentas = [], inscripciones = [], hoy, ahora }) {
   const mapa = new Map();
   const cliente = (telefono, nombre) => {
     // Si alguien sin WhatsApp ya está por nombre y ahora aparece con WhatsApp, se juntan
@@ -40,7 +43,7 @@ export function armarClientes({ reservas = [], cuentas = [], inscripciones = [],
     const c = cliente(r.telefono, r.nombre);
     if (r.estado !== "confirmada") continue;
     c.historial.push(r);
-    if (r.fecha > hoy) { c.proximos += 1; continue; }
+    if (!yaEmpezo(r, hoy, ahora)) { c.proximos += 1; continue; }
     if (r.no_vino) { c.noVino += 1; continue; }
     c.turnos += 1;
     if (!c.ultimaVisita || r.fecha > c.ultimaVisita) c.ultimaVisita = r.fecha;

@@ -58,3 +58,17 @@ test("no vienen hace 30 días (y no tienen turnos próximos)", () => {
   assert.equal(noVienenHace({ turnos: 3, proximos: 0, diasSinVenir: 10 }), false);
   assert.equal(noVienenHace({ turnos: 0, proximos: 0, diasSinVenir: null }), false);
 });
+
+test("un turno de hoy que todavía no empezó cuenta como próximo, no como jugado", () => {
+  const ahora = Date.parse("2026-10-12T12:30:00-03:00");
+  const cs = armarClientes({
+    hoy, ahora,
+    reservas: [
+      turno({ nombre: "Ana", telefono: "5493446444444", fecha: hoy, inicio: "2026-10-12T21:00:00-03:00", medio_pago: null }),
+      turno({ nombre: "Ana", telefono: "5493446444444", fecha: hoy, inicio: "2026-10-12T10:00:00-03:00" }),
+    ],
+  });
+  assert.equal(cs[0].turnos, 1);
+  assert.equal(cs[0].proximos, 1);
+  assert.equal(cs[0].ultimaVisita, hoy);
+});

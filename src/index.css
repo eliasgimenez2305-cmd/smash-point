@@ -15,3 +15,17 @@
 /* Filas que se deslizan sin mostrar la barra (días del buscador de turnos) */
 .sp-sin-barra { scrollbar-width: none; }
 .sp-sin-barra::-webkit-scrollbar { display: none; }
+
+/* Botón de "elegir archivo" con los colores de la app en vez del gris del sistema */
+input[type="file"]::file-selector-button {
+  margin-right: 0.75rem;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #0f766e;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: #a3e635;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover { border-color: #a3e635; }
