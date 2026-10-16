@@ -69,6 +69,7 @@ Y [`migrations/20261028_clases.sql`](migrations/20261028_clases.sql) (clases con
 Y [`migrations/20261029_cargar_a_turno.sql`](migrations/20261029_cargar_a_turno.sql) (mostrador: cargar consumos al turno de una cancha; débito y transferencia en turnos y cuentas) → **Run** → **Success**.
 Y [`migrations/20261030_talles_codigo_rubros.sql`](migrations/20261030_talles_codigo_rubros.sql) (talles con stock propio, código de barras y categorías del mostrador) → **Run** → **Success**.
 Y [`migrations/20261031_fichas_complejos.sql`](migrations/20261031_fichas_complejos.sql) (ficha pública de cada complejo: portada, fotos, canchas y servicios) → **Run** → **Success**.
+Y [`migrations/20261032_auditoria.sql`](migrations/20261032_auditoria.sql) (arreglos de la auditoría: débito en "cobrar todo", turnos cobrados protegidos, tope de pedidos, stock y compras) → **Run** → **Success**.
 
 ### Verificación (solo lectura, no cambia nada)
 
