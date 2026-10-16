@@ -70,7 +70,7 @@ declare
   v_pend uuid := (select valor::uuid from ids where clave = 'pendiente');
   v_conf uuid := (select valor::uuid from ids where clave = 'confirmada');
 begin
-  select count(*) into n from mis_complejos_colaborador() x where x = 'cprueba-c';
+  select count(*) into n from mis_complejos_colaborador() x where x.complejo_id = 'cprueba-c';
   insert into resultados (caso, ok, detalle) values ('Ve que es colaborador de su complejo (y de ninguno más)', n = 1 and (select count(*) from mis_complejos_colaborador()) = 1, n::text);
   select count(*) into n from reservas where complejo_id = 'cprueba-c';
   insert into resultados (caso, ok, detalle) values ('Ve las reservas de su complejo', n = 2, n::text);
@@ -81,8 +81,13 @@ begin
   insert into resultados (caso, ok) values ('Confirma un pedido pendiente', (select estado from reservas where id = v_pend) = 'confirmada');
   update reservas set medio_pago = 'efectivo', no_vino = true where id = v_conf;
   insert into resultados (caso, ok) values ('Registra el cobro y marca "no vino"', (select medio_pago = 'efectivo' and no_vino from reservas where id = v_conf));
-  update reservas set estado = 'cancelada', cancelada_at = now(), cancelada_por = 'complejo' where id = v_conf;
-  insert into resultados (caso, ok) values ('Cancela un turno', (select estado from reservas where id = v_conf) = 'cancelada');
+  -- Desde 20261032 un turno cobrado solo lo cancela el dueño (así no desaparece de la caja del empleado)
+  begin
+    update reservas set estado = 'cancelada', cancelada_at = now(), cancelada_por = 'complejo' where id = v_conf;
+    insert into resultados (caso, ok) values ('No cancela un turno que ya cobró', false);
+  exception when others then insert into resultados (caso, ok, detalle) values ('No cancela un turno que ya cobró', sqlerrm = 'turno_cobrado', sqlerrm); end;
+  update reservas set estado = 'cancelada', cancelada_at = now(), cancelada_por = 'complejo' where id = v_pend;
+  insert into resultados (caso, ok) values ('Cancela un turno sin cobrar', (select estado from reservas where id = v_pend) = 'cancelada');
 
   insert into reservas (complejo_id, cancha_id, fecha, inicio, fin, nombre)
   values ('cprueba-c', (select valor::uuid from ids where clave = 'cancha'), current_date + 4, (current_date + 4) + time '15:00', (current_date + 4) + time '16:00', 'Por teléfono')

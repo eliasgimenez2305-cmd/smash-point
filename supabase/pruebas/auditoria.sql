@@ -20,6 +20,8 @@ with c as (insert into canchas (complejo_id, nombre, apertura, cierre, precio_90
 insert into ids select 'cancha', id::text from c;
 with p as (insert into productos (complejo_id, nombre, precio, stock) values ('cprueba-audit', 'Agua', 1500, 10) returning id)
 insert into ids select 'agua', id::text from p;
+-- Los consumos guardan quién los anotó (de la sesión): se cargan como el organizador
+select set_config('request.jwt.claims', json_build_object('sub', (select valor from ids where clave = 'org'), 'role', 'authenticated')::text, true);
 with c as (insert into cuentas (complejo_id, nombre) values ('cprueba-audit', 'Pedro') returning id)
 insert into ids select 'cuenta', id::text from c;
 insert into cuenta_consumos (complejo_id, cuenta_id, descripcion, cantidad, precio_unitario)
