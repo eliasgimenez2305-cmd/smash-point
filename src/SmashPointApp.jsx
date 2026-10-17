@@ -4322,6 +4322,84 @@ function MatchOutcomeButtons({ m, nameA, nameB, onWalkover, onRetired, className
 }
 
 /* Ventanita para cargar el resultado de un partido desde la grilla de horarios */
+/* Otro partido sin terminar "en curso" en la misma cancha: antes de poner este, se pregunta dónde se
+   juega (el organizador pudo cambiarlo de cancha o adelantarlo). Devuelve ese otro partido, o null. */
+function liveConflict(matches, m, format) {
+  if (!m?.schedule) return null;
+  return matches.find((x) => x.key !== m.key && x.liveStatus === "en_curso" && !x.placeholder && !matchIsPlayed(x, format) && x.schedule && x.schedule.court === m.schedule.court) || null;
+}
+
+function LiveCourtModal({ m, tournament, matches, pairsById, update, onOpenResult, onClose }) {
+  const format = tournament.matchFormat;
+  const orig = m.schedule.court;
+  const courts = courtsOfDay(tournament, m.schedule.date, matches.filter((x) => x.schedule));
+  const liveAt = (c) => matches.find((x) => x.key !== m.key && x.liveStatus === "en_curso" && !x.placeholder && !matchIsPlayed(x, format) && x.schedule && x.schedule.court === c);
+  const current = liveAt(orig);
+  const numero = (x) => (x.number ? `#${x.number}` : "anterior");
+  const describe = (x) => `${x.number ? `#${x.number} · ` : ""}${x.placeholder || `${pairsById[x.pairA]?.name || "—"} vs ${pairsById[x.pairB]?.name || "—"}`}`;
+  // Al pasarlo a otra cancha, si ahí había otro partido en ese mismo horario, se intercambian de cancha
+  const occupantAt = (c) => matches.find((x) => x.key !== m.key && x.schedule && x.schedule.date === m.schedule.date && x.schedule.time === m.schedule.time && x.schedule.court === c);
+  const enOtra = (c) => {
+    let next = tournament;
+    const occ = occupantAt(c);
+    if (occ) next = withMatchSchedule(next, occ.categoryId, occ.location, occ.matchId, { ...occ.schedule, court: orig });
+    next = withMatchSchedule(next, m.categoryId, m.location, m.matchId, { ...m.schedule, court: c });
+    next = withMatchLiveStatus(next, m.categoryId, m.location, m.matchId, "en_curso");
+    update(next);
+    onClose();
+  };
+  const reemplazar = () => {
+    let next = withMatchLiveStatus(tournament, current.categoryId, current.location, current.matchId, null);
+    next = withMatchLiveStatus(next, m.categoryId, m.location, m.matchId, "en_curso");
+    update(next);
+    onClose();
+  };
+  const otras = courts.filter((c) => c !== orig);
+  return (
+    <Modal title="¿En qué cancha se juega?" onClose={onClose}>
+      <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-sm mb-3" style={F.body}>{describe(m)}</p>
+      {current && (
+        <p className="text-sm mb-4 rounded-lg px-3 py-2" style={{ ...F.body, color: "#fdba74", border: "1px solid #fb923c66", backgroundColor: "#fb923c14" }}>
+          En {courtName(tournament, orig)} todavía figura en curso el {describe(current)}.
+        </p>
+      )}
+      {otras.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Se juega en otra cancha</p>
+          <div className="grid grid-cols-2 gap-2">
+            {otras.map((c) => {
+              const ocupada = liveAt(c);
+              const occ = occupantAt(c);
+              return ocupada ? (
+                <div key={c} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500" style={F.body}>
+                  <span className="block font-semibold">{courtName(tournament, c)}</span>En curso: {describe(ocupada)}
+                </div>
+              ) : (
+                <ChoiceCard key={c} compact selected={false} onClick={() => enOtra(c)} title={courtName(tournament, c)} description={occ ? `Libre ahora · el ${describe(occ)} pasa a ${courtName(tournament, orig)}` : "Libre"} />
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {current && (
+        <div className="space-y-2 mb-2">
+          <p className="text-xs uppercase tracking-wide text-teal-400" style={F.body}>Se juega en {courtName(tournament, orig)}</p>
+          {onOpenResult && (
+            <button type="button" onClick={() => onOpenResult(current)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-left" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+              El {numero(current)} ya terminó: cargar su resultado
+            </button>
+          )}
+          <button type="button" onClick={reemplazar} className="w-full px-3 py-2 rounded-lg text-sm border border-orange-400 text-orange-300 text-left" style={F.body}>
+            Sacarle "en curso" al {numero(current)} y empezar este
+          </button>
+        </div>
+      )}
+      <button type="button" onClick={onClose} className="mt-2 text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cancelar</button>
+    </Modal>
+  );
+}
+
 function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onRetired, onClose }) {
   const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
   return (
@@ -4353,11 +4431,16 @@ function useMatchActions(tournament, update) {
   const matches = useMemo(() => collectScheduleableMatches(tournament), [tournament]);
   const [resultKey, setResultKey] = useState(null);
   const [moveKey, setMoveKey] = useState(null);
+  const [liveKey, setLiveKey] = useState(null); // partido a poner "en curso" con otro en curso en su cancha
   const resultMatch = resultKey ? matches.find((m) => m.key === resultKey) : null;
   const moveMatch = moveKey ? matches.find((m) => m.key === moveKey) : null;
+  const liveMatch = liveKey ? matches.find((m) => m.key === liveKey) : null;
 
   const change = (m, fn) => update(withMatchResult(tournament, m.categoryId, m.location, m.matchId, fn));
-  const setLive = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+  const setLive = (m, liveStatus) => {
+    if (liveStatus === "en_curso" && liveConflict(matches, m, tournament.matchFormat)) { setLiveKey(m.key); return; }
+    update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+  };
 
   const modals = (
     <>
@@ -4373,6 +4456,7 @@ function useMatchActions(tournament, update) {
         />
       )}
       {moveMatch && <MoveMatchModal m={moveMatch} tournament={tournament} matches={matches} pairsById={pairsById} update={update} onClose={() => setMoveKey(null)} />}
+      {liveMatch && <LiveCourtModal m={liveMatch} tournament={tournament} matches={matches} pairsById={pairsById} update={update} onOpenResult={(x) => { setLiveKey(null); setResultKey(x.key); }} onClose={() => setLiveKey(null)} />}
     </>
   );
   return { pairsById, matches, openResult: (m) => setResultKey(m.key), openMove: (m) => setMoveKey(m.key), setLive, modals };
@@ -11025,7 +11109,13 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   };
 
   // "En curso" (o null para sacarlo): lo marca el organizador a mano al mandar el partido a la cancha
+  const [liveAsk, setLiveAsk] = useState(null); // clave del partido a poner "en curso" (ver LiveCourtModal)
   const setGroupLiveStatus = (groupId, matchId, liveStatus) => {
+    if (liveStatus === "en_curso") {
+      const all = collectScheduleableMatches(tournament);
+      const sm = all.find((x) => x.categoryId === category.id && x.matchId === matchId);
+      if (sm && liveConflict(all, sm, format)) { setLiveAsk(sm.key); return; }
+    }
     onUpdateCategory({
       ...category,
       groups: category.groups.map((g) => (g.id !== groupId ? g : { ...g, matches: g.matches.map((m) => (m.id === matchId ? { ...m, liveStatus } : m)) })),
@@ -11158,8 +11248,17 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
+  const liveAskMatch = liveAsk ? collectScheduleableMatches(tournament).find((x) => x.key === liveAsk) : null;
+
   return (
     <div>
+      {liveAskMatch && (
+        <LiveCourtModal
+          m={liveAskMatch} tournament={tournament} matches={collectScheduleableMatches(tournament)}
+          pairsById={Object.assign({}, ...tournament.categories.map((c) => categoryEntitiesById(c)))}
+          update={onUpdateTournament} onClose={() => setLiveAsk(null)}
+        />
+      )}
       {super8 && (
         <p className="text-xs text-teal-400 mb-4" style={F.body}>
           Formato <span className="text-lime-400 font-semibold">{CATEGORY_FORMAT_LABEL[category.format]}</span>: {individual
