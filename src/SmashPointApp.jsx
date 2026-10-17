@@ -531,8 +531,10 @@ function withRegistrationOpen(t, open) {
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
    categorías llenas), "cerradas" (el organizador las cerró: cartel) o "cerrado" (nunca tuvo, o ya
    terminó: no se muestra nada) */
-function registrationStatus(t) {
-  if (isInfoOnly(t) || t.status === STATUS.FINALIZADO) return "cerrado";
+function registrationStatus(t0) {
+  if (isInfoOnly(t0)) return "cerrado";
+  const t = withAutoStatus(t0); // empezado el torneo, las inscripciones quedan cerradas
+  if (t.status === STATUS.FINALIZADO) return "cerrado";
   // Tuvo inscripciones y el organizador las cerró: se muestra el cartel "Inscripciones cerradas"
   if (!t.inscripcionesAbiertas) return t.inscripcionesCerradas ? "cerradas" : "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
@@ -688,11 +690,56 @@ function isInfoOnly(t) {
   return !!t?.infoOnly;
 }
 
-/* Estado de un torneo para la parte pública. Los informativos no los maneja nadie, así que el
-   estado sale de sus fechas: antes del primer día es Próximo, hasta el último En curso, después
-   Finalizado. Los gestionados usan el estado que elige el organizador. */
+/* Arranque del torneo: el primer día de juego a su hora de inicio (Argentina); sin días, la fecha del torneo */
+function tournamentStartMs(t) {
+  const first = [...(t.playDates || [])].filter((d) => d?.date).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))[0];
+  const date = first?.date || t.date;
+  if (!date) return null;
+  const ms = Date.parse(`${date}T${first?.from || "00:00"}:00-03:00`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+const anyMatch = (t, test) => (t.categories || []).some((c) => (c.groups || []).some((g) => (g.matches || []).some(test)) || (c.bracket || []).some((round) => round.some(test)));
+
+/* ¿Ya empezó? Llegó la hora del primer día, o hay algún resultado o partido en curso */
+function tournamentStarted(t, ahora = Date.now()) {
+  const start = tournamentStartMs(t);
+  return (start != null && ahora >= start) || tournamentProgress(t).played > 0 || tournamentHasScores(t) || anyMatch(t, (m) => m.liveStatus === "en_curso");
+}
+
+/* ¿Terminó? Cada categoría jugó su final (o, en el Súper 8, todos sus partidos). Con el resumen de
+   la portada no se sabe: lo decide el estado guardado */
+function tournamentFinished(t) {
+  const cats = t.categories || [];
+  if (t._light || cats.length === 0) return false;
+  return cats.every((c) => {
+    if (isSuper8(c)) {
+      const ms = (c.groups || []).flatMap((g) => g.matches || []);
+      return ms.length > 0 && ms.every((m) => matchIsPlayed(m, t.matchFormat));
+    }
+    if (!c.bracket || c.bracket.length === 0) return false;
+    const { winners } = walkBracket(c.bracket, t.matchFormat);
+    return !!winners[winners.length - 1]?.[0];
+  });
+}
+
+/* El estado se sigue solo: Próximo pasa a En curso cuando arranca (por la hora o con el primer resultado)
+   y a Finalizado cuando se juegan todas las finales. Al empezar se cierran las inscripciones. Lo que el
+   organizador elige a mano adelante (En curso antes de hora, Finalizado) se respeta. */
+function withAutoStatus(t, ahora = Date.now()) {
+  if (!t || isInfoOnly(t)) return t;
+  let n = t;
+  if (n.status === STATUS.PROXIMO && tournamentStarted(n, ahora)) n = { ...n, status: STATUS.EN_CURSO };
+  if (n.status === STATUS.EN_CURSO && tournamentFinished(n)) n = { ...n, status: STATUS.FINALIZADO };
+  if (n.inscripcionesAbiertas && n.status !== STATUS.PROXIMO) n = withRegistrationOpen(n, false);
+  return n;
+}
+
+/* Estado de un torneo para mostrar. Los informativos no los maneja nadie, así que el estado sale de
+   sus fechas: antes del primer día es Próximo, hasta el último En curso, después Finalizado. Los
+   gestionados, el que eligió el organizador con el avance automático (ver withAutoStatus). */
 function tournamentStatusOf(t) {
-  if (!isInfoOnly(t)) return t.status;
+  if (!isInfoOnly(t)) return withAutoStatus(t).status;
   const dates = (t.playDates || []).map((d) => d.date).sort();
   if (dates.length === 0) return STATUS.PROXIMO;
   const today = todayISO();
@@ -4052,11 +4099,12 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
 
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
-function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove }) {
+function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove, onLive }) {
   const status = m.placeholder ? "pendiente" : matchDisplayStatus(m, format);
   const finished = status === "finalizado";
-  const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
-  const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : "#38bdf81a";
+  const live = status === "en_curso";
+  const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : live ? "#fb923c" : "#38bdf8";
+  const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : live ? "#fb923c22" : "#38bdf81a";
   return (
     <div
       draggable={!!onDragStart}
@@ -4076,6 +4124,7 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
         {conflict && <span className="text-[9px] font-bold" style={{ color: "#f87171" }}>⚠ CHOQUE</span>}
         {m.draft && <span className="text-[9px] font-bold" style={{ color: "#a78bfa" }}>BORRADOR</span>}
         {finished && <span className="text-[9px] font-bold" style={{ color: "#9fe022" }}>✓</span>}
+        {live && <span className="text-[9px] font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
       </div>
       {m.placeholder ? (
         <p className="italic opacity-70 truncate">{m.placeholder}</p>
@@ -4097,6 +4146,9 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
       )}
       {onMove && !finished && (
         <button type="button" onClick={onMove} className="mt-0.5 ml-2 text-[10px] underline text-teal-300 hover:text-lime-400">⇄ Mover</button>
+      )}
+      {onLive && !finished && !m.placeholder && (
+        <button type="button" onClick={() => onLive(live ? null : "en_curso")} className="mt-0.5 ml-2 text-[10px] underline" style={{ color: live ? "#94a3b8" : "#fb923c" }}>{live ? "Quitar en curso" : "▶ En curso"}</button>
       )}
     </div>
   );
@@ -4615,7 +4667,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [gridOpen, setGridOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
-  const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
+  const { pairsById, matches, openResult, openMove, setLive, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
   const unscheduled = matches.filter((m) => !m.schedule);
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
@@ -4819,10 +4871,10 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                     scheduled={scheduled} trayMatches={trayMatches} closed={closed} pairsById={pairsById} offAvailability={offAvailability}
                     venueFilter={venueFilter === "" ? null : Number(venueFilter)} inCategory={inCategory}
                     onDropOnCell={onDropOnCell} onDragStartMatch={onDragStartMatch} onAssign={editSchedule} onClear={clearSchedule}
-                    onResult={openResult} onMove={openMove} onNotice={setNotice}
+                    onResult={openResult} onMove={openMove} onLive={setLive} onNotice={setNotice}
                   />
                   <div className="flex flex-wrap gap-3 mt-3 text-[11px]" style={F.body}>
-                    {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
+                    {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#fb923c", "En curso", false], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
                       <span key={label} className="flex items-center gap-1.5">
                         <span className="w-3 h-3 rounded-sm inline-block" style={{ border: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, backgroundColor: color + "22" }} />
                         {label}
@@ -4865,7 +4917,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
 /* Planilla de un día de la pestaña Horarios: en la compu, horas x canchas (arrastrar y soltar); en
    el celular, cancha por cancha. Con filtro de sede solo muestra sus canchas; con filtro de
    categoría, los partidos de las demás se ven como "Ocupado" (la cancha no está libre). */
-function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatches, closed, pairsById, offAvailability, venueFilter, inCategory, onDropOnCell, onDragStartMatch, onAssign, onClear, onResult, onMove, onNotice }) {
+function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatches, closed, pairsById, offAvailability, venueFilter, inCategory, onDropOnCell, onDragStartMatch, onAssign, onClear, onResult, onMove, onLive, onNotice }) {
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const times = dayTimeSlots(dateInfo, duration);
   // Solo las canchas de las sedes que se usan ese día (y de la sede elegida)
@@ -4874,7 +4926,7 @@ function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatch
     <div key={m.key} className="rounded-md px-2 py-1.5 mb-1 text-[10px] text-slate-500 border border-slate-700" style={F.body}>Ocupado · {m.categoryName}</div>
   );
   const card = (m, conflict, draggable) => (inCategory(m)
-    ? <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={draggable ? onDragStartMatch(m.key) : undefined} onClear={() => onClear(m)} onResult={() => onResult(m)} onMove={() => onMove(m)} />
+    ? <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={draggable ? onDragStartMatch(m.key) : undefined} onClear={() => onClear(m)} onResult={() => onResult(m)} onMove={() => onMove(m)} onLive={onLive ? (st) => onLive(m, st) : undefined} />
     : busyCard(m));
 
   if (courts.length === 0) return <p className="opacity-60 text-sm" style={F.body}>Ninguna cancha de esta sede se usa ese día.</p>;
@@ -7373,7 +7425,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
         )}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-          <Badge status={tournament.status} />
+          <Badge status={tournamentStatusOf(tournament)} />
         </div>
         <p className="text-xs text-teal-500 mt-2" style={F.body}>
           {tournamentTypeSummary(tournament)}
@@ -8455,7 +8507,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
   const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
   const bracketsGenerated = t.categories.filter((c) => c.bracket).length;
   const circuit = (circuits || []).find((c) => c.id === t.circuitId);
-  const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[t.status];
+  const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[tournamentStatusOf(t)];
 
   return (
     <div className="p-4 rounded-lg transition" style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}33`, borderLeft: `3px solid ${accent}` }}>
@@ -8474,7 +8526,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
               {t.venue ? ` · ${t.venue}` : ""}
             </span>
             <span className="inline-block mt-1 mr-1"><TournamentTypeTag tournament={t} /></span>
-            {t.inscripcionesAbiertas && <span className="inline-block mt-1 mr-1"><OpenRegistrationsBadge tournament={t} /></span>}
+            {withAutoStatus(t).inscripcionesAbiertas && <span className="inline-block mt-1 mr-1"><OpenRegistrationsBadge tournament={t} /></span>}
             {pendingCount > 0 && (
               <span className="inline-block mt-1 mr-1 px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold" style={{ ...F.body, backgroundColor: "#fb923c", color: "#14181f" }}>
                 {pendingCount} {pendingCount === 1 ? "nueva" : "nuevas"}
@@ -8483,7 +8535,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
             {circuit && <span className="inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full border border-lime-800 text-lime-400" style={F.body}>Fecha de: {circuit.name}</span>}
           </div>
         </div>
-        <Badge status={t.status} />
+        <Badge status={tournamentStatusOf(t)} />
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -15543,7 +15595,18 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
 function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
-  const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
+  // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
+  // colaborador que solo carga resultados no puede guardar el torneo entero, así que eso queda para el dueño
+  const update = (t) => {
+    const next = { ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) };
+    save(soloResultados ? next : withAutoStatus(next));
+  };
+  // Al abrir el torneo ya empezado (o terminado), se guarda el estado al día
+  useEffect(() => {
+    if (soloResultados) return;
+    const auto = withAutoStatus(tournament);
+    if (auto.status !== tournament.status || auto.inscripcionesAbiertas !== tournament.inscripcionesAbiertas) save(auto);
+  }, [tournament, soloResultados]); // eslint-disable-line react-hooks/exhaustive-deps
   const usesSchedule = tournamentUsesSchedule(tournament);
   const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
   // Pestañas en el orden en que se organiza un torneo. El Súper 8 no tiene grupos, llave ni grilla
@@ -15556,7 +15619,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
-    if (tournament.status === STATUS.EN_CURSO) return usesSchedule ? "encancha" : "partidos";
+    if (tournamentStatusOf(tournament) === STATUS.EN_CURSO) return usesSchedule ? "encancha" : "partidos";
     if (pendingCount > 0) return "inscripciones";
     if (tournament.categories.length === 0 || (usesSchedule && (tournament.playDates || []).length === 0)) return "config";
     return usesSchedule ? "horarios" : "inscripciones";
