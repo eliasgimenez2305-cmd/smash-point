@@ -4097,6 +4097,70 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
   );
 }
 
+/* Transmisiones en vivo: un link por cancha y por día (el de Beelup cambia en cada transmisión).
+   tournament.streams = { "2026-10-17": { "1": "https://...", "2": "https://..." } } */
+const streamOf = (t, date, court) => t?.streams?.[date]?.[court] || null;
+const linkValido = (url) => typeof url === "string" && /^https:\/\/\S+$/.test(url) && url.length <= 500;
+
+/* Editor de los links del día, en Horarios (se abre y se cierra para no tapar la planilla) */
+function StreamLinksEditor({ tournament, date, courts, onSave }) {
+  const delDia = tournament.streams?.[date] || {};
+  const cargados = courts.filter((c) => delDia[c]).length;
+  const [abierto, setAbierto] = useState(false);
+  const [textos, setTextos] = useState({});
+  const [error, setError] = useState("");
+  useEffect(() => { setTextos({}); setError(""); }, [date]);
+  const valor = (c) => textos[c] ?? delDia[c] ?? "";
+  const guardar = (c) => {
+    const url = valor(c).trim();
+    if ((delDia[c] || "") === url) return;
+    if (url && !linkValido(url)) { setError(`${courtName(tournament, c)}: pegá el link completo (empieza con https://).`); return; }
+    setError("");
+    const dia = { ...delDia };
+    if (url) dia[c] = url; else delete dia[c];
+    const streams = { ...(tournament.streams || {}), [date]: dia };
+    if (Object.keys(dia).length === 0) delete streams[date];
+    onSave(streams);
+  };
+  return (
+    <div className="mb-3 rounded-lg border border-teal-800" style={{ ...F.body, backgroundColor: "rgba(8,18,24,0.5)" }}>
+      <button type="button" onClick={() => setAbierto(!abierto)} aria-expanded={abierto} className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left">
+        <span><span style={{ color: "#f87171" }}>●</span> Transmisiones en vivo del {formatDateShort(date)}</span>
+        <span className="text-xs text-teal-400">{cargados > 0 ? `${cargados} de ${courts.length} canchas` : "sin links"} {abierto ? "▲" : "▼"}</span>
+      </button>
+      {abierto && (
+        <div className="px-3 pb-3 space-y-2">
+          <p className="text-[11px] text-teal-500">Pegá el link de la transmisión de cada cancha (Beelup u otro). Se ve en la página pública del torneo, arriba de los horarios de ese día. Para sacarlo, borralo.</p>
+          {courts.map((c) => (
+            <label key={c} className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-2 text-xs">
+              <span className="text-teal-300 truncate">{courtName(tournament, c)}</span>
+              <input type="url" inputMode="url" value={valor(c)} onChange={(e) => setTextos({ ...textos, [c]: e.target.value })} onBlur={() => guardar(c)} placeholder="https://beelup.com/..." className="w-full min-w-0 px-2 py-1.5 rounded border text-xs" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            </label>
+          ))}
+          {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Botones "▶ Cancha 1" de las transmisiones de un día (vista pública) */
+function StreamLinks({ tournament, date }) {
+  const delDia = tournament.streams?.[date] || {};
+  const canchas = Object.keys(delDia).filter((c) => linkValido(delDia[c])).sort((a, b) => Number(a) - Number(b));
+  if (canchas.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-2" style={F.body}>
+      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>● En vivo</span>
+      {canchas.map((c) => (
+        <a key={c} href={delDia[c]} target="_blank" rel="noopener noreferrer" className="px-3 py-1 rounded-full text-xs font-semibold border" style={{ borderColor: "#f8717199", color: "#fecaca", backgroundColor: "#f871711a" }}>
+          ▶ {courtName(tournament, Number(c))}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
 function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove, onLive }) {
@@ -4864,6 +4928,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                 )}
               </div>
 
+              <StreamLinksEditor tournament={tournament} date={dateInfo.date} courts={courtsOfDay(tournament, dateInfo.date, scheduled)} onSave={(streams) => update({ ...tournament, streams })} />
               <div className="lg:flex lg:items-start lg:gap-4">
                 <div className="flex-1 min-w-0 mb-6">
                   <ScheduleDayGrid
@@ -5110,6 +5175,7 @@ function SchedulePublicView({ tournament }) {
         return (
           <div key={date} className="mb-6">
             <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill></div>
+            <StreamLinks tournament={tournament} date={date} />
             <div className="rounded-xl border divide-y min-w-0" style={{ borderColor: dateColor + "40" }}>
               {Object.keys(byTime).sort().map((time) => (
                 <div key={time} id={slotId(byTime[time][0])} className="px-3 py-2 scroll-mt-4 space-y-2.5" style={{ borderColor: dateColor + "22" }}>
@@ -5130,6 +5196,7 @@ function SchedulePublicView({ tournament }) {
                               {m.label && <span className="text-teal-500"> · {m.label}</span>}
                             </span>
                             {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+                            {live && streamOf(tournament, date, m.schedule.court) && <a href={streamOf(tournament, date, m.schedule.court)} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold shrink-0 underline" style={{ color: "#f87171" }}>▶ Ver</a>}
                           </div>
                           {hasResult ? (
                             <><span /><div className="min-w-0 mt-0.5"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div></>
