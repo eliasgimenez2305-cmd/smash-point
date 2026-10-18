@@ -68,3 +68,10 @@ test("no copia los datos calculados del resumen (claves con _)", () => {
   assert.equal(copia.categories[0]._pairsCount, undefined);
   assert.equal(copia.categories[0]._placements, undefined);
 });
+
+test("la copia nace no pública y sin los links de transmisión", () => {
+  let n = 0;
+  const copia = duplicarTorneo({ id: "a", name: "Fecha 1", date: "2026-10-10", publico: true, streams: { "2026-10-10": { 1: "https://x" } }, categories: [] }, { name: "Fecha 2", date: "2026-10-17", estado: "Próximo", nuevoId: () => `n${n++}` });
+  assert.equal(copia.publico, false);
+  assert.equal(copia.streams, undefined);
+});

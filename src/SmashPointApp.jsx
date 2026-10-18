@@ -690,6 +690,11 @@ function isInfoOnly(t) {
   return !!t?.infoOnly;
 }
 
+/* ¿Se ve en la página pública? Los torneos nuevos nacen ocultos (publico: false) y el organizador los
+   publica desde Configuración (o el creador desde su panel). Los que ya existían antes de esta opción
+   no tienen el campo y siguen públicos. */
+const esPublico = (t) => t?.publico !== false;
+
 /* Arranque del torneo: el primer día de juego a su hora de inicio (Argentina); sin días, la fecha del torneo */
 function tournamentStartMs(t) {
   const first = [...(t.playDates || [])].filter((d) => d?.date).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))[0];
@@ -8009,7 +8014,7 @@ function InfoTournamentForm({ initial, onSave, onCancel, accessToken }) {
     if (new Set(days.map((d) => d.date)).size !== days.length) { setError("Hay un día repetido."); return; }
     onSave({
       // Mismo objeto que un torneo gestionado, sin organizador ni categorías
-      ...(initial || { status: STATUS.PROXIMO, circuitId: null, organizerId: null, categories: [], matchFormat: { ...DEFAULT_MATCH_FORMAT } }),
+      ...(initial || { status: STATUS.PROXIMO, publico: false, circuitId: null, organizerId: null, categories: [], matchFormat: { ...DEFAULT_MATCH_FORMAT } }),
       id: initial?.id || uid(),
       infoOnly: true,
       name: name.trim(),
@@ -8295,7 +8300,7 @@ function CoachManager({ coaches, onSave, onDelete, accessToken }) {
 
 /* Fila de torneo en el panel del creador. Los gestionados son de solo lectura + eliminar (la
    edición es tarea del organizador); los informativos los carga el creador y se pueden editar. */
-function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
+function CreatorTournamentRow({ t, organizerName, onDelete, onEdit, onTogglePublico }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const info = isInfoOnly(t);
   const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
@@ -8311,6 +8316,12 @@ function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
         </p>
       </div>
       <div className="flex items-center gap-3">
+        {onTogglePublico && (
+          <button type="button" onClick={() => onTogglePublico(t)} aria-pressed={esPublico(t)} title={esPublico(t) ? "Se ve en la página pública. Tocá para ocultarlo." : "No se ve en la página pública. Tocá para publicarlo."}
+            className="text-xs px-2.5 py-1 rounded-full border font-semibold" style={{ ...F.body, ...(esPublico(t) ? { borderColor: "#9fe02299", color: "#9fe022" } : { borderColor: "#64748b", color: "#94a3b8" }) }}>
+            {esPublico(t) ? "● Público" : "○ No público"}
+          </button>
+        )}
         <Badge status={tournamentStatusOf(t)} />
         {info && onEdit && <button type="button" onClick={() => onEdit(t)} className="text-sm text-teal-300" style={F.body}>Editar</button>}
         {!confirmingDelete ? (
@@ -8534,7 +8545,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
           <p className="text-sm text-teal-400 mb-4" style={F.body}>Todos los torneos de la plataforma, de cualquier organizador, más los informativos que cargás vos. Los de los organizadores podés eliminarlos si hace falta; editarlos sigue siendo tarea de cada organizador.</p>
           <div className="space-y-2">
             {tournaments.map((t) => (
-              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} onEdit={(it) => { setInfoForm(it); window.scrollTo(0, 0); }} />
+              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} onEdit={(it) => { setInfoForm(it); window.scrollTo(0, 0); }} onTogglePublico={(it) => onSaveInfoTournament({ ...it, publico: !esPublico(it) })} />
             ))}
             {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay torneos cargados.</p>}
           </div>
@@ -8686,7 +8697,10 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
             {circuit && <span className="inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full border border-lime-800 text-lime-400" style={F.body}>Fecha de: {circuit.name}</span>}
           </div>
         </div>
-        <Badge status={tournamentStatusOf(t)} />
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <Badge status={tournamentStatusOf(t)} />
+          {!esPublico(t) && <span className="text-[10px] px-2 py-0.5 rounded-full border border-slate-600 text-slate-400" style={F.body} title="No se ve en la página pública: se publica en Configuración">○ No público</span>}
+        </div>
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -15884,6 +15898,14 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
 
         {view === "config" && (
           <>
+            <div className="mb-5 rounded-xl border p-4" style={{ borderColor: esPublico(tournament) ? "#9fe02266" : "#475569", backgroundColor: "rgba(8,18,24,0.5)" }}>
+              <Toggle
+                checked={esPublico(tournament)}
+                onChange={(v) => update({ ...tournament, publico: v })}
+                label="Torneo público"
+                description={esPublico(tournament) ? "Se ve en la página pública: portada, horarios, grupos y llaves." : "No se ve en la página pública. Solo vos lo ves en tu panel (las inscripciones online tampoco se pueden usar)."}
+              />
+            </div>
             <TournamentTypeEditor tournament={tournament} update={update} />
             <CategoriesSettings
               tournament={tournament} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory}
@@ -16627,7 +16649,7 @@ function SmashPointAppInner() {
 
   // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
   const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
-    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: DEFAULT_MATCH_DURATION, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, publico: false, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: DEFAULT_MATCH_DURATION, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
@@ -16717,6 +16739,7 @@ function SmashPointAppInner() {
 
   const selected = tournaments.find((t) => t.id === selectedId) || null;
   const myTournaments = session ? tournaments.filter((t) => t.organizerId === session.id) : [];
+  const publicTournaments = tournaments.filter(esPublico);
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
@@ -16724,8 +16747,8 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
-  } else if (route === "public-tournament" && selected) {
+    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+  } else if (route === "public-tournament" && selected && (esPublico(selected) || session?.role === "creador" || selected.organizerId === session?.id)) {
     showFooterAds = true;
     content = isInfoOnly(selected)
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
@@ -16836,7 +16859,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   }
 
   return (

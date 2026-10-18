@@ -4,7 +4,7 @@
    corren tantos días como haya entre el torneo original y el nuevo. */
 
 const CATEGORIA_SIN_COPIAR = ["pairs", "groups", "bracket", "teams", "bracketPublished", "bracketIsSkeleton", "bracketSeeding"];
-const TORNEO_SIN_COPIAR = ["rev", "_light", "eventId", "inscripcionesAbiertas", "categories"];
+const TORNEO_SIN_COPIAR = ["rev", "_light", "eventId", "inscripcionesAbiertas", "categories", "publico", "streams"];
 
 function diasEntre(desde, hasta) {
   return Math.round((Date.parse(`${hasta}T12:00:00Z`) - Date.parse(`${desde}T12:00:00Z`)) / 86400000);
@@ -40,6 +40,7 @@ export function duplicarTorneo(t, { name, date, estado, nuevoId }) {
     date,
     status: estado,
     inscripcionesAbiertas: false,
+    publico: false, // la copia nace oculta, como todo torneo nuevo
     playDates: (t.playDates || []).map((d) => ({ ...d, date: correr(d.date, dias) })),
     ...(t.venues ? { venues: t.venues.map((v) => (v.days ? { ...v, days: v.days.map((d) => ({ ...d, date: correr(d.date, dias) })) } : v)) } : {}),
     categories: categorias,
