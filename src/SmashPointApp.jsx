@@ -9530,11 +9530,15 @@ function PlanAviso({ filas = [], colaborador = false }) {
     const limite = f.fin ? fechaCorta(sumarDias(f.fin, f.dias_gracia ?? 7)) : "";
     const queBloquea = f.tipo === "organizador"
       ? "no se pueden crear torneos nuevos ni recibir inscripciones online (los torneos que ya tenés se siguen jugando normalmente)"
-      : "el complejo quedó en solo lectura: no se cargan turnos ni reservas online, ventas, consumos, cajas ni compras";
+      : "el complejo quedó en solo lectura (no se cargan turnos ni reservas online, ventas, consumos, cajas ni compras)";
+    // Lo mismo, pero lo que va a pasar si no renueva (en los días de gracia)
+    const vaABloquear = f.tipo === "organizador"
+      ? "no se van a poder crear torneos nuevos ni recibir inscripciones online (los torneos que ya tenés se siguen jugando normalmente)"
+      : "el complejo queda en solo lectura (no se van a poder cargar turnos ni reservas online, ventas, consumos, cajas ni compras)";
     switch (f.estado) {
       case "prueba": return colaborador || !f.fin ? null : { color: "#22d3ee", texto: `Estás usando la prueba gratis${f.plan_nombre ? ` del plan ${f.plan_nombre}` : ""} hasta el ${fin}.` };
       case "por_vencer": return colaborador ? null : { color: "#fbbf24", texto: `${quien} vence el ${fin}. Para renovarlo escribinos a ${CONTACTO_PLAN}.` };
-      case "en_gracia": return { color: "#fb923c", texto: `${quien} venció el ${fin}. Hay tiempo hasta el ${limite} para renovarlo; después ${queBloquea}.` };
+      case "en_gracia": return { color: "#fb923c", texto: `${quien} venció el ${fin}. Hay tiempo hasta el ${limite} para renovarlo; después ${vaABloquear}.` };
       case "vencido": return { color: "#f87171", texto: `${quien} está vencido: ${queBloquea}. Escribinos a ${CONTACTO_PLAN} para renovarlo.` };
       case "suspendido": return { color: "#f87171", texto: `${quien} está suspendido: ${queBloquea}, y no se ve en la página pública. Escribinos a ${CONTACTO_PLAN}.` };
       default: return null;
@@ -16271,7 +16275,8 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
               {creditos && (
                 <p className="text-xs mt-2" style={{ ...F.body, color: creditos.pagado ? "#9fe022" : creditos.disponibles > 0 ? "#38bdf8" : "#fbbf24" }}>
                   {creditos.pagado ? "Este torneo ya está pago: lo podés ocultar y volver a publicar sin gastar otro."
-                    : `Pagás por torneo: ${creditos.disponibles > 0 ? `publicarlo usa 1 de tus ${creditos.disponibles} disponible${creditos.disponibles === 1 ? "" : "s"}` : "no te quedan torneos disponibles"}${creditos.corto ? " (Americano / Súper 8: usa primero uno corto)" : ""}.`}
+                    : esPublico(tournament) ? "Ya estaba público, así que no gasta. Si lo ocultás, volver a publicarlo usa un torneo de los tuyos."
+                    : `Pagás por torneo: ${creditos.disponibles > 0 ? `publicarlo usa 1 de tus ${creditos.disponibles} disponible${creditos.disponibles === 1 ? "" : "s"}` : "no te quedan torneos disponibles"}${creditos.corto && creditos.disponibles > 0 ? " (Americano / Súper 8: usa primero uno corto)" : ""}.`}
                 </p>
               )}
               {avisoPublico && <p role="alert" className="text-xs mt-2 text-amber-300" style={F.body}>{avisoPublico}</p>}
