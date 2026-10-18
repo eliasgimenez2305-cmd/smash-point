@@ -301,6 +301,8 @@ const RESERVA_ERRORES = {
   "23514": "Revisá los datos: hay alguno inválido.",
   "42501": "No tenés permiso para hacer eso.",
   turno_cobrado: "Ese turno ya está cobrado: solo el dueño puede sacarle el cobro, cambiarle el precio, cancelarlo o borrarlo.",
+  plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
+  tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
 
@@ -383,6 +385,7 @@ const PEDIDO_ERRORES = {
   muy_adelante: "Se puede reservar hasta 30 días antes.",
   bloqueado: "No podés pedir turnos en este complejo. Comunicate con ellos.",
   ocupado: "Alguien acaba de tomar ese turno. Elegí otro horario.",
+  plan_vencido: "Este complejo no está tomando reservas online por ahora.",
   demasiados_pedidos: "Ya tenés 2 pedidos esperando que el complejo los confirme. Cuando te respondan, podés pedir otro.",
   no_encontrada: "No encontramos esa reserva.",
   no_cancelable: "Esa reserva ya no se puede cancelar.",
@@ -9471,6 +9474,39 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
   );
 }
 
+/* Plan de la cuenta y de sus complejos (ver mi_plan en 20261034_planes_en_la_app.sql): carteles de
+   vencimiento arriba del panel. Al dueño también le avisa de la prueba gratis; al empleado, solo lo que
+   le cambia el trabajo (en gracia, vencido, suspendido). */
+const PLAN_BLOQUEA = ["vencido", "suspendido"];
+const CONTACTO_PLAN = "smashpoint.arg@gmail.com";
+
+function PlanAviso({ filas = [], colaborador = false }) {
+  const avisos = filas.map((f) => {
+    const quien = f.tipo === "organizador" ? "Tu plan de organizador" : `El plan de ${f.nombre}`;
+    const fin = f.fin ? fechaCorta(f.fin) : "";
+    const limite = f.fin ? fechaCorta(sumarDias(f.fin, f.dias_gracia ?? 7)) : "";
+    const queBloquea = f.tipo === "organizador"
+      ? "no se pueden crear torneos nuevos ni recibir inscripciones online (los torneos que ya tenés se siguen jugando normalmente)"
+      : "el complejo quedó en solo lectura: no se cargan turnos ni reservas online, ventas, consumos, cajas ni compras";
+    switch (f.estado) {
+      case "prueba": return colaborador || !f.fin ? null : { color: "#22d3ee", texto: `Estás usando la prueba gratis${f.plan_nombre ? ` del plan ${f.plan_nombre}` : ""} hasta el ${fin}.` };
+      case "por_vencer": return colaborador ? null : { color: "#fbbf24", texto: `${quien} vence el ${fin}. Para renovarlo escribinos a ${CONTACTO_PLAN}.` };
+      case "en_gracia": return { color: "#fb923c", texto: `${quien} venció el ${fin}. Hay tiempo hasta el ${limite} para renovarlo; después ${queBloquea}.` };
+      case "vencido": return { color: "#f87171", texto: `${quien} está vencido: ${queBloquea}. Escribinos a ${CONTACTO_PLAN} para renovarlo.` };
+      case "suspendido": return { color: "#f87171", texto: `${quien} está suspendido: ${queBloquea}, y no se ve en la página pública. Escribinos a ${CONTACTO_PLAN}.` };
+      default: return null;
+    }
+  }).filter(Boolean);
+  if (avisos.length === 0) return null;
+  return (
+    <div className="space-y-2 mb-4" role="status">
+      {avisos.map((a, i) => (
+        <p key={i} className="text-sm rounded-lg px-3 py-2" style={{ ...F.body, color: a.color, border: `1px solid ${a.color}66`, backgroundColor: `${a.color}14` }}>{a.texto}</p>
+      ))}
+    </div>
+  );
+}
+
 function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onMiCuenta, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
   // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
   // Dentro de Torneos: Torneos, Eventos y Circuitos.
@@ -9488,6 +9524,18 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const verInicio = complejos.length > 0;
   const verCajaDia = complejos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
   const verClientes = complejos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
+  // El plan de la cuenta y de sus complejos (lo administra el creador, ver 20261034_planes_en_la_app.sql)
+  const [misPlanes, setMisPlanes] = useState([]);
+  useEffect(() => {
+    let vivo = true;
+    supabaseRpc("mi_plan", {}, organizer.accessToken).then((rows) => { if (vivo) setMisPlanes(rows || []); }).catch(() => {});
+    return () => { vivo = false; };
+  }, [organizer.accessToken]);
+  const planDe = (tipo, ref) => misPlanes.find((f) => f.tipo === tipo && f.ref_id === ref);
+  const orgBloqueado = !colaborador && PLAN_BLOQUEA.includes(planDe("organizador", organizer.id)?.estado);
+  // Reportes: salvo que todos sus complejos tengan un plan sin Reportes
+  const verReportes = !colaborador && complejos.length > 0 && !complejos.every((c) => { const f = planDe("complejo", c.id); return f && f.plan_nombre && f.reportes === false; });
+  const filasAviso = misPlanes.filter((f) => (f.tipo === "organizador" && !colaborador) || (f.tipo === "complejo" && complejos.some((c) => c.id === f.ref_id)));
   const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
@@ -9526,7 +9574,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ...(verConsumos && !colaborador ? [["compras", "Compras", "compras"]] : []),
       ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
       ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
-      ...(colaborador || complejos.length === 0 ? [] : [["reportes", "Reportes", "reportes"]]),
+      ...(verReportes ? [["reportes", "Reportes", "reportes"]] : []),
     ] },
     { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
   ].filter((g) => g.items.length > 0);
@@ -9546,6 +9594,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       titulo={torneoAbierto ? null : tituloSeccion}
       anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
     >
+      <PlanAviso filas={filasAviso} colaborador={colaborador} />
       {torneoAbierto ? torneoAbierto : seccion === "inicio" && verInicio ? (
         <InicioPanel
           organizer={organizer} colaborador={colaborador} permisos={permisos}
@@ -9555,7 +9604,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
         />
       ) : seccion === "clases" && verReservas && permisos.agenda ? (
         <ClasesPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
-      ) : seccion === "reportes" && !colaborador && complejos.length > 0 ? (
+      ) : seccion === "reportes" && verReportes ? (
         <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} />
       ) : seccion === "clientes" && verClientes ? (
         <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
@@ -9631,17 +9680,19 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
                 <TarjetaResumen titulo="Próximos" tono="cyan" valor={String(tournaments.filter((t) => tournamentStatusOf(t) === STATUS.PROXIMO).length)} />
                 <TarjetaResumen titulo="Por aprobar" tono="ambar" valor={String((inscripciones || []).filter((i) => i.estado === "pendiente" && tournaments.some((t) => t.id === i.torneo_id)).length)} detalle="Inscripciones" />
               </div>
-              {permisos.torneos && (
+              {permisos.torneos && (orgBloqueado ? (
+                <p className="text-sm text-red-300 mb-8" style={F.body}>Con el plan vencido no se pueden crear torneos nuevos. Los que ya tenés se siguen manejando normalmente.</p>
+              ) : (
                 <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
                   + Crear torneo
                 </button>
-              )}
+              ))}
               {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
 
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
               <div className="space-y-2">
                 {tournaments.map((t) => (
-                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} onDuplicate={onDuplicate} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
+                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} onDuplicate={orgBloqueado ? null : onDuplicate} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
                 ))}
                 {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>{colaborador ? "Todavía no hay torneos." : "Todavía no creaste torneos."}</p>}
               </div>
@@ -16307,7 +16358,7 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
           if (changes && err.pgCode === "PGRST202") { partidosEnabled.current = false; pending.current[id] = pending.current[id] || mine; continue; }
           if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
           pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
-          setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
+          setSaveNotice(err.code === "plan_vencido" ? "Tu plan está vencido: no se pueden crear torneos nuevos. Escribinos a smashpoint.arg@gmail.com para renovarlo." : err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
           return;
         }
         if (changes && res?.estado === "ok") {
@@ -16399,6 +16450,7 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
+  const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
   const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
   const [route, setRoute] = useState(() => routeFromHash() || "public-home");
   const [avisoCuenta, setAvisoCuenta] = useState(null); // "Tu cuenta quedó confirmada", etc.
@@ -16482,6 +16534,7 @@ function SmashPointAppInner() {
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
         fetchComplejosReserva().then(setComplejos); // solo lo usan los paneles: no frena la portada
+        supabaseRpc("cuentas_suspendidas", {}).then((rows) => setSuspendidos(rows || [])).catch(() => {});
 
         // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
         const stored = readStoredAuth();
@@ -16937,7 +16990,11 @@ function SmashPointAppInner() {
 
   const selected = tournaments.find((t) => t.id === selectedId) || null;
   const myTournaments = session ? tournaments.filter((t) => t.organizerId === session.id) : [];
-  const publicTournaments = tournaments.filter(esPublico);
+  // La página pública no muestra lo suspendido por el creador (ver cuentas_suspendidas)
+  const suspendido = (tipo, ref) => suspendidos.some((x) => x.tipo === tipo && x.ref_id === ref);
+  const publicTournaments = tournaments.filter((t) => esPublico(t) && !suspendido("organizador", t.organizerId));
+  const publicOrganizers = organizers.filter((o) => !suspendido("organizador", o.id));
+  const publicComplejos = complejos.filter((c) => !suspendido("complejo", c.id) && !suspendido("organizador", c.dueno_id));
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
@@ -16945,7 +17002,7 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   } else if (route === "public-tournament" && selected && (esPublico(selected) || session?.role === "creador" || selected.organizerId === session?.id)) {
     showFooterAds = true;
     content = isInfoOnly(selected)
@@ -17057,7 +17114,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} complejos={complejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   }
 
   return (
