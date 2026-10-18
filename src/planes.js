@@ -60,3 +60,14 @@ export function incluyePlan(p) {
   if (p.para !== "publicidad" && (p.modulo_reservas || p.modulo_cantina)) partes.push(p.empleados == null ? "empleados sin tope" : `${p.empleados} empleado${p.empleados === 1 ? "" : "s"}`);
   return partes.join(" · ") || (p.para === "publicidad" ? "Publicidad en el sitio" : "Sin módulos");
 }
+
+/* ¿Se muestra una publicidad en la página pública? Activa, dentro de su vigencia (desde / hasta, si
+   tiene) y sin el cliente vencido, suspendido o de baja (ocultas: los ids que devuelve
+   publicidades_ocultas() en 20261035_publicidades.sql). Devuelve null si se muestra o el motivo. */
+export function motivoPublicidadOculta(ad, hoy, ocultas = []) {
+  if (ad.active === false) return "Desactivada";
+  if (ad.desde && hoy < ad.desde) return `Empieza el ${ad.desde.slice(8, 10)}/${ad.desde.slice(5, 7)}`;
+  if (ad.hasta && hoy > ad.hasta) return `Terminó el ${ad.hasta.slice(8, 10)}/${ad.hasta.slice(5, 7)}`;
+  if (ocultas.includes(ad.id)) return "Cliente vencido o de baja";
+  return null;
+}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { estadoCliente, finDeCobertura, incluyePlan } from "./planes.js";
+import { estadoCliente, finDeCobertura, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 
 const hoy = "2026-10-18";
 const base = { activo: true, suspendido: false, dias_gracia: 7, desde: "2026-10", cuota_mensual: 100000 };
@@ -43,4 +43,14 @@ test("lo que incluye un plan en una línea", () => {
   assert.equal(incluyePlan({ para: "complejo", modulo_torneos: true, modulo_reservas: true, modulo_cantina: true, reportes: true, empleados: null }), "Torneos · Reservas · Cantina · Reportes · empleados sin tope");
   assert.equal(incluyePlan({ para: "complejo", modulo_reservas: true, empleados: 2 }), "Reservas · 2 empleados");
   assert.equal(incluyePlan({ para: "publicidad" }), "Publicidad en el sitio");
+});
+
+test("publicidad: se oculta desactivada, fuera de su vigencia o con el cliente vencido", () => {
+  const ad = { id: "a1", active: true, desde: "2026-10-01", hasta: "2026-10-31" };
+  assert.equal(motivoPublicidadOculta(ad, "2026-10-18"), null);
+  assert.equal(motivoPublicidadOculta({ ...ad, active: false }, "2026-10-18"), "Desactivada");
+  assert.equal(motivoPublicidadOculta(ad, "2026-09-30"), "Empieza el 01/10");
+  assert.equal(motivoPublicidadOculta(ad, "2026-11-01"), "Terminó el 31/10");
+  assert.equal(motivoPublicidadOculta(ad, "2026-10-18", ["a1"]), "Cliente vencido o de baja");
+  assert.equal(motivoPublicidadOculta({ id: "a2", active: true }, "2030-01-01"), null); // sin vigencia: siempre
 });

@@ -10,7 +10,7 @@ import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from 
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
-import { estadoCliente, ESTADOS_PLAN, incluyePlan } from "./planes.js";
+import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
@@ -257,6 +257,17 @@ async function supabaseRpc(fn, params, accessToken) {
     throw err;
   }
   return data;
+}
+
+/* Clic en una publicidad (ver 20261035_publicidades.sql): se anota sin esperar la respuesta */
+function contarClic(adId) {
+  try {
+    fetch(`${SUPABASE_URL}/rest/v1/rpc/contar_clic`, {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+      body: JSON.stringify({ p_ad: adId }),
+    }).catch(() => {});
+  } catch { /* sin conexión: no se cuenta */ }
 }
 
 /* Inscripciones de los torneos del organizador logueado (la base solo le devuelve las suyas) */
@@ -2470,6 +2481,7 @@ function AdBanner({ ads, className = "" }) {
             <a
               key={ad.id}
               href={ad.linkUrl || "#"}
+              onClick={() => { if (ad.linkUrl) contarClic(ad.id); }}
               target="_blank"
               rel="noopener noreferrer"
               className="block relative rounded-2xl overflow-hidden"
@@ -7895,11 +7907,13 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
   );
 }
 
-function AdRow({ ad, onUpdate, onDelete, accessToken }) {
+function AdRow({ ad, onUpdate, onDelete, accessToken, cliente, clics, oculta }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(ad.name);
   const [imageUrl, setImageUrl] = useState(ad.imageUrl);
   const [linkUrl, setLinkUrl] = useState(ad.linkUrl);
+  const [desde, setDesde] = useState(ad.desde || "");
+  const [hasta, setHasta] = useState(ad.hasta || "");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
@@ -7913,10 +7927,14 @@ function AdRow({ ad, onUpdate, onDelete, accessToken }) {
         <ImageUploadField value={imageUrl} onChange={setImageUrl} accessToken={accessToken} folder="ads" />
         <label className="block text-xs text-teal-400" style={F.body}>URL de destino (a dónde va si lo tocan)</label>
         <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
+        <div className="flex flex-wrap gap-3">
+          <label className="text-xs text-teal-400" style={F.body}>Se muestra desde <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+          <label className="text-xs text-teal-400" style={F.body}>hasta (vacío = sin fin) <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+        </div>
         <div className="flex gap-2 pt-1">
           <button
             type="button"
-            onClick={() => { if (name.trim() && imageUrl.trim()) { onUpdate({ ...ad, name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim() }); setEditing(false); } }}
+            onClick={() => { if (name.trim() && imageUrl.trim()) { const { desde: _d, hasta: _h, ...resto } = ad; onUpdate({ ...resto, name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), ...(desde ? { desde } : {}), ...(hasta ? { hasta } : {}) }); setEditing(false); } }}
             className="px-3 py-1.5 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
           >
             Guardar
@@ -7937,6 +7955,12 @@ function AdRow({ ad, onUpdate, onDelete, accessToken }) {
       <div className="flex-1 min-w-0">
         <p className="font-medium truncate" style={F.body}>{ad.name}</p>
         <p className="text-xs text-teal-500 truncate" style={F.body}>{ad.linkUrl || "Sin link de destino"}</p>
+        <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px]" style={F.body}>
+          {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente: cargalo en Caja → Clientes para cobrarle</span>}
+          {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
+          <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
+          {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+        </div>
       </div>
       <label className="flex items-center gap-1 text-xs text-teal-300" style={F.body}>
         <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} />
@@ -7959,12 +7983,25 @@ function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
   const [name, setName] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
+  // El cliente de cada publicidad (Caja de la plataforma) y sus clics del mes y en total
+  const [clientes, setClientes] = useState([]);
+  const [clics, setClics] = useState([]);
+  useEffect(() => {
+    let vivo = true;
+    supabaseTable("plataforma_clientes?tipo=eq.publicidad", { accessToken }).then((r) => { if (vivo) setClientes(r || []); }).catch(() => {});
+    supabaseRpc("clics_publicidades", { p_desde: `${hoyArgentina().slice(0, 7)}-01` }, accessToken).then((r) => { if (vivo) setClics(r || []); }).catch(() => {});
+    return () => { vivo = false; };
+  }, [accessToken, ads.length]);
+  const clienteDe = (ad) => clientes.find((c) => c.ref_id === ad.id);
+  const ocultasPorCliente = clientes.filter((c) => c.ref_id && (!c.activo || PLAN_BLOQUEA.includes(estadoCliente(c, hoyArgentina()).estado))).map((c) => c.ref_id);
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
 
   const submit = () => {
     if (!name.trim() || !imageUrl.trim()) return;
-    onAdd({ name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), active: true });
-    setName(""); setImageUrl(""); setLinkUrl("");
+    onAdd({ name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), active: true, ...(desde ? { desde } : {}), ...(hasta ? { hasta } : {}) });
+    setName(""); setImageUrl(""); setLinkUrl(""); setDesde(""); setHasta("");
   };
 
   return (
@@ -7984,13 +8021,17 @@ function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
             <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
           </div>
         </div>
+        <div className="flex flex-wrap gap-3 mb-3">
+          <label className="text-xs text-teal-400" style={F.body}>Se muestra desde (opcional) <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+          <label className="text-xs text-teal-400" style={F.body}>hasta (opcional) <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+        </div>
         <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar anuncio</button>
-        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>La imagen se muestra en la home pública y dentro de cada torneo, rotando junto con el resto de los anuncios activos.</p>
+        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>La imagen se muestra en la home pública y dentro de cada torneo, rotando junto con el resto de los anuncios activos. Se oculta sola fuera de su vigencia o si su cliente (Caja → Clientes, tipo Publicidad) queda vencido, suspendido o de baja, y vuelve cuando le cobrás.</p>
       </div>
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Anuncios cargados</h2>
       <div className="space-y-3">
-        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} accessToken={accessToken} />)}
+        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} accessToken={accessToken} cliente={clienteDe(ad)} clics={clics.find((k) => k.ad_id === ad.id)} oculta={motivoPublicidadOculta(ad, hoyArgentina(), ocultasPorCliente)} />)}
         {ads.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no cargaste ningún anuncio.</p>}
       </div>
     </div>
@@ -16451,6 +16492,7 @@ function SmashPointAppInner() {
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
   const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
+  const [adsOcultas, setAdsOcultas] = useState([]); // publicidades con el cliente vencido o de baja (ver publicidades_ocultas)
   const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
   const [route, setRoute] = useState(() => routeFromHash() || "public-home");
   const [avisoCuenta, setAvisoCuenta] = useState(null); // "Tu cuenta quedó confirmada", etc.
@@ -16535,6 +16577,7 @@ function SmashPointAppInner() {
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
         fetchComplejosReserva().then(setComplejos); // solo lo usan los paneles: no frena la portada
         supabaseRpc("cuentas_suspendidas", {}).then((rows) => setSuspendidos(rows || [])).catch(() => {});
+        supabaseRpc("publicidades_ocultas", {}).then((rows) => setAdsOcultas((rows || []).map((r) => (typeof r === "string" ? r : r.publicidades_ocultas)))).catch(() => {});
 
         // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
         const stored = readStoredAuth();
@@ -16994,6 +17037,7 @@ function SmashPointAppInner() {
   const suspendido = (tipo, ref) => suspendidos.some((x) => x.tipo === tipo && x.ref_id === ref);
   const publicTournaments = tournaments.filter((t) => esPublico(t) && !suspendido("organizador", t.organizerId));
   const publicOrganizers = organizers.filter((o) => !suspendido("organizador", o.id));
+  const publicAds = ads.filter((a) => !motivoPublicidadOculta(a, hoyArgentina(), adsOcultas));
   const publicComplejos = complejos.filter((c) => !suspendido("complejo", c.id) && !suspendido("organizador", c.dueno_id));
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
@@ -17002,7 +17046,7 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   } else if (route === "public-tournament" && selected && (esPublico(selected) || session?.role === "creador" || selected.organizerId === session?.id)) {
     showFooterAds = true;
     content = isInfoOnly(selected)
@@ -17114,7 +17158,7 @@ function SmashPointAppInner() {
       />
     );
   } else {
-    content = <PublicHome tournaments={publicTournaments} ads={ads} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   }
 
   return (
@@ -17124,7 +17168,7 @@ function SmashPointAppInner() {
       {showFooterAds && (
         // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
-          <AdBanner ads={ads} />
+          <AdBanner ads={publicAds} />
           <ContactFooter onGoLogin={() => setRoute("login")} />
         </div>
       )}
