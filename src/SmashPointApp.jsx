@@ -10,6 +10,7 @@ import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from 
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
+import { estadoCliente, ESTADOS_PLAN, incluyePlan } from "./planes.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
@@ -12545,12 +12546,131 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
 const TIPOS_CLIENTE = [["publicidad", "Publicidad"], ["organizador", "Organizador"], ["profe", "Profe"], ["complejo", "Complejo"], ["otro", "Otro"]];
 const tipoClienteLabel = (t) => TIPOS_CLIENTE.find(([k]) => k === t)?.[1] || t;
 
-/* Alta y edición de un cliente: se vincula con una publicidad, organizador, profe o complejo de la app */
-function ClienteForm({ inicial, opciones, clientes, onGuardar, onCancelar }) {
+/* ---------- Planes (ver 20261033_planes.sql y src/planes.js): solo el creador ---------- */
+
+const PARA_PLAN = [["organizador", "Organizador"], ["complejo", "Complejo"], ["publicidad", "Publicidad"]];
+const MODOS_PLAN = [["prueba", "Prueba"], ["bonificado", "Bonificado"], ["pago", "Pago"]];
+const fechaCorta = (f) => (f ? `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(2, 4)}` : "");
+
+function EstadoPlanBadge({ cliente, hoy }) {
+  const { estado, fin, dias } = estadoCliente(cliente, hoy);
+  const { label, color } = ESTADOS_PLAN[estado];
+  const detalle = estado === "bonificado" && !fin ? "sin vencimiento"
+    : fin && dias >= 0 ? `hasta ${fechaCorta(fin)}`
+    : fin ? `venció el ${fechaCorta(fin)}` : "";
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap" style={{ color, borderColor: `${color}80`, backgroundColor: `${color}14` }}>
+      ● {label}{detalle && <span className="opacity-80">· {detalle}</span>}
+    </span>
+  );
+}
+
+/* Alta y edición de un plan: nombre, para quién, precio y qué incluye */
+function PlanForm({ inicial, onGuardar, onCancelar }) {
+  const [f, setF] = useState(() => ({
+    nombre: inicial?.nombre || "", para: inicial?.para || "complejo", precio: inicial?.precio != null ? String(Math.round(inicial.precio)) : "",
+    modulo_torneos: !!inicial?.modulo_torneos, modulo_reservas: !!inicial?.modulo_reservas, modulo_cantina: !!inicial?.modulo_cantina, reportes: !!inicial?.reportes,
+    empleados: inicial?.empleados != null ? String(inicial.empleados) : "", activo: inicial ? inicial.activo : true,
+  }));
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const campo = "w-full px-3 py-2 rounded border text-sm";
+  const guardar = async () => {
+    if (!f.nombre.trim()) { setError("Poné el nombre del plan."); return; }
+    const emp = f.empleados.trim() === "" ? null : Number.parseInt(f.empleados, 10);
+    if (emp != null && (!Number.isFinite(emp) || emp < 0 || emp > 100)) { setError("Empleados: un número de 0 a 100 (vacío = sin tope)."); return; }
+    setBusy(true); setError("");
+    try {
+      await onGuardar({
+        nombre: f.nombre.trim(), para: f.para, precio: leerPrecio(f.precio),
+        modulo_torneos: f.modulo_torneos, modulo_reservas: f.modulo_reservas, modulo_cantina: f.modulo_cantina, reportes: f.reportes,
+        empleados: emp, activo: f.activo,
+      });
+    } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
+  };
+  const tilde = (k, label) => (
+    <label className="flex items-center gap-2 text-sm text-teal-200"><input type="checkbox" checked={f[k]} onChange={(e) => set(k, e.target.checked)} /> {label}</label>
+  );
+  return (
+    <div className="border border-teal-700 rounded-lg p-3 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={f.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} placeholder="Ej: Full" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Para</label>
+          <select value={f.para} onChange={(e) => set("para", e.target.value)} className={campo} style={adminInput}>
+            {PARA_PLAN.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Precio por mes</label>
+          <input inputMode="numeric" value={f.precio} onChange={(e) => set("precio", e.target.value)} placeholder="Ej: 100000" className={campo} style={adminInput} />
+        </div>
+      </div>
+      {f.para !== "publicidad" && (
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {tilde("modulo_torneos", "Torneos")}{tilde("modulo_reservas", "Reservas")}{tilde("modulo_cantina", "Cantina")}{tilde("reportes", "Reportes")}
+          <label className="flex items-center gap-2 text-sm text-teal-200">Empleados <input inputMode="numeric" value={f.empleados} onChange={(e) => set("empleados", e.target.value)} placeholder="sin tope" className="w-20 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+        </div>
+      )}
+      <label className="flex items-center gap-2 text-sm text-teal-200"><input type="checkbox" checked={f.activo} onChange={(e) => set("activo", e.target.checked)} /> Se ofrece (si lo apagás, los que ya lo tienen lo siguen teniendo)</label>
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : inicial ? "Guardar plan" : "Agregar plan"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* Los planes: el creador cambia precios y lo que incluye cada uno cuando quiere */
+function PlanesEditor({ planes, clientes, accessToken, onChanged }) {
+  const [editando, setEditando] = useState(null); // "nuevo" | plan
+  const [error, setError] = useState("");
+  const guardar = async (body) => {
+    if (editando === "nuevo") await supabaseTable("plataforma_planes", { method: "POST", body: { ...body, orden: planes.length + 1 }, accessToken, prefer: "return=minimal" });
+    else await supabaseTable(`plataforma_planes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+    setEditando(null);
+    await onChanged();
+  };
+  const usan = (p) => clientes.filter((c) => c.plan_id === p.id && c.activo).length;
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-teal-400">Los precios y lo que incluye cada plan los cambiás cuando quieras. Al elegir un plan para un cliente se completa su cuota con este precio (después se la podés cambiar a él solo).</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {editando ? <PlanForm inicial={editando === "nuevo" ? null : editando} onGuardar={guardar} onCancelar={() => { setEditando(null); setError(""); }} /> : (
+        <button type="button" onClick={() => setEditando("nuevo")} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Nuevo plan</button>
+      )}
+      {planes.length === 0 ? <p className="text-teal-400">Todavía no hay planes.</p> : (
+        <ul className="space-y-2">
+          {planes.map((p) => (
+            <li key={p.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-3 ${p.activo ? "" : "opacity-60"}`}>
+              <div className="flex-1 min-w-[12rem]">
+                <p className="text-teal-100 font-semibold">{p.nombre} <span className="text-xs font-normal text-teal-500">· {PARA_PLAN.find(([k]) => k === p.para)?.[1]}</span>{!p.activo && <span className="text-xs font-normal text-slate-400"> · no se ofrece</span>}</p>
+                <p className="text-xs text-teal-400">{incluyePlan(p)} · {usan(p)} cliente{usan(p) === 1 ? "" : "s"}</p>
+              </div>
+              <span className="text-base font-semibold text-lime-400 tabular-nums">{p.precio != null ? `${formatoPrecio(p.precio)}/mes` : "sin precio"}</span>
+              <button type="button" onClick={() => setEditando(p)} className="text-xs text-lime-400">Editar</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* Alta y edición de un cliente: se vincula con una publicidad, organizador, profe o complejo de la app,
+   con su plan, su modo (prueba, bonificado o pago) y hasta cuándo */
+function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCancelar }) {
   const [form, setForm] = useState(() => ({
     tipo: inicial?.tipo || "publicidad", refId: inicial?.ref_id || "", nombre: inicial?.nombre || "",
     telefono: inicial?.telefono ? formatArPhone(inicial.telefono) : "", cuota: inicial?.cuota_mensual != null ? String(Math.round(inicial.cuota_mensual)) : "",
     desde: inicial?.desde || hoyArgentina().slice(0, 7), nota: inicial?.nota || "",
+    planId: inicial?.plan_id || "", modo: inicial?.modo || "prueba", vence: inicial?.vence || sumarDias(hoyArgentina(), 30),
+    gracia: String(inicial?.dias_gracia ?? 7), suspendido: !!inicial?.suspendido,
   }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -12569,7 +12689,12 @@ function ClienteForm({ inicial, opciones, clientes, onGuardar, onCancelar }) {
     if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
     setBusy(true); setError("");
     try {
-      await onGuardar({ tipo: form.tipo, ref_id: form.tipo === "otro" ? null : form.refId || null, nombre: form.nombre.trim(), telefono, cuota_mensual: leerPrecio(form.cuota), desde: form.desde || hoyArgentina().slice(0, 7), nota: form.nota.trim() || null });
+      const gracia = Number.parseInt(form.gracia, 10);
+      await onGuardar({
+        tipo: form.tipo, ref_id: form.tipo === "otro" ? null : form.refId || null, nombre: form.nombre.trim(), telefono, cuota_mensual: leerPrecio(form.cuota), desde: form.desde || hoyArgentina().slice(0, 7), nota: form.nota.trim() || null,
+        plan_id: form.planId || null, modo: form.modo, vence: form.modo === "pago" ? null : form.vence || null,
+        dias_gracia: Number.isFinite(gracia) ? Math.min(60, Math.max(0, gracia)) : 7, suspendido: form.suspendido,
+      });
     } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
   };
   const campo = "w-full px-3 py-2 rounded border text-sm";
@@ -12609,6 +12734,53 @@ function ClienteForm({ inicial, opciones, clientes, onGuardar, onCancelar }) {
           <input type="month" value={form.desde} onChange={(e) => set("desde", e.target.value)} className={campo} style={adminInput} />
         </div>
       </div>
+      {(() => {
+        const opcionesPlan = planes.filter((pl) => pl.para === form.tipo && (pl.activo || pl.id === form.planId));
+        const elegir = (id) => {
+          const pl = planes.find((x) => x.id === id);
+          setForm((f) => ({ ...f, planId: id, cuota: pl?.precio != null ? String(Math.round(pl.precio)) : f.cuota }));
+        };
+        const plazo = (dias) => set("vence", sumarDias(hoyArgentina(), dias));
+        return (
+          <div className="rounded-lg border border-teal-800 p-3 space-y-3">
+            <p className="text-xs uppercase tracking-wide text-teal-400">Plan</p>
+            {opcionesPlan.length > 0 && (
+              <div>
+                <select value={form.planId} onChange={(e) => elegir(e.target.value)} className={campo} style={adminInput}>
+                  <option value="">Sin plan</option>
+                  {opcionesPlan.map((pl) => <option key={pl.id} value={pl.id}>{pl.nombre}{pl.precio != null ? ` · ${formatoPrecio(pl.precio)}/mes` : ""}</option>)}
+                </select>
+                {form.planId && <p className="text-xs text-teal-500 mt-1">{incluyePlan(planes.find((x) => x.id === form.planId))}</p>}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Modo">
+              {MODOS_PLAN.map(([k, l]) => (
+                <button key={k} type="button" role="radio" aria-checked={form.modo === k} onClick={() => set("modo", k)} className={`px-3 py-1.5 rounded-lg border text-sm ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+              ))}
+            </div>
+            {form.modo === "prueba" && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-teal-300">Prueba hasta</span>
+                <input type="date" value={form.vence} onChange={(e) => set("vence", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                {[15, 30, 60].map((d) => <button key={d} type="button" onClick={() => plazo(d)} className="text-xs px-2 py-1 rounded border border-teal-800 text-teal-300">{d} días</button>)}
+              </div>
+            )}
+            {form.modo === "bonificado" && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-teal-300">Gratis hasta</span>
+                <input type="date" value={form.vence || ""} onChange={(e) => set("vence", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                <button type="button" onClick={() => set("vence", "")} className="text-xs px-2 py-1 rounded border border-teal-800 text-teal-300">Sin fecha</button>
+              </div>
+            )}
+            {form.modo === "pago" && <p className="text-xs text-teal-500">Queda cubierto hasta el último mes de cuota que le cobres en "Caja del mes".</p>}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+              <label className="flex items-center gap-2 text-teal-300">Días de gracia al vencer <input inputMode="numeric" value={form.gracia} onChange={(e) => set("gracia", e.target.value)} className="w-16 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+              <label className="flex items-center gap-2 text-teal-300"><input type="checkbox" checked={form.suspendido} onChange={(e) => set("suspendido", e.target.checked)} /> Suspendido</label>
+            </div>
+            {form.tipo === "complejo" && form.planId && <p className="text-[11px] text-teal-500">Al guardar, los módulos del complejo (Torneos, Reservas, Cantina) quedan como dice el plan.</p>}
+          </div>
+        );
+      })()}
       <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} placeholder="Nota (opcional)" className={campo} style={adminInput} />
       {error && <p className="text-red-400">{error}</p>}
       <div className="flex gap-3 items-center">
@@ -12625,7 +12797,8 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
   const [clientes, setClientes] = useState(null);
   const [movs, setMovs] = useState(null);
   const [error, setError] = useState("");
-  const [vista, setVista] = useState("mes"); // mes | clientes
+  const [vista, setVista] = useState("mes"); // mes | clientes | planes
+  const [planes, setPlanes] = useState([]);
   const [editando, setEditando] = useState(null); // "nuevo" | cliente
   const [cobrando, setCobrando] = useState(null); // id de cliente con el formulario de cuota abierto
   const [cargando, setCargando] = useState(null); // "ingreso" | "gasto" (cobro suelto o gasto)
@@ -12649,6 +12822,7 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
         supabaseTable(`plataforma_movimientos?or=(and(fecha.gte.${desde},fecha.lte.${hasta}),periodo.eq.${mes})&order=fecha.desc,created_at.desc`, { accessToken }),
       ]);
       setClientes(cl); setMovs(mv); setError("");
+      setPlanes((await supabaseTable("plataforma_planes?order=orden.asc,created_at.asc", { accessToken }).catch(() => [])) || []);
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [mes, accessToken]);
   useEffect(() => { setMovs(null); load(); }, [load]);
@@ -12668,6 +12842,11 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
   const guardarCliente = async (body) => {
     if (editando === "nuevo") await supabaseTable("plataforma_clientes", { method: "POST", body, accessToken, prefer: "return=minimal" });
     else await supabaseTable(`plataforma_clientes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+    // Un complejo con plan: sus módulos quedan como dice el plan
+    const plan = planes.find((pl) => pl.id === body.plan_id);
+    if (body.tipo === "complejo" && body.ref_id && plan) {
+      await supabaseTable(`complejos?id=eq.${encodeURIComponent(body.ref_id)}`, { method: "PATCH", body: { modulo_torneos: plan.modulo_torneos, modulo_reservas: plan.modulo_reservas, modulo_cantina: plan.modulo_cantina }, accessToken, prefer: "return=minimal" }).catch(() => {});
+    }
     setEditando(null);
     await load();
   };
@@ -12725,13 +12904,26 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
 
   return (
     <div className="space-y-4 text-sm" style={F.body}>
-      <div className="flex flex-wrap gap-2">{pill("mes", "Caja del mes")}{pill("clientes", `Clientes${clientes ? ` (${clientes.length})` : ""}`)}</div>
+      <div className="flex flex-wrap gap-2">{pill("mes", "Caja del mes")}{pill("clientes", `Clientes${clientes ? ` (${clientes.length})` : ""}`)}{pill("planes", "Planes")}</div>
       {error && <p className="text-red-400">{error}</p>}
 
-      {vista === "clientes" ? (
+      {vista === "planes" ? (
+        <PlanesEditor planes={planes} clientes={clientes || []} accessToken={accessToken} onChanged={load} />
+      ) : vista === "clientes" ? (
         <div className="space-y-3">
+          {clientes && clientes.length > 0 && (() => {
+            const conteo = {};
+            clientes.forEach((c) => { const e = estadoCliente(c, hoyArgentina()).estado; conteo[e] = (conteo[e] || 0) + 1; });
+            return (
+              <div className="flex flex-wrap gap-2">
+                {["vencido", "en_gracia", "por_vencer", "prueba", "bonificado", "al_dia", "suspendido"].filter((e) => conteo[e]).map((e) => (
+                  <span key={e} className="text-xs px-2.5 py-1 rounded-full border" style={{ color: ESTADOS_PLAN[e].color, borderColor: `${ESTADOS_PLAN[e].color}66` }}>{ESTADOS_PLAN[e].label}: {conteo[e]}</span>
+                ))}
+              </div>
+            );
+          })()}
           {editando ? (
-            <ClienteForm inicial={editando === "nuevo" ? null : editando} opciones={opciones} clientes={clientes || []} onGuardar={guardarCliente} onCancelar={() => setEditando(null)} />
+            <ClienteForm inicial={editando === "nuevo" ? null : editando} opciones={opciones} clientes={clientes || []} planes={planes} onGuardar={guardarCliente} onCancelar={() => setEditando(null)} />
           ) : (
             <button type="button" onClick={() => setEditando("nuevo")} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cliente</button>
           )}
@@ -12740,7 +12932,13 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
               {clientes.map((c) => (
                 <li key={c.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-2 ${c.activo ? "" : "opacity-60"}`}>
                   <div className="flex-1 min-w-[12rem]">
-                    <p className="text-teal-100 font-semibold">{c.nombre} <span className="text-xs font-normal text-teal-500">· {tipoClienteLabel(c.tipo)}</span></p>
+                    <p className="text-teal-100 font-semibold">{c.nombre} <span className="text-xs font-normal text-teal-500">· {tipoClienteLabel(c.tipo)}{c.plan_id && planes.find((pl) => pl.id === c.plan_id) ? ` · ${planes.find((pl) => pl.id === c.plan_id).nombre}` : ""}</span></p>
+                    <div className="my-1 flex flex-wrap items-center gap-2">
+                      <EstadoPlanBadge cliente={c} hoy={hoyArgentina()} />
+                      {c.telefono && ["por_vencer", "en_gracia", "vencido"].includes(estadoCliente(c, hoyArgentina()).estado) && (
+                        <a href={waLink(c.telefono, `Hola! Te escribimos de Smash Point: tu plan ${estadoCliente(c, hoyArgentina()).estado === "por_vencer" ? "está por vencer" : "está vencido"}. Cuando quieras te pasamos los datos para renovarlo. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-[11px] underline text-lime-400">Recordarle por WhatsApp</a>
+                      )}
+                    </div>
                     <p className="text-xs text-teal-400">{c.cuota_mensual != null ? `${formatoPrecio(c.cuota_mensual)} por mes desde ${etiquetaMes(c.desde).toLowerCase()}` : "Sin cuota (cobros sueltos)"}{!c.activo && " · dado de baja"}{c.nota && ` · ${c.nota}`}</p>
                   </div>
                   <button type="button" onClick={() => run(() => supabaseTable(`plataforma_clientes?id=eq.${c.id}`, { method: "PATCH", body: { activo: !c.activo }, accessToken, prefer: "return=minimal" }))} className="text-xs text-teal-300 underline">{c.activo ? "Dar de baja" : "Reactivar"}</button>
