@@ -54,3 +54,7 @@ test("publicidad: se oculta desactivada, fuera de su vigencia o con el cliente v
   assert.equal(motivoPublicidadOculta(ad, "2026-10-18", ["a1"]), "Cliente vencido o de baja");
   assert.equal(motivoPublicidadOculta({ id: "a2", active: true }, "2030-01-01"), null); // sin vigencia: siempre
 });
+
+test("por torneo: no vence (cada torneo usa un crédito)", () => {
+  assert.deepEqual(estadoCliente({ ...base, modo: "por_torneo", vence: "2020-01-01" }, hoy), { estado: "por_torneo", fin: null, dias: null });
+});

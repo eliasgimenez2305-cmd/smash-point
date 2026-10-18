@@ -878,6 +878,8 @@ function groupsSplitAcrossVenues(t) {
 /* Lista de Complejos (la que carga el administrador), para elegir las sedes de un torneo y tomar
    su logo en la imagen del fixture sin pasarla de componente en componente */
 const ComplexesContext = React.createContext([]);
+/* El plan de la cuenta y de sus complejos (ver mi_plan en 20261034/20261036): { filas, recargar } */
+const MiPlanContext = React.createContext({ filas: [], recargar: () => {} });
 
 /* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
    cancha) puedan nombrar las canchas con su sede sin recibir el torneo entero */
@@ -9566,12 +9568,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const verCajaDia = complejos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
   const verClientes = complejos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
   // El plan de la cuenta y de sus complejos (lo administra el creador, ver 20261034_planes_en_la_app.sql)
-  const [misPlanes, setMisPlanes] = useState([]);
-  useEffect(() => {
-    let vivo = true;
-    supabaseRpc("mi_plan", {}, organizer.accessToken).then((rows) => { if (vivo) setMisPlanes(rows || []); }).catch(() => {});
-    return () => { vivo = false; };
-  }, [organizer.accessToken]);
+  const { filas: misPlanes } = React.useContext(MiPlanContext);
   const planDe = (tipo, ref) => misPlanes.find((f) => f.tipo === tipo && f.ref_id === ref);
   const orgBloqueado = !colaborador && PLAN_BLOQUEA.includes(planDe("organizador", organizer.id)?.estado);
   // Reportes: salvo que todos sus complejos tengan un plan sin Reportes
@@ -12641,7 +12638,7 @@ const tipoClienteLabel = (t) => TIPOS_CLIENTE.find(([k]) => k === t)?.[1] || t;
 /* ---------- Planes (ver 20261033_planes.sql y src/planes.js): solo el creador ---------- */
 
 const PARA_PLAN = [["organizador", "Organizador"], ["complejo", "Complejo"], ["publicidad", "Publicidad"]];
-const MODOS_PLAN = [["prueba", "Prueba"], ["bonificado", "Bonificado"], ["pago", "Pago"]];
+const MODOS_PLAN = [["prueba", "Prueba"], ["bonificado", "Bonificado"], ["pago", "Pago"], ["por_torneo", "Por torneo"]];
 const fechaCorta = (f) => (f ? `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(2, 4)}` : "");
 
 function EstadoPlanBadge({ cliente, hoy }) {
@@ -12663,6 +12660,7 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
     nombre: inicial?.nombre || "", para: inicial?.para || "complejo", precio: inicial?.precio != null ? String(Math.round(inicial.precio)) : "",
     modulo_torneos: !!inicial?.modulo_torneos, modulo_reservas: !!inicial?.modulo_reservas, modulo_cantina: !!inicial?.modulo_cantina, reportes: !!inicial?.reportes,
     empleados: inicial?.empleados != null ? String(inicial.empleados) : "", activo: inicial ? inicial.activo : true,
+    tipo_cobro: inicial?.tipo_cobro || "mensual",
   }));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -12677,7 +12675,7 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
       await onGuardar({
         nombre: f.nombre.trim(), para: f.para, precio: leerPrecio(f.precio),
         modulo_torneos: f.modulo_torneos, modulo_reservas: f.modulo_reservas, modulo_cantina: f.modulo_cantina, reportes: f.reportes,
-        empleados: emp, activo: f.activo,
+        empleados: emp, activo: f.activo, tipo_cobro: f.para === "organizador" ? f.tipo_cobro : "mensual",
       });
     } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
   };
@@ -12698,10 +12696,18 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
           </select>
         </div>
         <div>
-          <label className="block text-xs text-teal-400 mb-1">Precio por mes</label>
+          <label className="block text-xs text-teal-400 mb-1">{f.tipo_cobro === "mensual" ? "Precio por mes" : "Precio por torneo"}</label>
           <input inputMode="numeric" value={f.precio} onChange={(e) => set("precio", e.target.value)} placeholder="Ej: 100000" className={campo} style={adminInput} />
         </div>
       </div>
+      {f.para === "organizador" && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-teal-300">Se cobra</span>
+          {[["mensual", "Por mes"], ["por_torneo", "Por torneo (cualquiera)"], ["por_torneo_corto", "Por torneo corto (Americano / Súper 8)"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => set("tipo_cobro", k)} className={`px-3 py-1.5 rounded-lg border text-sm ${f.tipo_cobro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      )}
       {f.para !== "publicidad" && (
         <div className="flex flex-wrap gap-x-5 gap-y-2">
           {tilde("modulo_torneos", "Torneos")}{tilde("modulo_reservas", "Reservas")}{tilde("modulo_cantina", "Cantina")}{tilde("reportes", "Reportes")}
@@ -12744,7 +12750,7 @@ function PlanesEditor({ planes, clientes, accessToken, onChanged }) {
                 <p className="text-teal-100 font-semibold">{p.nombre} <span className="text-xs font-normal text-teal-500">· {PARA_PLAN.find(([k]) => k === p.para)?.[1]}</span>{!p.activo && <span className="text-xs font-normal text-slate-400"> · no se ofrece</span>}</p>
                 <p className="text-xs text-teal-400">{incluyePlan(p)} · {usan(p)} cliente{usan(p) === 1 ? "" : "s"}</p>
               </div>
-              <span className="text-base font-semibold text-lime-400 tabular-nums">{p.precio != null ? `${formatoPrecio(p.precio)}/mes` : "sin precio"}</span>
+              <span className="text-base font-semibold text-lime-400 tabular-nums">{p.precio != null ? `${formatoPrecio(p.precio)}${(p.tipo_cobro || "mensual") === "mensual" ? "/mes" : " por torneo"}` : "sin precio"}</span>
               <button type="button" onClick={() => setEditando(p)} className="text-xs text-lime-400">Editar</button>
             </li>
           ))}
@@ -12784,7 +12790,7 @@ function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCa
       const gracia = Number.parseInt(form.gracia, 10);
       await onGuardar({
         tipo: form.tipo, ref_id: form.tipo === "otro" ? null : form.refId || null, nombre: form.nombre.trim(), telefono, cuota_mensual: leerPrecio(form.cuota), desde: form.desde || hoyArgentina().slice(0, 7), nota: form.nota.trim() || null,
-        plan_id: form.planId || null, modo: form.modo, vence: form.modo === "pago" ? null : form.vence || null,
+        plan_id: form.planId || null, modo: form.modo, vence: form.modo === "pago" || form.modo === "por_torneo" ? null : form.vence || null,
         dias_gracia: Number.isFinite(gracia) ? Math.min(60, Math.max(0, gracia)) : 7, suspendido: form.suspendido,
       });
     } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
@@ -12827,7 +12833,7 @@ function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCa
         </div>
       </div>
       {(() => {
-        const opcionesPlan = planes.filter((pl) => pl.para === form.tipo && (pl.activo || pl.id === form.planId));
+        const opcionesPlan = planes.filter((pl) => pl.para === form.tipo && (pl.tipo_cobro || "mensual") === "mensual" && (pl.activo || pl.id === form.planId));
         const elegir = (id) => {
           const pl = planes.find((x) => x.id === id);
           setForm((f) => ({ ...f, planId: id, cuota: pl?.precio != null ? String(Math.round(pl.precio)) : f.cuota }));
@@ -12846,7 +12852,7 @@ function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCa
               </div>
             )}
             <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Modo">
-              {MODOS_PLAN.map(([k, l]) => (
+              {MODOS_PLAN.filter(([k]) => k !== "por_torneo" || form.tipo === "organizador").map(([k, l]) => (
                 <button key={k} type="button" role="radio" aria-checked={form.modo === k} onClick={() => set("modo", k)} className={`px-3 py-1.5 rounded-lg border text-sm ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
               ))}
             </div>
@@ -12865,6 +12871,7 @@ function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCa
               </div>
             )}
             {form.modo === "pago" && <p className="text-xs text-teal-500">Queda cubierto hasta el último mes de cuota que le cobres en "Caja del mes".</p>}
+            {form.modo === "por_torneo" && <p className="text-xs text-teal-500">No paga cuota: cada torneo que publica usa un crédito. Los créditos se los cargás desde la lista de clientes.</p>}
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
               <label className="flex items-center gap-2 text-teal-300">Días de gracia al vencer <input inputMode="numeric" value={form.gracia} onChange={(e) => set("gracia", e.target.value)} className="w-16 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
               <label className="flex items-center gap-2 text-teal-300"><input type="checkbox" checked={form.suspendido} onChange={(e) => set("suspendido", e.target.checked)} /> Suspendido</label>
@@ -12891,6 +12898,8 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
   const [error, setError] = useState("");
   const [vista, setVista] = useState("mes"); // mes | clientes | planes
   const [planes, setPlanes] = useState([]);
+  const [creditos, setCreditos] = useState([]);
+  const [cargandoCredito, setCargandoCredito] = useState(null); // { clienteId, tipo, monto, medio, cobrar }
   const [editando, setEditando] = useState(null); // "nuevo" | cliente
   const [cobrando, setCobrando] = useState(null); // id de cliente con el formulario de cuota abierto
   const [cargando, setCargando] = useState(null); // "ingreso" | "gasto" (cobro suelto o gasto)
@@ -12915,6 +12924,7 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
       ]);
       setClientes(cl); setMovs(mv); setError("");
       setPlanes((await supabaseTable("plataforma_planes?order=orden.asc,created_at.asc", { accessToken }).catch(() => [])) || []);
+      setCreditos((await supabaseTable("plataforma_creditos?order=created_at.asc", { accessToken }).catch(() => [])) || []);
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
   }, [mes, accessToken]);
   useEffect(() => { setMovs(null); load(); }, [load]);
@@ -12947,6 +12957,23 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
     try { await fn(); await load(); } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusy(false); }
   };
+  const precioCredito = (tipo) => planes.find((pl) => pl.tipo_cobro === (tipo === "corto" ? "por_torneo_corto" : "por_torneo"))?.precio;
+  const abrirCredito = (c, tipo = "torneo") => setCargandoCredito({ clienteId: c.id, nombre: c.nombre, tipo, monto: precioCredito(tipo) != null ? String(Math.round(precioCredito(tipo))) : "", medio: "transferencia", cobrar: true });
+  const guardarCredito = () => {
+    const k = cargandoCredito;
+    const monto = leerPrecio(k.monto);
+    if (k.cobrar && !monto) { setError("Poné el monto (o destildá \"Registrar el cobro\")."); return; }
+    run(async () => {
+      let movimientoId = null;
+      if (k.cobrar) {
+        const [mov] = await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=representation", body: { tipo: "ingreso", cliente_id: k.clienteId, concepto: `${k.tipo === "corto" ? "Torneo corto" : "Torneo suelto"} · ${k.nombre}`.slice(0, 80), monto, medio: k.medio, fecha: hoyArgentina() } });
+        movimientoId = mov?.id || null;
+      }
+      await supabaseTable("plataforma_creditos", { method: "POST", accessToken, prefer: "return=minimal", body: { cliente_id: k.clienteId, tipo: k.tipo, movimiento_id: movimientoId } });
+      setCargandoCredito(null);
+    });
+  };
+  const sacarCredito = (credito) => run(() => supabaseTable(`plataforma_creditos?id=eq.${credito.id}&torneo_id=is.null`, { method: "DELETE", accessToken, prefer: "return=minimal" }));
   const abrirCuota = (q) => { setCobrando(q.c.id); setCargando(null); setForm({ ...form, monto: String(q.debe), fecha: hoyArgentina(), medio: "transferencia" }); };
   const cobrarCuota = (q) => {
     const monto = leerPrecio(form.monto);
@@ -13014,6 +13041,27 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
               </div>
             );
           })()}
+          {cargandoCredito && (
+            <div className="border border-sky-700 rounded-lg p-3 space-y-3">
+              <p className="text-teal-100 font-semibold">Crédito para {cargandoCredito.nombre}</p>
+              <div className="flex flex-wrap gap-2">
+                {[["torneo", "Torneo (cualquiera)"], ["corto", "Corto (Americano / Súper 8)"]].map(([t, l]) => (
+                  <button key={t} type="button" onClick={() => setCargandoCredito({ ...cargandoCredito, tipo: t, monto: precioCredito(t) != null ? String(Math.round(precioCredito(t))) : cargandoCredito.monto })} className={`px-3 py-1.5 rounded-lg border ${cargandoCredito.tipo === t ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2 text-teal-300"><input type="checkbox" checked={cargandoCredito.cobrar} onChange={(e) => setCargandoCredito({ ...cargandoCredito, cobrar: e.target.checked })} /> Registrar el cobro en la caja (si no, es un crédito regalado)</label>
+              {cargandoCredito.cobrar && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <input inputMode="numeric" value={cargandoCredito.monto} onChange={(e) => setCargandoCredito({ ...cargandoCredito, monto: e.target.value })} placeholder="Monto" className="w-32 px-3 py-2 rounded border text-sm" style={adminInput} />
+                  {MEDIOS_COBRO.map(([m, l]) => <button key={m} type="button" onClick={() => setCargandoCredito({ ...cargandoCredito, medio: m })} className={`px-3 py-1.5 rounded-lg border text-xs ${cargandoCredito.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+                </div>
+              )}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardarCredito} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Sumar crédito"}</button>
+                <button type="button" onClick={() => setCargandoCredito(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
           {editando ? (
             <ClienteForm inicial={editando === "nuevo" ? null : editando} opciones={opciones} clientes={clientes || []} planes={planes} onGuardar={guardarCliente} onCancelar={() => setEditando(null)} />
           ) : (
@@ -13027,6 +13075,17 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
                     <p className="text-teal-100 font-semibold">{c.nombre} <span className="text-xs font-normal text-teal-500">· {tipoClienteLabel(c.tipo)}{c.plan_id && planes.find((pl) => pl.id === c.plan_id) ? ` · ${planes.find((pl) => pl.id === c.plan_id).nombre}` : ""}</span></p>
                     <div className="my-1 flex flex-wrap items-center gap-2">
                       <EstadoPlanBadge cliente={c} hoy={hoyArgentina()} />
+                      {c.modo === "por_torneo" && (() => {
+                        const suyos = creditos.filter((k) => k.cliente_id === c.id);
+                        const libres = (t) => suyos.filter((k) => !k.torneo_id && k.tipo === t);
+                        return (
+                          <span className="text-[11px] text-sky-300">
+                            Créditos: {libres("torneo").length} torneo{libres("torneo").length === 1 ? "" : "s"} · {libres("corto").length} corto{libres("corto").length === 1 ? "" : "s"} · {suyos.filter((k) => k.torneo_id).length} usado{suyos.filter((k) => k.torneo_id).length === 1 ? "" : "s"}
+                            {" "}<button type="button" onClick={() => abrirCredito(c)} className="underline text-lime-400">+ Crédito</button>
+                            {suyos.some((k) => !k.torneo_id) && <> · <button type="button" disabled={busy} onClick={() => sacarCredito([...suyos].reverse().find((k) => !k.torneo_id))} className="underline text-teal-400">quitar uno</button></>}
+                          </span>
+                        );
+                      })()}
                       {c.telefono && ["por_vencer", "en_gracia", "vencido"].includes(estadoCliente(c, hoyArgentina()).estado) && (
                         <a href={waLink(c.telefono, `Hola! Te escribimos de Smash Point: tu plan ${estadoCliente(c, hoyArgentina()).estado === "por_vencer" ? "está por vencer" : "está vencido"}. Cuando quieras te pasamos los datos para renovarlo. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-[11px] underline text-lime-400">Recordarle por WhatsApp</a>
                       )}
@@ -16067,6 +16126,15 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
   // colaborador que solo carga resultados no puede guardar el torneo entero, así que eso queda para el dueño
+  // Pago por torneo: cuántos créditos le quedan al organizador para publicar este (ver 20261036_creditos.sql)
+  const { filas: planFilas, recargar: recargarPlan } = React.useContext(MiPlanContext);
+  const [avisoPublico, setAvisoPublico] = useState("");
+  const creditos = (() => {
+    const f = planFilas.find((x) => x.tipo === "organizador" && x.modo === "por_torneo" && x.ref_id === tournament.organizerId);
+    if (!f) return null;
+    const corto = ["americano", "super8"].includes(tournamentType(tournament));
+    return { corto, pagado: (f.torneos_pagados || []).includes(tournament.id), disponibles: (f.creditos_torneo || 0) + (corto ? f.creditos_corto || 0 : 0) };
+  })();
   const update = (t) => {
     const next = { ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) };
     save(soloResultados ? next : withAutoStatus(next));
@@ -16191,10 +16259,22 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
             <div className="mb-5 rounded-xl border p-4" style={{ borderColor: esPublico(tournament) ? "#9fe02266" : "#475569", backgroundColor: "rgba(8,18,24,0.5)" }}>
               <Toggle
                 checked={esPublico(tournament)}
-                onChange={(v) => update({ ...tournament, publico: v })}
+                onChange={(v) => {
+                  if (v && creditos && !creditos.pagado && creditos.disponibles === 0) { setAvisoPublico("No te quedan torneos para publicar. Escribinos a smashpoint.arg@gmail.com para sumar uno."); return; }
+                  setAvisoPublico("");
+                  update({ ...tournament, publico: v });
+                  if (v && creditos && !creditos.pagado) setTimeout(recargarPlan, 2500); // el crédito se descuenta al guardar
+                }}
                 label="Torneo público"
                 description={esPublico(tournament) ? "Se ve en la página pública: portada, horarios, grupos y llaves." : "No se ve en la página pública. Solo vos lo ves en tu panel (las inscripciones online tampoco se pueden usar)."}
               />
+              {creditos && (
+                <p className="text-xs mt-2" style={{ ...F.body, color: creditos.pagado ? "#9fe022" : creditos.disponibles > 0 ? "#38bdf8" : "#fbbf24" }}>
+                  {creditos.pagado ? "Este torneo ya está pago: lo podés ocultar y volver a publicar sin gastar otro."
+                    : `Pagás por torneo: ${creditos.disponibles > 0 ? `publicarlo usa 1 de tus ${creditos.disponibles} disponible${creditos.disponibles === 1 ? "" : "s"}` : "no te quedan torneos disponibles"}${creditos.corto ? " (Americano / Súper 8: usa primero uno corto)" : ""}.`}
+                </p>
+              )}
+              {avisoPublico && <p role="alert" className="text-xs mt-2 text-amber-300" style={F.body}>{avisoPublico}</p>}
             </div>
             <TournamentTypeEditor tournament={tournament} update={update} />
             <CategoriesSettings
@@ -16399,7 +16479,7 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
           if (changes && err.pgCode === "PGRST202") { partidosEnabled.current = false; pending.current[id] = pending.current[id] || mine; continue; }
           if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
           pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
-          setSaveNotice(err.code === "plan_vencido" ? "Tu plan está vencido: no se pueden crear torneos nuevos. Escribinos a smashpoint.arg@gmail.com para renovarlo." : err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
+          setSaveNotice(err.code === "sin_creditos" ? "No te quedan torneos para publicar. Escribinos a smashpoint.arg@gmail.com para sumar uno." : err.code === "plan_vencido" ? "Tu plan está vencido: no se pueden crear torneos nuevos. Escribinos a smashpoint.arg@gmail.com para renovarlo." : err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
           return;
         }
         if (changes && res?.estado === "ok") {
@@ -16504,6 +16584,14 @@ function SmashPointAppInner() {
   }, []);
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
+  // El plan propio (lo administra el creador): carteles, solo lectura y créditos por torneo
+  const [misPlanes, setMisPlanes] = useState([]);
+  const recargarPlan = useCallback(() => {
+    if (!session?.accessToken || session.role === "creador") { setMisPlanes([]); return; }
+    supabaseRpc("mi_plan", {}, session.accessToken).then((rows) => setMisPlanes(rows || [])).catch(() => {});
+  }, [session?.accessToken, session?.role]);
+  useEffect(() => { recargarPlan(); }, [recargarPlan]);
+  const planCtx = useMemo(() => ({ filas: misPlanes, recargar: recargarPlan }), [misPlanes, recargarPlan]);
   const [saveNotice, setSaveNotice] = useState(null);
   const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
   const jugadorApi = useJugador();
@@ -17163,6 +17251,7 @@ function SmashPointAppInner() {
 
   return (
     <ComplexesContext.Provider value={venues}>
+    <MiPlanContext.Provider value={planCtx}>
     <div className="min-h-screen overflow-x-clip" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
       {showFooterAds && (
@@ -17182,6 +17271,7 @@ function SmashPointAppInner() {
         </div>
       )}
     </div>
+    </MiPlanContext.Provider>
     </ComplexesContext.Provider>
   );
 }

@@ -73,6 +73,7 @@ Y [`migrations/20261032_auditoria.sql`](migrations/20261032_auditoria.sql) (arre
 Y [`migrations/20261033_planes.sql`](migrations/20261033_planes.sql) (planes de la cuenta creador: precios editables, modo prueba/bonificado/pago y vencimientos; los organizadores y complejos que ya eran clientes quedan bonificados) → **Run** → **Success**.
 Y [`migrations/20261034_planes_en_la_app.sql`](migrations/20261034_planes_en_la_app.sql) (la app respeta el plan: vencido o suspendido queda en solo lectura, tope de empleados, suspendidos fuera de la página pública) → **Run** → **Success**.
 Y [`migrations/20261035_publicidades.sql`](migrations/20261035_publicidades.sql) (publicidades que se ocultan solas si su cliente vence y contador de clics) → **Run** → **Success**.
+Y [`migrations/20261036_creditos.sql`](migrations/20261036_creditos.sql) (pago por torneo: organizadores "Por torneo" que usan un crédito al publicar cada torneo) → **Run** → **Success**.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 

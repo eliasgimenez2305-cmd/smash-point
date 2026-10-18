@@ -29,10 +29,11 @@ export function finDeCobertura(c) {
 }
 
 /* { estado, fin, dias }: estado es al_dia | prueba | bonificado | por_vencer | en_gracia | vencido |
-   suspendido | baja; dias = cuántos faltan para el fin (negativo = hace cuántos venció) */
+   suspendido | por_torneo | baja; dias = cuántos faltan para el fin (negativo = hace cuántos venció) */
 export function estadoCliente(c, hoy) {
   if (c.activo === false) return { estado: "baja", fin: null, dias: null };
   if (c.suspendido) return { estado: "suspendido", fin: null, dias: null };
+  if (c.modo === "por_torneo") return { estado: "por_torneo", fin: null, dias: null }; // paga cada torneo: no vence
   const fin = finDeCobertura(c);
   const base = c.modo === "prueba" ? "prueba" : c.modo === "bonificado" ? "bonificado" : "al_dia";
   if (!fin) return { estado: base, fin: null, dias: null };
@@ -46,6 +47,7 @@ export const ESTADOS_PLAN = {
   al_dia: { label: "Al día", color: "#9fe022" },
   prueba: { label: "Prueba", color: "#22d3ee" },
   bonificado: { label: "Bonificado", color: "#a78bfa" },
+  por_torneo: { label: "Por torneo", color: "#38bdf8" },
   por_vencer: { label: "Por vencer", color: "#fbbf24" },
   en_gracia: { label: "En gracia", color: "#fb923c" },
   vencido: { label: "Vencido", color: "#f87171" },
@@ -56,6 +58,8 @@ export const ESTADOS_PLAN = {
 /* Lo que incluye un plan, en una línea: "Torneos · Reservas · Cantina · Reportes · 2 empleados" */
 export function incluyePlan(p) {
   if (!p) return "";
+  if (p.tipo_cobro === "por_torneo") return "Publicar un torneo (cualquier tipo)";
+  if (p.tipo_cobro === "por_torneo_corto") return "Publicar un Americano o Súper 8";
   const partes = [p.modulo_torneos && "Torneos", p.modulo_reservas && "Reservas", p.modulo_cantina && "Cantina", p.reportes && "Reportes"].filter(Boolean);
   if (p.para !== "publicidad" && (p.modulo_reservas || p.modulo_cantina)) partes.push(p.empleados == null ? "empleados sin tope" : `${p.empleados} empleado${p.empleados === 1 ? "" : "s"}`);
   return partes.join(" · ") || (p.para === "publicidad" ? "Publicidad en el sitio" : "Sin módulos");
