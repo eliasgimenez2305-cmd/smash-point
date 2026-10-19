@@ -9579,15 +9579,20 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const verTorneos = moduloTorneos && (permisos.resultados || permisos.torneos);
   const verReservas = complejosReservas.length > 0 && (permisos.agenda || permisos.canchas);
   const verConsumos = complejosCantina.length > 0 && permisos.consumos;
-  const verInicio = complejos.length > 0;
-  const verCajaDia = complejos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
-  const verClientes = complejos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
+  // Complejos que operan (con Reservas o Cantina). Uno solo con Torneos es como no tener complejo
+  const complejosOperativos = complejos.filter((c) => c.modulo_reservas !== false || c.modulo_cantina !== false);
+  const verInicio = complejosOperativos.length > 0;
+  const verCajaDia = complejosOperativos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
+  const verClientes = complejosOperativos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
   // El plan de la cuenta y de sus complejos (lo administra el creador, ver 20261034_planes_en_la_app.sql)
   const { filas: misPlanes } = React.useContext(MiPlanContext);
   const planDe = (tipo, ref) => misPlanes.find((f) => f.tipo === tipo && f.ref_id === ref);
   const orgBloqueado = !colaborador && PLAN_BLOQUEA.includes(planDe("organizador", organizer.id)?.estado);
   // Reportes: salvo que todos sus complejos tengan un plan sin Reportes
-  const verReportes = !colaborador && complejos.length > 0 && !complejos.every((c) => { const f = planDe("complejo", c.id); return f && f.plan_nombre && f.reportes === false; });
+  const verReportes = !colaborador && complejosOperativos.length > 0 && !complejosOperativos.every((c) => { const f = planDe("complejo", c.id); return f && f.plan_nombre && f.reportes === false; });
+  // Caja: no con un plan de organizador solo de Torneos (sin complejos que operen)
+  const planOrg = planDe("organizador", organizer.id);
+  const verCaja = !colaborador && (complejosOperativos.length > 0 || !planOrg?.plan_nombre || planOrg.modulo_reservas || planOrg.modulo_cantina);
   const filasAviso = misPlanes.filter((f) => (f.tipo === "organizador" && !colaborador) || (f.tipo === "complejo" && complejos.some((c) => c.id === f.ref_id)));
   const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
@@ -9626,10 +9631,10 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ...(verConsumos ? [["productos", "Productos y stock", "productos"]] : []),
       ...(verConsumos && !colaborador ? [["compras", "Compras", "compras"]] : []),
       ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
-      ...(colaborador ? [] : [["caja", "Caja", "caja"]]),
+      ...(verCaja ? [["caja", "Caja", "caja"]] : []),
       ...(verReportes ? [["reportes", "Reportes", "reportes"]] : []),
     ] },
-    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
+    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejosOperativos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
   ].filter((g) => g.items.length > 0);
   const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
@@ -9638,7 +9643,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
     <PanelLayout
       nombre={organizer.name}
       logoUrl={organizer.logoUrl}
-      subtitulo={colaborador ? `Empleado · ${organizer.email}` : complejos.length > 0 ? "Panel del complejo" : "Panel del organizador"}
+      subtitulo={colaborador ? `Empleado · ${organizer.email}` : complejosOperativos.length > 0 ? "Panel del complejo" : "Panel del organizador"}
       grupos={grupos}
       activa={torneoAbierto ? "torneos" : seccion}
       onElegir={(key) => { if (torneoAbierto) onCerrarTorneo(); setSeccion(key); setPerfilGuardado(false); }}
@@ -9671,7 +9676,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
         <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "consumos" && verConsumos ? (
         <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
-      ) : seccion === "caja" && !colaborador ? (
+      ) : seccion === "caja" && verCaja ? (
         <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
       ) : seccion === "perfil" && !colaborador ? (
         <div className="grid gap-6 lg:grid-cols-2 items-start" style={F.body}>
