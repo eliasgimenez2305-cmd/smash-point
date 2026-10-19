@@ -4191,9 +4191,11 @@ function StreamLinks({ tournament, date }) {
   const delDia = tournament.streams?.[date] || {};
   const canchas = Object.keys(delDia).filter((c) => linkValido(delDia[c])).sort((a, b) => Number(a) - Number(b));
   if (canchas.length === 0) return null;
+  // "En vivo" solo el día de los partidos; otro día el link queda (puede ser la grabación)
+  const enVivo = date === todayISO() && tournamentStatusOf(tournament) !== STATUS.FINALIZADO;
   return (
     <div className="flex flex-wrap items-center gap-2 mb-2" style={F.body}>
-      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>● En vivo</span>
+      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>{enVivo ? "● En vivo" : "Transmisiones"}</span>
       {canchas.map((c) => (
         <a key={c} href={delDia[c]} target="_blank" rel="noopener noreferrer" className="px-3 py-1 rounded-full text-xs font-semibold border" style={{ borderColor: "#f8717199", color: "#fecaca", backgroundColor: "#f871711a" }}>
           ▶ {courtName(tournament, Number(c))}
@@ -5276,12 +5278,14 @@ function SchedulePublicView({ tournament }) {
   }
 
   const slotId = (m) => `slot-${m.schedule.date}-${m.schedule.time.replace(":", "")}`;
-  // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante)
+  // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante).
+  // En un torneo finalizado no va (puede quedar algún partido sin resultado cargado)
   const today = todayISO();
   const pending = scheduled.filter((m) => !m.placeholder && !matchIsPlayed(m, tournament.matchFormat));
-  const nowMatch = scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m, tournament.matchFormat))
-    || pending.find((m) => m.schedule.date >= today)
-    || pending[0];
+  const nowMatch = tournamentStatusOf(tournament) === STATUS.FINALIZADO ? null
+    : scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m, tournament.matchFormat))
+      || pending.find((m) => m.schedule.date >= today)
+      || pending[0];
   const goToNow = () => { if (nowMatch) document.getElementById(slotId(nowMatch))?.scrollIntoView({ behavior: "smooth", block: "start" }); };
 
   const byDate = {};
