@@ -9704,7 +9704,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           {complejos.map((c) => (
             <div key={c.id} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Empleados{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
-              <ColaboradoresConfig complejoId={c.id} accessToken={organizer.accessToken} />
+              <ColaboradoresConfig complejoId={c.id} modulos={c} accessToken={organizer.accessToken} />
             </div>
           ))}
         </div>
@@ -9946,7 +9946,23 @@ const PERMISOS_COLABORADOR = [
 
 /* Colaboradores del complejo (empleados): el dueño agrega su mail y elige qué puede hacer cada uno.
    Ellos entran con su cuenta (mail y contraseña) usando ese mail. */
-function ColaboradoresConfig({ complejoId, accessToken }) {
+function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
+  // Solo los permisos de los módulos que tiene el complejo (los marca el plan, ver 20261023_modulos_complejo.sql)
+  const reservas = modulos.modulo_reservas !== false;
+  const cantina = modulos.modulo_cantina !== false;
+  const torneos = modulos.modulo_torneos !== false;
+  const MODULO_PERMISO = { p_agenda: reservas, p_canchas: reservas, p_consumos: cantina, p_resultados: torneos, p_torneos: torneos };
+  const permisos = PERMISOS_COLABORADOR.filter(([campo]) => MODULO_PERMISO[campo]);
+  const tuyo = [
+    reservas || cantina ? "la Caja, los Reportes" : "",
+    cantina ? "las Compras" : "",
+    reservas || cantina ? "anular cobros y ventas" : "",
+    reservas ? "borrar canchas" : "",
+    torneos ? "borrar torneos, eventos y circuitos" : "",
+    "esta lista",
+    reservas ? "bloquear jugadores" : "",
+    "tu perfil",
+  ].filter(Boolean);
   const [lista, setLista] = useState(null);
   const [form, setForm] = useState({ email: "", nombre: "" });
   const [busy, setBusy] = useState(false);
@@ -9992,7 +10008,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
         Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
-        A cada uno le elegís qué puede hacer. Siempre quedan para vos: la Caja, los Reportes y las Compras, anular cobros y ventas, borrar canchas, torneos, eventos y circuitos, esta lista, bloquear jugadores y tu perfil.
+        A cada uno le elegís qué puede hacer. Siempre quedan para vos: {tuyo.slice(0, -1).join(", ")} y {tuyo[tuyo.length - 1]}.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
@@ -10027,7 +10043,7 @@ function ColaboradoresConfig({ complejoId, accessToken }) {
               </div>
               {c.p_agenda !== undefined && (
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {PERMISOS_COLABORADOR.map(([campo, titulo, ayuda]) => (
+                  {permisos.map(([campo, titulo, ayuda]) => (
                     <label key={campo} className="flex items-start gap-2 cursor-pointer">
                       <input type="checkbox" className="mt-1" checked={!!c[campo]} onChange={(e) => cambiarPermiso(c, campo, e.target.checked)} />
                       <span>
