@@ -12963,8 +12963,15 @@ function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], 
     else await supabaseTable(`plataforma_clientes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
     // Un complejo con plan: sus módulos quedan como dice el plan
     const plan = planes.find((pl) => pl.id === body.plan_id);
+    const modulos = plan && { modulo_torneos: plan.modulo_torneos, modulo_reservas: plan.modulo_reservas, modulo_cantina: plan.modulo_cantina };
     if (body.tipo === "complejo" && body.ref_id && plan) {
-      await supabaseTable(`complejos?id=eq.${encodeURIComponent(body.ref_id)}`, { method: "PATCH", body: { modulo_torneos: plan.modulo_torneos, modulo_reservas: plan.modulo_reservas, modulo_cantina: plan.modulo_cantina }, accessToken, prefer: "return=minimal" }).catch(() => {});
+      await supabaseTable(`complejos?id=eq.${encodeURIComponent(body.ref_id)}`, { method: "PATCH", body: modulos, accessToken, prefer: "return=minimal" }).catch(() => {});
+    }
+    // Un organizador con plan: lo mismo en los complejos de los que es dueño, salvo los que tienen un plan propio
+    if (body.tipo === "organizador" && body.ref_id && plan) {
+      const conPlanPropio = (clientes || []).filter((c) => c.tipo === "complejo" && c.ref_id && c.plan_id && c.activo !== false).map((c) => c.ref_id);
+      const excluir = conPlanPropio.length ? `&id=not.in.(${conPlanPropio.map(encodeURIComponent).join(",")})` : "";
+      await supabaseTable(`complejos?dueno_id=eq.${encodeURIComponent(body.ref_id)}${excluir}`, { method: "PATCH", body: modulos, accessToken, prefer: "return=minimal" }).catch(() => {});
     }
     setEditando(null);
     await load();
