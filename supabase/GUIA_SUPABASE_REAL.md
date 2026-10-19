@@ -74,6 +74,7 @@ Y [`migrations/20261033_planes.sql`](migrations/20261033_planes.sql) (planes de 
 Y [`migrations/20261034_planes_en_la_app.sql`](migrations/20261034_planes_en_la_app.sql) (la app respeta el plan: vencido o suspendido queda en solo lectura, tope de empleados, suspendidos fuera de la página pública) → **Run** → **Success**.
 Y [`migrations/20261035_publicidades.sql`](migrations/20261035_publicidades.sql) (publicidades que se ocultan solas si su cliente vence y contador de clics) → **Run** → **Success**.
 Y [`migrations/20261036_creditos.sql`](migrations/20261036_creditos.sql) (pago por torneo: organizadores "Por torneo" que usan un crédito al publicar cada torneo) → **Run** → **Success**.
+Y [`migrations/20261037_funciones.sql`](migrations/20261037_funciones.sql) (funciones en prueba: Reservas, Cuentas y empleados, y Cantina/caja quedan **apagadas**; se prenden desde el panel del creador › Funciones) → **Run** → **Success**. **No** descomentar la última línea (`update public.funciones set activa = true`): esa es solo para PRUEBA.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 
@@ -168,7 +169,7 @@ el mail solo se usa para confirmar la cuenta la primera vez y para elegir una co
 
 Authentication → **Sign In / Providers**:
 
-- [ ] **Allow new users to sign up**: activado (cualquiera se crea su cuenta con mail y contraseña).
+- [ ] **Allow new users to sign up**: **apagado mientras "Cuentas y empleados" esté apagada** en el panel del creador › Funciones. Se activa el mismo día que se prende esa función (desde ahí cualquiera se crea su cuenta con mail y contraseña). Los organizadores los sigue creando el creador, con esto apagado.
 - [ ] **Confirm email**: activado.
 - [ ] Authentication → **Rate Limits**: con SMTP propio el límite de mails sube a 30 por hora. Si se
       espera más movimiento (por ejemplo, el día que se anuncie), subirlo.

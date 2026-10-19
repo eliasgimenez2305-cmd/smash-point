@@ -314,6 +314,7 @@ const RESERVA_ERRORES = {
   turno_cobrado: "Ese turno ya está cobrado: solo el dueño puede sacarle el cobro, cambiarle el precio, cancelarlo o borrarlo.",
   plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
   tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
+  funcion_apagada: "Esta función todavía no está habilitada.",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
 
@@ -880,6 +881,15 @@ function groupsSplitAcrossVenues(t) {
 const ComplexesContext = React.createContext([]);
 /* El plan de la cuenta y de sus complejos (ver mi_plan en 20261034/20261036): { filas, recargar } */
 const MiPlanContext = React.createContext({ filas: [], recargar: () => {} });
+/* Funciones en prueba (ver 20261037_funciones.sql): las prende el creador. Apagadas, no se ven. */
+const FUNCIONES_APAGADAS = { reservas: false, cuentas: false, cantina: false };
+const FuncionesContext = React.createContext(FUNCIONES_APAGADAS);
+async function fetchFunciones() {
+  try {
+    const rows = (await supabaseTable("funciones?select=clave,activa")) || [];
+    return { ...FUNCIONES_APAGADAS, ...Object.fromEntries(rows.map((r) => [r.clave, !!r.activa])) };
+  } catch { return FUNCIONES_APAGADAS; }
+}
 
 /* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
    cancha) puedan nombrar las canchas con su sede sin recibir el torneo entero */
@@ -5510,7 +5520,7 @@ function PrivacidadView({ onBack }) {
 
 /* Contacto al pie de las pantallas públicas, con el ingreso de organizadores y de empleados de
    complejos (discreto, para que la portada sea del público) */
-function ContactFooter({ onGoLogin }) {
+function ContactFooter({ onGoLogin, conCuentas = true }) {
   return (
     <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-10 text-center" style={F.body}>
       <div className="rounded-2xl px-4 py-5" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -5522,7 +5532,7 @@ function ContactFooter({ onGoLogin }) {
       </div>
       {onGoLogin && (
         <p className="mt-4 text-xs text-teal-600">
-          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">Ingresar o crear cuenta</button>
+          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">{conCuentas ? "Ingresar o crear cuenta" : "Acceso organizadores"}</button>
           {" · "}
           <a href="#privacidad" className="hover:text-lime-400 underline decoration-teal-800">Privacidad</a>
         </p>
@@ -5972,15 +5982,16 @@ function DirectoryAvatar({ url, name, color, size = 64 }) {
 /* Pestaña pública "Complejos": el buscador de turnos (filtros arriba y una tarjeta por complejo con
    reserva online) y, abajo, el resto de los complejos de la ciudad */
 function VenuesPublicView({ venues, complejos = [], organizers = [], jugador, onReservar, onMisReservas }) {
+  const { reservas: conReservaOnline } = React.useContext(FuncionesContext);
   const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
   const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas && c.modulo_reservas !== false);
   return (
     <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-6" style={F.body}>
       <div className="flex items-end justify-between gap-3 pt-2">
-        <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>Reservá tu cancha</h1>
-        {jugador && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline">Mis reservas</button>}
+        <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>{conReservaOnline ? "Reservá tu cancha" : "Complejos"}</h1>
+        {jugador && conReservaOnline && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline">Mis reservas</button>}
       </div>
-      <BuscadorTurnos venues={venues} complejos={complejos} organizers={organizers} sinReservaOnline={sorted.filter((v) => !conReservas(v.id)).length} onElegir={onReservar} />
+      {conReservaOnline && <BuscadorTurnos venues={venues} complejos={complejos} organizers={organizers} sinReservaOnline={sorted.filter((v) => !conReservas(v.id)).length} onElegir={onReservar} />}
       <MasComplejos venues={sorted.filter((v) => !conReservas(v.id))} titulo={sorted.some((v) => conReservas(v.id)) ? "Más complejos en Gualeguaychú" : "Complejos en Gualeguaychú"} />
     </section>
   );
@@ -6494,7 +6505,8 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
    trabajar en un complejo y para organizar. La primera vez llega un mail con un link para confirmarla.
    onEntro(jugador, contraseña) se llama con la sesión ya iniciada. */
 function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
-  const [modo, setModo] = useState(modoInicial); // entrar | crear | recuperar | enviado
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
+  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar"); // entrar | crear | recuperar | enviado
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [ver, setVer] = useState(false);
@@ -6581,7 +6593,7 @@ function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
 
   return (
     <div className="space-y-3 text-sm" style={F.body}>
-      {modo !== "recuperar" ? (
+      {modo !== "recuperar" ? conCuentas && (
         <div className="grid grid-cols-2 gap-1 p-1 rounded-full border border-teal-800">
           {[["entrar", "Ingresar"], ["crear", "Crear cuenta"]].map(([k, l]) => (
             <button key={k} type="button" onClick={() => cambiar(k)} className="py-1.5 rounded-full font-semibold" style={modo === k ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1" }}>{l}</button>
@@ -7173,6 +7185,7 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
 function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
   const [reservarId, setReservarId] = useState(null);
@@ -7312,10 +7325,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
+      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
-      <ContactFooter onGoLogin={onGoLogin} />
+      <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
       {registering && (
         <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
       )}
@@ -7691,6 +7704,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
 }
 /* Entrada única: jugadores, empleados de complejos y organizadores, con mail y contraseña */
 function Login({ jugadorApi, onEntro, onBack, aviso }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   return (
     <div className="min-h-[75vh] flex items-center justify-center px-6 py-8">
       <div className="w-full max-w-sm">
@@ -7699,7 +7713,7 @@ function Login({ jugadorApi, onEntro, onBack, aviso }) {
         </div>
         <div className="border border-teal-800 rounded-xl p-6 bg-teal-950/40">
           <h1 className="text-lg font-semibold mb-1" style={F.body}>Tu cuenta</h1>
-          <p className="text-sm text-teal-400 mb-4" style={F.body}>Con tu cuenta reservás turnos en cualquier complejo. Si trabajás en uno u organizás torneos, también entrás a tu panel.</p>
+          <p className="text-sm text-teal-400 mb-4" style={F.body}>{conCuentas ? "Con tu cuenta reservás turnos en cualquier complejo. Si trabajás en uno u organizás torneos, también entrás a tu panel." : "Entrá con el mail y la contraseña de tu cuenta de organizador."}</p>
           {aviso && <p className="text-sm text-lime-400 mb-3" style={F.body}>{aviso}</p>}
           <CuentaForm jugadorApi={jugadorApi} onEntro={onEntro} />
         </div>
@@ -8548,7 +8562,68 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout, onMiCuenta }) {
+/* Funciones en prueba (ver 20261037_funciones.sql): se publican apagadas y se prenden acá cuando
+   están probadas. Apagadas no se ven en la página ni en los paneles, y la base no las acepta. */
+const FUNCIONES_INFO = [
+  ["reservas", "Reservas de canchas", "Reservá tu cancha y buscador de turnos en la página, agenda del complejo, turnos fijos y clases."],
+  ["cuentas", "Cuentas y empleados", "Botón Ingresar / Mi cuenta para jugadores, crear cuenta y empleados de los complejos. Para que los jugadores puedan crearse una cuenta, además hay que prender \"Allow new users to sign up\" en Supabase (Authentication › Sign In / Providers)."],
+  ["cantina", "Cantina, caja y gestión", "Mostrador, cuentas (fiado), productos y stock, compras, Caja, Caja del día, Clientes y Reportes, y \"+ Consumo\" en los cobros de los torneos."],
+];
+function FuncionesManager({ accessToken, onCambio }) {
+  const [filas, setFilas] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(null);
+  const [confirmando, setConfirmando] = useState(null);
+
+  const load = useCallback(async () => {
+    try { setFilas((await supabaseTable("funciones?select=clave,activa,cambiada_at", { accessToken })) || []); setError(""); }
+    catch { setError("No se pudieron cargar las funciones. ¿Ya se corrió la migración 20261037_funciones.sql?"); }
+  }, [accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const cambiar = async (clave, activa) => {
+    setBusy(clave); setError("");
+    try {
+      await supabaseTable(`funciones?clave=eq.${clave}`, { method: "PATCH", body: { activa }, accessToken, prefer: "return=minimal" });
+      setConfirmando(null);
+      await load();
+      onCambio?.(await fetchFunciones());
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="space-y-4 text-sm max-w-2xl" style={F.body}>
+      <p className="text-teal-300">Secciones publicadas pero apagadas mientras las probás. Apagadas, nadie las ve (ni los organizadores ni el público) y la base no deja cargar nada de ellas. Al prenderlas aparecen para todos enseguida, sin volver a publicar.</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {filas === null ? (!error && <p className="opacity-60">Cargando…</p>) : FUNCIONES_INFO.map(([clave, titulo, detalle]) => {
+        const fila = filas.find((x) => x.clave === clave);
+        const activa = !!fila?.activa;
+        return (
+          <div key={clave} className="rounded-xl border p-4" style={{ borderColor: activa ? `${BRAND.lime}66` : "#1f3a44", backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-semibold text-teal-100">{titulo}</p>
+                <p className="text-xs" style={{ color: activa ? BRAND.lime : "#94a3b8" }}>{activa ? "Prendida: la ve todo el mundo" : "Apagada: no la ve nadie"}{fila?.cambiada_at ? ` · desde el ${fechaCorta(fechaArgentina(fila.cambiada_at))}` : ""}</p>
+              </div>
+              {confirmando === clave ? (
+                <span className="text-teal-200">{activa ? "¿Apagarla?" : "¿Prenderla para todos?"}
+                  <button type="button" disabled={!!busy} onClick={() => cambiar(clave, !activa)} className="ml-2 font-semibold" style={{ color: activa ? "#f87171" : BRAND.lime }}>Sí</button>
+                  <button type="button" onClick={() => setConfirmando(null)} className="ml-2 text-teal-400">No</button>
+                </span>
+              ) : (
+                <button type="button" disabled={!fila || !!busy} onClick={() => setConfirmando(clave)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={activa ? { border: "1px solid #f8717166", color: "#f87171" } : { backgroundColor: BRAND.lime, color: "#14181f" }}>{activa ? "Apagar" : "Prender"}</button>
+              )}
+            </div>
+            <p className="text-xs text-teal-400 mt-2">{detalle}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout, onMiCuenta, onFunciones }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
   const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
@@ -8559,7 +8634,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
   const grupos = [
     { titulo: "Plataforma", items: [["organizadores", "Organizadores", "clientes"], ["canchas", "Complejos", "complejos"], ["profes", "Entrenamientos", "clases"]] },
     { titulo: "Contenido", items: [["torneos", "Torneos", "torneos"], ["circuitos", "Circuitos", "circuitos"], ["publicidad", "Publicidad", "publicidad"]] },
-    { titulo: "Gestión", items: [["caja", "Caja", "caja"], ["respaldo", "Respaldo", "respaldo"]] },
+    { titulo: "Gestión", items: [["caja", "Caja", "caja"], ["funciones", "Funciones", "funciones"], ["respaldo", "Respaldo", "respaldo"]] },
   ];
   const titulo = grupos.flatMap((g) => g.items).find(([k]) => k === tab)?.[1] || "Panel";
 
@@ -8577,6 +8652,8 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
     >
       {tab === "caja" ? (
         <CajaPlataforma accessToken={creator.accessToken} ads={ads} organizers={organizers} coaches={coaches} venues={venues} />
+      ) : tab === "funciones" ? (
+        <FuncionesManager accessToken={creator.accessToken} onCambio={onFunciones} />
       ) : tab === "publicidad" ? (
         <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
@@ -9247,6 +9324,7 @@ const PANEL_ICONOS = {
   circuitos: "M6 19a2 2 0 100-4 2 2 0 000 4zM18 9a2 2 0 100-4 2 2 0 000 4zM6 15V9a4 4 0 014-4h6M18 9v6a4 4 0 01-4 4H8",
   publicidad: "M3 10v4h3l6 4V6L6 10zM16 9a4 4 0 010 6M19 6a8 8 0 010 12",
   respaldo: "M12 3v12M7 10l5 5 5-5M4 17v3h16v-3",
+  funciones: "M4 8h10M18 8h2M4 16h2M10 16h10M16 6v4M8 14v4",
   menu: "M4 7h16M4 12h16M4 17h16",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
@@ -9586,13 +9664,14 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const verClientes = complejosOperativos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
   // El plan de la cuenta y de sus complejos (lo administra el creador, ver 20261034_planes_en_la_app.sql)
   const { filas: misPlanes } = React.useContext(MiPlanContext);
+  const funciones = React.useContext(FuncionesContext);
   const planDe = (tipo, ref) => misPlanes.find((f) => f.tipo === tipo && f.ref_id === ref);
   const orgBloqueado = !colaborador && PLAN_BLOQUEA.includes(planDe("organizador", organizer.id)?.estado);
   // Reportes: salvo que todos sus complejos tengan un plan sin Reportes
   const verReportes = !colaborador && complejosOperativos.length > 0 && !complejosOperativos.every((c) => { const f = planDe("complejo", c.id); return f && f.plan_nombre && f.reportes === false; });
   // Caja: no con un plan de organizador solo de Torneos (sin complejos que operen)
   const planOrg = planDe("organizador", organizer.id);
-  const verCaja = !colaborador && (complejosOperativos.length > 0 || !planOrg?.plan_nombre || planOrg.modulo_reservas || planOrg.modulo_cantina);
+  const verCaja = !colaborador && funciones.cantina && (complejosOperativos.length > 0 || !planOrg?.plan_nombre || planOrg.modulo_reservas || planOrg.modulo_cantina);
   const filasAviso = misPlanes.filter((f) => (f.tipo === "organizador" && !colaborador) || (f.tipo === "complejo" && complejos.some((c) => c.id === f.ref_id)));
   const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
@@ -9634,7 +9713,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ...(verCaja ? [["caja", "Caja", "caja"]] : []),
       ...(verReportes ? [["reportes", "Reportes", "reportes"]] : []),
     ] },
-    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejosOperativos.length > 0 ? "Perfil y empleados" : "Perfil", "perfil"]] },
+    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejosOperativos.length > 0 && funciones.cuentas ? "Perfil y empleados" : "Perfil", "perfil"]] },
   ].filter((g) => g.items.length > 0);
   const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
@@ -9695,13 +9774,13 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
               {perfilGuardado && <span className="text-sm text-lime-400">Guardado ✓</span>}
             </div>
           </div>
-          {complejos.map((c) => (
+          {funciones.reservas && complejos.map((c) => (
             <div key={`ficha-${c.id}`} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Ficha del complejo · {nombreComplejo(c.id)}</h2>
               <FichaComplejoForm complejoId={c.id} nombre={nombreComplejo(c.id)} accessToken={organizer.accessToken} />
             </div>
           ))}
-          {complejos.map((c) => (
+          {funciones.cuentas && complejos.map((c) => (
             <div key={c.id} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Empleados{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
               <ColaboradoresConfig complejoId={c.id} modulos={c} accessToken={organizer.accessToken} />
@@ -12254,7 +12333,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                             </div>
                           ) : cobrando !== f.k && cobrandoTodo !== f.k && vinculando !== f.k && (
                             <div className="flex flex-wrap items-center gap-3">
-                              <button type="button" onClick={() => abrirConsumo(f)} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>
+                              {complejoIds.length > 0 && <button type="button" onClick={() => abrirConsumo(f)} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>}
                               {cuenta
                                 ? <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline">usar otra cuenta</button>
                                 : cuentas.length > 0 && <button type="button" onClick={() => setVinculando(f.k)} className="text-teal-500 underline">usar una cuenta que ya existe</button>}
@@ -16617,6 +16696,7 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
+  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS); // funciones en prueba prendidas (ver FuncionesContext)
   const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
   const [adsOcultas, setAdsOcultas] = useState([]); // publicidades con el cliente vencido o de baja (ver publicidades_ocultas)
   const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
@@ -16710,6 +16790,7 @@ function SmashPointAppInner() {
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
         fetchComplejosReserva().then(setComplejos); // solo lo usan los paneles: no frena la portada
+        fetchFunciones().then(setFunciones);
         supabaseRpc("cuentas_suspendidas", {}).then((rows) => setSuspendidos(rows || [])).catch(() => {});
         supabaseRpc("publicidades_ocultas", {}).then((rows) => setAdsOcultas((rows || []).map((r) => (typeof r === "string" ? r : r.publicidades_ocultas)))).catch(() => {});
 
@@ -17172,7 +17253,10 @@ function SmashPointAppInner() {
   const publicTournaments = tournaments.filter((t) => esPublico(t) && !suspendido("organizador", t.organizerId));
   const publicOrganizers = organizers.filter((o) => !suspendido("organizador", o.id));
   const publicAds = ads.filter((a) => !motivoPublicidadOculta(a, hoyArgentina(), adsOcultas));
-  const publicComplejos = complejos.filter((c) => !suspendido("complejo", c.id) && !suspendido("organizador", c.dueno_id));
+  // Con Reservas o Cantina apagadas (funciones en prueba), los complejos quedan como sin esos módulos.
+  // El creador ve los valores reales (los edita en la ficha del complejo).
+  const complejosApp = complejos.map((c) => ({ ...c, modulo_reservas: c.modulo_reservas !== false && funciones.reservas, modulo_cantina: c.modulo_cantina !== false && funciones.cantina }));
+  const publicComplejos = complejosApp.filter((c) => !suspendido("complejo", c.id) && !suspendido("organizador", c.dueno_id));
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
@@ -17235,6 +17319,7 @@ function SmashPointAppInner() {
         events={events}
         complejos={complejos}
         onSaveComplejo={saveComplejo}
+        onFunciones={setFunciones}
         onSaveVenue={saveVenue}
         onDeleteVenue={deleteVenue}
         onSaveCoach={saveCoach}
@@ -17261,7 +17346,7 @@ function SmashPointAppInner() {
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
         cobros={session.role === "creador" ? null : {
           accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
-          complejoIds: complejos.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
+          complejoIds: complejosApp.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
         }}
       />
     );
@@ -17287,7 +17372,7 @@ function SmashPointAppInner() {
         events={events.filter((e) => e.organizerId === session.id)}
         onSaveEvent={saveEvent}
         onDeleteEvent={deleteEvent}
-        complejos={complejos.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id))}
+        complejos={complejosApp.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id))}
         venues={venues}
       />
     );
@@ -17298,6 +17383,7 @@ function SmashPointAppInner() {
   return (
     <ComplexesContext.Provider value={venues}>
     <MiPlanContext.Provider value={planCtx}>
+    <FuncionesContext.Provider value={funciones}>
     <div className="min-h-screen overflow-x-clip" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
       {showFooterAds && (
@@ -17317,6 +17403,7 @@ function SmashPointAppInner() {
         </div>
       )}
     </div>
+    </FuncionesContext.Provider>
     </MiPlanContext.Provider>
     </ComplexesContext.Provider>
   );
