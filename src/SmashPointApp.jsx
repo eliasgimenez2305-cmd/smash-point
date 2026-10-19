@@ -1549,6 +1549,7 @@ function collectScheduleableMatches(tournament) {
     // Un bye (la pareja pasa directo) no se juega: no tiene horario y no va en la grilla ni en
     // "Sin horario asignado"
     const byes = c.bracket ? walkBracket(c.bracket).byes : [];
+    const nombres = c.bracket ? categoryEntitiesById(c) : {};
     (c.bracket || []).forEach((round, ri) => {
       round.forEach((m, mi) => {
         if (isByeMatch(byes, ri, mi)) return;
@@ -1566,7 +1567,15 @@ function collectScheduleableMatches(tournament) {
             placeholderText = `Ganador ${prevLabel} ${mi * 2 + 1} vs Ganador ${prevLabel} ${mi * 2 + 2}`;
           }
         }
-        if ((m.pairA && m.pairB) || isSkeletonSlot) {
+        // Una ronda siguiente que ya tiene horario (semis, final…) también va, aunque falte saber quién
+        // juega: "Ganador Cuartos 1 vs Ganador Cuartos 2" (o el nombre de la pareja que ya pasó)
+        const isPendingScheduled = !isSkeletonSlot && ri > 0 && !!m.schedule && !(m.pairA && m.pairB);
+        if (isPendingScheduled) {
+          const prevLabel = roundStageLabel(c.bracket.length, ri - 1);
+          const lado = (pid, n) => (pid ? nombres[pid]?.name || "?" : `Ganador ${prevLabel} ${n}`);
+          placeholderText = `${lado(m.pairA, mi * 2 + 1)} vs ${lado(m.pairB, mi * 2 + 2)}`;
+        }
+        if ((m.pairA && m.pairB) || isSkeletonSlot || isPendingScheduled) {
           list.push({
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "bracket", roundIndex: ri }, matchId: m.id, number: nums.get(m.id), label: roundStageLabel(c.bracket.length, ri),
@@ -7499,20 +7508,22 @@ function CategoryBracketPublicView({ category, format }) {
             renderMatch={(m, ri, mi) => {
               const color = colorOf(ri);
               const w = walked.winners[ri][mi];
-              const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+              // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
+              const jugados = matchIsPlayed(m, format) && !m.walkover ? countedSets(m, format) : [];
+              const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
               const winnerIsA = w == null ? null : w === m.pairA;
               return (
                 <div className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                   {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} wrap /></div>}
                   <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
+                    {games("a")}
                   </div>
                   <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
+                    {games("b")}
                   </div>
-                  {matchIsPlayed(m, format) && (
+                  {matchIsPlayed(m, format) && (m.walkover || m.retired) && (
                     <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
                   )}
                 </div>
