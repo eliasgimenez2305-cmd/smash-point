@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
+import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
 import { findNameDuplicates, splitPair, nameMatch, normalizeName } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
@@ -11769,16 +11769,18 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                         {m.walkover ? (
                           <p className="text-amber-400 font-semibold text-xs">WO</p>
                         ) : (() => {
-                          const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+                          // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
+                          const jugados = matchIsPlayed(m, format) ? countedSets(m, format) : [];
+                          const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
                           return (
                             <>
                               <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                                 <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                                {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
+                                {editable && games("a")}
                               </div>
                               <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                                 <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                                {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
+                                {editable && games("b")}
                               </div>
                               {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                             </>
@@ -11787,8 +11789,8 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                         {/* El resultado se carga en la misma ventanita que en Horarios y En cancha */}
                         {editable && (
                           <button type="button" onClick={() => setResultMatch({ ...m, number: nums.get(m.id), categoryName: category.name, label: roundStageLabel(total, ri) })} className="text-xs underline text-teal-300 hover:text-lime-400">
-                            {matchHasScore(m)
-                              ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
+                            {matchIsPlayed(m, format) ? "Editar resultado ✎"
+                              : matchHasScore(m) ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
                               : "+ Resultado"}
                           </button>
                         )}
