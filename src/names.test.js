@@ -28,6 +28,8 @@ test("nombres distintos: sin aviso", () => {
 test("separa los jugadores de una pareja", () => {
   assert.deepEqual(splitPair("Gómez / Ibáñez"), ["Gómez", "Ibáñez"]);
   assert.deepEqual(splitPair("Juan Pérez"), ["Juan Pérez"]);
+  assert.deepEqual(splitPair("ELIAS GIMENEZ - JUAN PEREZ"), ["ELIAS GIMENEZ", "JUAN PEREZ"]);
+  assert.deepEqual(splitPair("García-López / Pérez"), ["García-López", "Pérez"]);
 });
 
 test("encuentra al jugador en otra categoría y en otra inscripción pendiente", () => {

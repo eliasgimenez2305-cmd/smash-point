@@ -2,16 +2,24 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, setsWon, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
-import { findNameDuplicates, splitPair } from "./names.js";
+import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
+import { findNameDuplicates, splitPair, nameMatch, normalizeName } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
+import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
+import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
+import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
+import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
+import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+/* uuid para la base (crypto.randomUUID no existe fuera de https/localhost, ej. el celular en la red local) */
+const nuevoUuid = () => "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16));
 
 const STORAGE_KEY_TOURNAMENTS = "sp:tournaments";
 const STORAGE_KEY_ADS = "sp:ads";
@@ -40,8 +48,8 @@ async function supabaseSignIn(email, password) {
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
     body: JSON.stringify({ email, password }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "Usuario o contraseña incorrectos.");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error_description || data.msg || "Usuario o contraseña incorrectos."), { code: data.error_code || data.code, status: res.status });
   return data; // { access_token, user: { id, email, ... }, ... }
 }
 
@@ -86,6 +94,11 @@ async function renewWithLatestToken(refreshToken) {
 /* Lo que queda guardado en este navegador para no perder la sesión al recargar: el refresh token y
    la pantalla del panel en la que estaba. Cerrar sesión lo borra. */
 const AUTH_STORAGE_KEY = "sp:auth";
+// Complejo cuyo panel tenía abierto el empleado, para volver ahí al recargar
+const PANEL_COMPLEJO_KEY = "sp:panel-complejo";
+function olvidarPanelComplejo() {
+  try { localStorage.removeItem(PANEL_COMPLEJO_KEY); } catch {}
+}
 function readStoredAuth() {
   try { return JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null"); } catch { return null; }
 }
@@ -101,7 +114,7 @@ function authFields(auth) {
 }
 
 async function supabaseRequestPasswordReset(email) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover?redirect_to=${encodeURIComponent(window.location.origin + window.location.pathname)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
     body: JSON.stringify({ email }),
@@ -246,6 +259,17 @@ async function supabaseRpc(fn, params, accessToken) {
   return data;
 }
 
+/* Clic en una publicidad (ver 20261035_publicidades.sql): se anota sin esperar la respuesta */
+function contarClic(adId) {
+  try {
+    fetch(`${SUPABASE_URL}/rest/v1/rpc/contar_clic`, {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+      body: JSON.stringify({ p_ad: adId }),
+    }).catch(() => {});
+  } catch { /* sin conexión: no se cuenta */ }
+}
+
 /* Inscripciones de los torneos del organizador logueado (la base solo le devuelve las suyas) */
 async function fetchInscripciones(accessToken) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/inscripciones?select=*&order=created_at.desc`, {
@@ -255,6 +279,201 @@ async function fetchInscripciones(accessToken) {
   if (!res.ok) throw new Error("No se pudieron cargar las inscripciones.");
   return res.json();
 }
+
+/* ---------- Reserva de canchas (ver supabase/migrations/20261014_reservas_canchas.sql) ---------- */
+
+/* Pedido a una tabla de Supabase. Si falla, el error trae en .pgCode el código de Postgres
+   (23P01 = se pisa con otra reserva, 23503 = la cancha tiene reservas y no se puede borrar). */
+async function supabaseTable(path, { method = "GET", body, accessToken, prefer } = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(prefer ? { Prefer: prefer } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(data?.message || "No se pudo completar la operación.");
+    err.code = data?.message; // el motivo que manda un trigger (ej: "turno_cobrado")
+    err.pgCode = data?.code;
+    throw err;
+  }
+  return data;
+}
+
+const RESERVA_ERRORES = {
+  "23P01": "Ese horario se pisa con otro turno o bloqueo de la cancha.",
+  "23503": "La cancha tiene reservas cargadas: en vez de borrarla, desactivala.",
+  "23514": "Revisá los datos: hay alguno inválido.",
+  "42501": "No tenés permiso para hacer eso.",
+  turno_cobrado: "Ese turno ya está cobrado: solo el dueño puede sacarle el cobro, cambiarle el precio, cancelarlo o borrarlo.",
+  plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
+  tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
+  funcion_apagada: "Esta función todavía no está habilitada.",
+};
+const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
+
+/* Complejos con dueño y Reservas habilitadas. Si la base todavía no tiene la tabla, lista vacía. */
+async function fetchComplejosReserva() {
+  try { return (await supabaseTable("complejos?select=*")) || []; } catch { return []; }
+}
+
+/* ---------- Cuentas: cada persona entra con su mail y contraseña (jugador, empleado u organizador) ---------- */
+
+async function supabaseAuthPost(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.msg || data.error_description || data.message || "No se pudo completar.");
+    err.status = res.status;
+    err.code = data.error_code || data.code;
+    throw err;
+  }
+  return data;
+}
+/* Adónde vuelven los links de los mails (confirmar la cuenta, nueva contraseña): esta misma página */
+const volverA = () => `?redirect_to=${encodeURIComponent(window.location.origin + window.location.pathname)}`;
+/* Crea la cuenta: llega un mail con el link para confirmarla. Si el mail ya tenía cuenta, Supabase
+   no avisa (para no revelar quién está registrado): responde sin identidades. */
+const supabaseSignUp = (email, password) => supabaseAuthPost(`signup${volverA()}`, { email, password });
+const supabaseResendConfirm = (email) => supabaseAuthPost(`resend${volverA()}`, { type: "signup", email });
+async function supabaseGetUser(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new Error("La sesión no es válida.");
+  return res.json();
+}
+async function supabaseUpdatePassword(accessToken, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo cambiar la contraseña."), { code: data.error_code || data.code, status: res.status });
+  return data;
+}
+/* Lo que traen los links de los mails en la dirección (#access_token=…&type=signup|recovery, o
+   #error=…). Se lee una vez al abrir la página y se borra de la dirección. */
+function leerLinkDeMail() {
+  const hash = window.location.hash.slice(1);
+  if (!/(^|&)(access_token|error)=/.test(hash)) return null;
+  const p = new URLSearchParams(hash);
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  if (p.get("error")) return { error: p.get("error_code") || p.get("error") };
+  return {
+    tipo: p.get("type"),
+    auth: { access_token: p.get("access_token"), refresh_token: p.get("refresh_token"), expires_in: Number(p.get("expires_in")) || 3600 },
+  };
+}
+// Se lee al cargar el archivo (una sola vez, antes de que la app arranque)
+const LINK_DE_MAIL = typeof window !== "undefined" ? leerLinkDeMail() : null;
+const CUENTA_ERRORES = {
+  invalid_credentials: "Mail o contraseña incorrectos.",
+  email_not_confirmed: "Todavía no confirmaste tu cuenta: buscá el mail que te mandamos (fijate también en correo no deseado).",
+  weak_password: "La contraseña es muy débil: usá al menos 8 caracteres.",
+  same_password: "Es la misma contraseña que tenías: elegí otra.",
+  over_email_send_rate_limit: "Mandamos muchos mails seguidos. Esperá un rato y probá de nuevo.",
+  over_request_rate_limit: "Demasiados intentos. Esperá un minuto y probá de nuevo.",
+  otp_expired: "El link del mail ya venció o ya se usó. Pedí uno nuevo.",
+};
+const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : "No se pudo completar. Revisá la conexión y probá de nuevo.");
+
+const PEDIDO_ERRORES = {
+  sin_sesion: "Tu sesión venció: volvé a entrar.",
+  sin_perfil: "Completá tus datos antes de reservar.",
+  cancha_invalida: "Esa cancha ya no recibe reservas online.",
+  duracion_invalida: "Esa duración ya no se ofrece en esa cancha.",
+  fuera_de_horario: "Ese horario está fuera del horario de la cancha.",
+  horario_pasado: "Ese horario ya pasó.",
+  muy_adelante: "Se puede reservar hasta 30 días antes.",
+  bloqueado: "No podés pedir turnos en este complejo. Comunicate con ellos.",
+  ocupado: "Alguien acaba de tomar ese turno. Elegí otro horario.",
+  plan_vencido: "Este complejo no está tomando reservas online por ahora.",
+  demasiados_pedidos: "Ya tenés 2 pedidos esperando que el complejo los confirme. Cuando te respondan, podés pedir otro.",
+  no_encontrada: "No encontramos esa reserva.",
+  no_cancelable: "Esa reserva ya no se puede cancelar.",
+  fuera_de_plazo: "Falta menos de 24 h para el turno: para cancelarlo, escribile al complejo.",
+};
+const PEDIDO_ERRORES_GENERICO = "No se pudo completar. Revisá la conexión y probá de nuevo.";
+const pedidoErrorText = (e) => PEDIDO_ERRORES[e?.code] || PEDIDO_ERRORES_GENERICO;
+
+/* Sesión de la cuenta (jugador o empleado), aparte de la del organizador: se guarda en el navegador para no tener que
+   ingresar cada vez, y se renueva sola antes de vencer */
+const JUGADOR_STORAGE_KEY = "sp:jugador";
+function readStoredJugador() {
+  try { return JSON.parse(localStorage.getItem(JUGADOR_STORAGE_KEY) || "null"); } catch { return null; }
+}
+function writeStoredJugador(value) {
+  try {
+    if (value) localStorage.setItem(JUGADOR_STORAGE_KEY, JSON.stringify(value));
+    else localStorage.removeItem(JUGADOR_STORAGE_KEY);
+  } catch {}
+}
+
+function useJugador() {
+  const [jugador, setJugadorState] = useState(null); // { id, email, perfil, accessToken, refreshToken, expiresAt }
+  const ref = useRef(null);
+  const setJugador = useCallback((j) => {
+    ref.current = j;
+    setJugadorState(j);
+    writeStoredJugador(j ? { refreshToken: j.refreshToken } : null);
+  }, []);
+  const fromAuth = useCallback(async (auth) => {
+    const base = { id: auth.user.id, email: auth.user.email, ...authFields(auth) };
+    const rows = await supabaseTable(`jugadores?id=eq.${base.id}&select=*`, { accessToken: base.accessToken });
+    return { ...base, perfil: rows?.[0] || null };
+  }, []);
+
+  useEffect(() => {
+    const stored = readStoredJugador();
+    if (!stored?.refreshToken) return;
+    supabaseRefreshOnce(stored.refreshToken).then(fromAuth).then(setJugador).catch((err) => { if (err.expired) writeStoredJugador(null); });
+  }, [fromAuth, setJugador]);
+
+  /* Token vigente para llamar a la base como el jugador */
+  const token = useCallback(async () => {
+    const j = ref.current;
+    if (!j) throw Object.assign(new Error("sin_sesion"), { code: "sin_sesion" });
+    if (Date.now() < j.expiresAt - 6 * 60000) return j.accessToken;
+    try {
+      const next = { ...j, ...authFields(await supabaseRefreshOnce(j.refreshToken)) };
+      setJugador(next);
+      return next.accessToken;
+    } catch (err) {
+      if (err.expired) setJugador(null);
+      throw Object.assign(err, { code: "sin_sesion" });
+    }
+  }, [setJugador]);
+
+  const login = useCallback(async (auth) => { const j = await fromAuth(auth); setJugador(j); return j; }, [fromAuth, setJugador]);
+  const savePerfil = useCallback(async (perfil) => {
+    const accessToken = await token();
+    const rows = await supabaseTable("jugadores?on_conflict=id", {
+      method: "POST", accessToken, prefer: "resolution=merge-duplicates,return=representation",
+      body: { id: ref.current.id, ...perfil },
+    });
+    setJugador({ ...ref.current, perfil: rows[0] });
+  }, [token, setJugador]);
+  const logout = useCallback(() => {
+    const j = ref.current;
+    setJugador(null);
+    if (j) fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${j.accessToken}` } }).catch(() => {});
+  }, [setJugador]);
+
+  return useMemo(() => ({ jugador, token, login, savePerfil, logout }), [jugador, token, login, savePerfil, logout]);
+}
+
+/* Link de WhatsApp con un mensaje ya escrito */
+const waLink = (telefono, texto) => `https://wa.me/${telefono}?text=${encodeURIComponent(texto)}`;
 
 const INSCRIPCION_ERRORES = {
   inscripciones_cerradas: "Las inscripciones de este torneo están cerradas.",
@@ -328,8 +547,10 @@ function withRegistrationOpen(t, open) {
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
    categorías llenas), "cerradas" (el organizador las cerró: cartel) o "cerrado" (nunca tuvo, o ya
    terminó: no se muestra nada) */
-function registrationStatus(t) {
-  if (isInfoOnly(t) || t.status === STATUS.FINALIZADO) return "cerrado";
+function registrationStatus(t0) {
+  if (isInfoOnly(t0)) return "cerrado";
+  const t = withAutoStatus(t0); // empezado el torneo, las inscripciones quedan cerradas
+  if (t.status === STATUS.FINALIZADO) return "cerrado";
   // Tuvo inscripciones y el organizador las cerró: se muestra el cartel "Inscripciones cerradas"
   if (!t.inscripcionesAbiertas) return t.inscripcionesCerradas ? "cerradas" : "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
@@ -342,9 +563,31 @@ function registrationStatus(t) {
 const IMAGES_BUCKET = "images";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
-async function uploadImageToSupabase(file, accessToken, folder = "misc") {
+/* Achica una foto antes de subirla: como mucho maxAncho de ancho, en JPEG (en PNG si puede tener transparencia). Así una portada ancha o una
+   foto de la galería se ve nítida y carga rápido en el celular. Los GIF y SVG se suben como están. */
+async function achicarImagen(file, maxAncho) {
+  if (!maxAncho || /gif|svg/.test(file.type) || typeof createImageBitmap !== "function") return file;
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) return file;
+  if (bitmap.width <= maxAncho && file.size <= 1.5 * 1024 * 1024) { bitmap.close?.(); return file; }
+  const escala = Math.min(1, maxAncho / bitmap.width);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * escala);
+  canvas.height = Math.round(bitmap.height * escala);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  // Los PNG y WEBP pueden tener fondo transparente (logos): se guardan en PNG para no quedar con fondo negro
+  const conAlfa = /png|webp/.test(file.type);
+  const tipo = conAlfa ? "image/png" : "image/jpeg";
+  const blob = await new Promise((res) => canvas.toBlob(res, tipo, 0.85));
+  return blob ? new File([blob], (file.name || "foto").replace(/\.[^.]+$/, "") + (conAlfa ? ".png" : ".jpg"), { type: tipo }) : file;
+}
+
+async function uploadImageToSupabase(original, accessToken, folder = "misc", { maxAncho = null } = {}) {
   if (!accessToken) throw new Error("Tenés que iniciar sesión de nuevo para subir imágenes.");
-  if (!file.type || !file.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+  if (!original.type || !original.type.startsWith("image/")) throw new Error("El archivo tiene que ser una imagen.");
+  if (original.size > (maxAncho ? 20 : 5) * 1024 * 1024) throw new Error(`La imagen pesa demasiado (máximo ${maxAncho ? 20 : 5} MB).`);
+  const file = await achicarImagen(original, maxAncho);
   if (file.size > MAX_IMAGE_BYTES) throw new Error("La imagen pesa demasiado (máximo 5 MB).");
   const extMatch = /\.([a-zA-Z0-9]+)$/.exec(file.name || "");
   const ext = (extMatch ? extMatch[1] : "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
@@ -463,11 +706,61 @@ function isInfoOnly(t) {
   return !!t?.infoOnly;
 }
 
-/* Estado de un torneo para la parte pública. Los informativos no los maneja nadie, así que el
-   estado sale de sus fechas: antes del primer día es Próximo, hasta el último En curso, después
-   Finalizado. Los gestionados usan el estado que elige el organizador. */
+/* ¿Se ve en la página pública? Los torneos nuevos nacen ocultos (publico: false) y el organizador los
+   publica desde Configuración (o el creador desde su panel). Los que ya existían antes de esta opción
+   no tienen el campo y siguen públicos. */
+const esPublico = (t) => t?.publico !== false;
+
+/* Arranque del torneo: el primer día de juego a su hora de inicio (Argentina); sin días, la fecha del torneo */
+function tournamentStartMs(t) {
+  const first = [...(t.playDates || [])].filter((d) => d?.date).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))[0];
+  const date = first?.date || t.date;
+  if (!date) return null;
+  const ms = Date.parse(`${date}T${first?.from || "00:00"}:00-03:00`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+const anyMatch = (t, test) => (t.categories || []).some((c) => (c.groups || []).some((g) => (g.matches || []).some(test)) || (c.bracket || []).some((round) => round.some(test)));
+
+/* ¿Ya empezó? Llegó la hora del primer día, o hay algún resultado o partido en curso */
+function tournamentStarted(t, ahora = Date.now()) {
+  const start = tournamentStartMs(t);
+  return (start != null && ahora >= start) || tournamentProgress(t).played > 0 || tournamentHasScores(t) || anyMatch(t, (m) => m.liveStatus === "en_curso");
+}
+
+/* ¿Terminó? Cada categoría jugó su final (o, en el Súper 8, todos sus partidos). Con el resumen de
+   la portada no se sabe: lo decide el estado guardado */
+function tournamentFinished(t) {
+  const cats = t.categories || [];
+  if (t._light || cats.length === 0) return false;
+  return cats.every((c) => {
+    if (isSuper8(c)) {
+      const ms = (c.groups || []).flatMap((g) => g.matches || []);
+      return ms.length > 0 && ms.every((m) => matchIsPlayed(m, t.matchFormat));
+    }
+    if (!c.bracket || c.bracket.length === 0) return false;
+    const { winners } = walkBracket(c.bracket, t.matchFormat);
+    return !!winners[winners.length - 1]?.[0];
+  });
+}
+
+/* El estado se sigue solo: Próximo pasa a En curso cuando arranca (por la hora o con el primer resultado)
+   y a Finalizado cuando se juegan todas las finales. Al empezar se cierran las inscripciones. Lo que el
+   organizador elige a mano adelante (En curso antes de hora, Finalizado) se respeta. */
+function withAutoStatus(t, ahora = Date.now()) {
+  if (!t || isInfoOnly(t)) return t;
+  let n = t;
+  if (n.status === STATUS.PROXIMO && tournamentStarted(n, ahora)) n = { ...n, status: STATUS.EN_CURSO };
+  if (n.status === STATUS.EN_CURSO && tournamentFinished(n)) n = { ...n, status: STATUS.FINALIZADO };
+  if (n.inscripcionesAbiertas && n.status !== STATUS.PROXIMO) n = withRegistrationOpen(n, false);
+  return n;
+}
+
+/* Estado de un torneo para mostrar. Los informativos no los maneja nadie, así que el estado sale de
+   sus fechas: antes del primer día es Próximo, hasta el último En curso, después Finalizado. Los
+   gestionados, el que eligió el organizador con el avance automático (ver withAutoStatus). */
 function tournamentStatusOf(t) {
-  if (!isInfoOnly(t)) return t.status;
+  if (!isInfoOnly(t)) return withAutoStatus(t).status;
   const dates = (t.playDates || []).map((d) => d.date).sort();
   if (dates.length === 0) return STATUS.PROXIMO;
   const today = todayISO();
@@ -502,7 +795,7 @@ function weeklyScheduleLines(availability) {
 function instagramLink(input) {
   const raw = String(input || "").trim();
   if (!raw) return null;
-  const handle = raw.replace(/^https?:\/\/(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
+  const handle = raw.replace(/^(https?:\/\/)?(www\.)?instagram\.com\//i, "").replace(/^@/, "").replace(/[/?#].*$/, "");
   return handle ? { url: `https://instagram.com/${handle}`, handle: `@${handle}` } : null;
 }
 
@@ -557,6 +850,7 @@ function compareByStart(a, b) {
    y acá se traduce: la 4 es "Club Norte · Cancha 1". Sin sedes: "Cancha 4". */
 function courtName(t, court, short = false) {
   const label = short ? "C" : "Cancha ";
+  if ((t?.venues || []).length < 2) return `${label}${court}`;
   let offset = 0;
   for (const v of t?.venues || []) {
     if (court <= offset + v.courts) return `${v.name} · ${label}${court - offset}`;
@@ -585,6 +879,17 @@ function groupsSplitAcrossVenues(t) {
 /* Lista de Complejos (la que carga el administrador), para elegir las sedes de un torneo y tomar
    su logo en la imagen del fixture sin pasarla de componente en componente */
 const ComplexesContext = React.createContext([]);
+/* El plan de la cuenta y de sus complejos (ver mi_plan en 20261034/20261036): { filas, recargar } */
+const MiPlanContext = React.createContext({ filas: [], recargar: () => {} });
+/* Funciones en prueba (ver 20261037_funciones.sql): las prende el creador. Apagadas, no se ven. */
+const FUNCIONES_APAGADAS = { reservas: false, cuentas: false, cantina: false };
+const FuncionesContext = React.createContext(FUNCIONES_APAGADAS);
+async function fetchFunciones() {
+  try {
+    const rows = (await supabaseTable("funciones?select=clave,activa")) || [];
+    return { ...FUNCIONES_APAGADAS, ...Object.fromEntries(rows.map((r) => [r.clave, !!r.activa])) };
+  } catch { return FUNCIONES_APAGADAS; }
+}
 
 /* El torneo que se está mostrando, para que las piezas chicas (etiqueta de horario, selector de
    cancha) puedan nombrar las canchas con su sede sin recibir el torneo entero */
@@ -603,43 +908,6 @@ function withTournamentStart(t, { date, startTime, courtsCount }) {
     next.playDates = [{ date, from: startTime, to: first?.to || "23:59" }, ...rest.filter((d) => d.date !== date)];
   }
   return next;
-}
-
-function seedTournaments(organizerId) {
-  const playDates = [
-    { date: "2026-10-01", from: "18:00", to: "23:00" },
-    { date: "2026-10-02", from: "18:00", to: "23:00" },
-    { date: "2026-10-03", from: "09:00", to: "20:00" },
-    { date: "2026-10-04", from: "09:00", to: "20:00" },
-  ];
-  const avail = playDates.slice(2).map((d) => ({ date: d.date, from: "09:00", to: "20:00" })); // sáb y dom por defecto
-  return [
-    {
-      id: uid(),
-      name: "Copa Apertura Smash Point",
-      date: "2026-09-20",
-      status: STATUS.EN_CURSO,
-      organizerId,
-      matchFormat: { ...DEFAULT_MATCH_FORMAT },
-      courtsCount: 6,
-      matchDurationMinutes: DEFAULT_MATCH_DURATION,
-      playDates,
-      categories: [
-        {
-          id: uid(),
-          name: "4ta Caballeros",
-          pairs: [
-            { id: uid(), name: "Gómez / Ibáñez", availability: avail },
-            { id: uid(), name: "Rossi / Peralta", availability: avail },
-            { id: uid(), name: "Funes / Aquino", availability: avail },
-            { id: uid(), name: "Vidal / Lucero", availability: avail },
-          ],
-          groups: [],
-          bracket: null,
-        },
-      ],
-    },
-  ];
 }
 
 /* Round robin: todos contra todos dentro de un grupo */
@@ -1180,7 +1448,7 @@ function roundStageLabel(totalRounds, roundIndex) {
    manualmente un cruce distinto al automático). Solo tiene sentido antes de que esos partidos
    se hayan jugado; si alguno de los dos ya tiene resultado cargado, no se debería ofrecer esta
    opción en la interfaz. */
-function swapBracketPairs(bracket, pairIdA, pairIdB) {
+function swapBracketPairs(bracket, pairIdA, pairIdB, format) {
   const rounds = bracket.map((r) => r.map((m) => ({ ...m })));
   rounds[0].forEach((m) => {
     if (m.pairA === pairIdA) m.pairA = pairIdB;
@@ -1188,7 +1456,7 @@ function swapBracketPairs(bracket, pairIdA, pairIdB) {
     if (m.pairB === pairIdA) m.pairB = pairIdB;
     else if (m.pairB === pairIdB) m.pairB = pairIdA;
   });
-  return propagateBracket(rounds);
+  return propagateBracket(rounds, format);
 }
 
 /* Completa cada ronda de la llave con los ganadores de la anterior. Solo avanza quien ganó de
@@ -1251,7 +1519,7 @@ function formatSummary(format) {
     `${f.gamesPerSet} games por set`,
   ];
   if (f.setTiebreak) parts.push(`tie break a 7 en ${f.gamesPerSet}-${f.gamesPerSet}`);
-  parts.push(f.finalSuperTiebreak ? "super tie-break a 10 en el set decisivo" : "sin super tie-break (se juega el set completo)");
+  if (f.setsToPlay >= 3) parts.push(f.finalSuperTiebreak ? "super tie-break a 10 en el set decisivo" : "sin super tie-break (se juega el set completo)");
   return parts.join(" · ");
 }
 
@@ -1291,6 +1559,7 @@ function collectScheduleableMatches(tournament) {
     // Un bye (la pareja pasa directo) no se juega: no tiene horario y no va en la grilla ni en
     // "Sin horario asignado"
     const byes = c.bracket ? walkBracket(c.bracket).byes : [];
+    const nombres = c.bracket ? categoryEntitiesById(c) : {};
     (c.bracket || []).forEach((round, ri) => {
       round.forEach((m, mi) => {
         if (isByeMatch(byes, ri, mi)) return;
@@ -1308,7 +1577,15 @@ function collectScheduleableMatches(tournament) {
             placeholderText = `Ganador ${prevLabel} ${mi * 2 + 1} vs Ganador ${prevLabel} ${mi * 2 + 2}`;
           }
         }
-        if ((m.pairA && m.pairB) || isSkeletonSlot) {
+        // Una ronda siguiente que ya tiene horario (semis, final…) también va, aunque falte saber quién
+        // juega: "Ganador Cuartos 1 vs Ganador Cuartos 2" (o el nombre de la pareja que ya pasó)
+        const isPendingScheduled = !isSkeletonSlot && ri > 0 && !!m.schedule && !(m.pairA && m.pairB);
+        if (isPendingScheduled) {
+          const prevLabel = roundStageLabel(c.bracket.length, ri - 1);
+          const lado = (pid, n) => (pid ? nombres[pid]?.name || "?" : `Ganador ${prevLabel} ${n}`);
+          placeholderText = `${lado(m.pairA, mi * 2 + 1)} vs ${lado(m.pairB, mi * 2 + 2)}`;
+        }
+        if ((m.pairA && m.pairB) || isSkeletonSlot || isPendingScheduled) {
           list.push({
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
             location: { type: "bracket", roundIndex: ri }, matchId: m.id, number: nums.get(m.id), label: roundStageLabel(c.bracket.length, ri),
@@ -1690,10 +1967,8 @@ function compareBySchedule(a, b) {
   return a.schedule.court - b.schedule.court;
 }
 
-function todayISO() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+/* El mismo "hoy" que reservas y caja: el día de Argentina, sin importar la zona del dispositivo */
+const todayISO = () => hoyArgentina();
 
 /* Partidos ya ubicados (de cualquier categoría) en una fecha/cancha puntual, excluyendo opcionalmente
    uno en particular (el que se está por mover) */
@@ -1950,8 +2225,10 @@ function computeCircuitStandings(circuit, tournaments) {
   const table = {}; // { [categoryName]: { [playerKey]: { name, points, fechas } } }
   circuit.categoryNames.forEach((cn) => { table[cn] = {}; });
 
-  // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito
-  tournaments.filter((t) => t.circuitId === circuit.id && !isInfoOnly(t)).forEach((t) => {
+  // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito; uno Próximo
+  // tampoco hasta que tenga algún resultado (anotarse no da puntos de "fase de grupos")
+  const jugado = (t) => t.status !== STATUS.PROXIMO || tournamentProgress(t).played > 0 || tournamentHasScores(t);
+  tournaments.filter((t) => t.circuitId === circuit.id && !isInfoOnly(t) && jugado(t)).forEach((t) => {
     t.categories.forEach((cat) => {
       if (isSuper8(cat)) return; // El Súper 8 no suma puntos de circuito
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
@@ -1961,8 +2238,9 @@ function computeCircuitStandings(circuit, tournaments) {
       placed.forEach(({ name, tier }) => {
         if (!name) return;
         const pts = points[tier] ?? 0;
-        name.split("/").map((s) => s.trim()).filter(Boolean).forEach((playerName) => {
-          const key = playerName.toLowerCase();
+        // "Gómez / Ibáñez" o "Gómez - Ibáñez"; "Ibáñez" e "Ibanez" son la misma persona
+        splitPair(name).forEach((playerName) => {
+          const key = normalizeName(playerName);
           if (!table[matchName][key]) table[matchName][key] = { name: playerName, points: 0, fechas: 0 };
           table[matchName][key].points += pts;
           table[matchName][key].fechas += 1;
@@ -2224,6 +2502,7 @@ function AdBanner({ ads, className = "" }) {
             <a
               key={ad.id}
               href={ad.linkUrl || "#"}
+              onClick={() => { if (ad.linkUrl) contarClic(ad.id); }}
               target="_blank"
               rel="noopener noreferrer"
               className="block relative rounded-2xl overflow-hidden"
@@ -2418,7 +2697,7 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
                 <legend className="px-1 text-xs text-teal-300">Disponibilidad horaria de la pareja</legend>
                 <p className="text-[11px] text-teal-500">Marcá los días que pueden jugar y en qué horario.</p>
                 {playDates.map((d) => {
-                  const day = availability[d.date];
+                  const day = availability[d.date] || { on: false, from: d.from, to: d.to }; // un día agregado con el formulario abierto
                   return (
                     <div key={d.date} className="flex flex-wrap items-center gap-2">
                       <label className="flex items-center gap-2 w-28 text-sm">
@@ -2807,7 +3086,7 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
     <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap gap-2">
         {rows.map((s, i) => {
-          const isTiebreak = format?.finalSuperTiebreak && i === total - 1;
+          const isTiebreak = isSuperTiebreakSet(i, format);
           return (
             <div key={i} className="flex flex-col items-center">
               <span className="text-[10px] text-teal-500 mb-0.5" style={F.body}>
@@ -2979,10 +3258,10 @@ function ClassicMatchFormatFields({ format, onChange }) {
         <input type="checkbox" checked={f.setTiebreak} onChange={(e) => onChange({ ...f, setTiebreak: e.target.checked })} />
         Tie break a 7 puntos dentro del set
       </label>
-      <label className="flex items-center gap-2 text-sm" style={F.body}>
+      {f.setsToPlay >= 3 && <label className="flex items-center gap-2 text-sm" style={F.body}>
         <input type="checkbox" checked={f.finalSuperTiebreak} onChange={(e) => onChange({ ...f, finalSuperTiebreak: e.target.checked })} />
         Super tie-break a 10 en el set decisivo
-      </label>
+      </label>}
     </div>
   );
 }
@@ -3473,8 +3752,9 @@ function CourtsAndDatesEditor({ tournament, onChange }) {
             <div className="flex items-center gap-2">
               <input type="time" lang="es-AR" value={d.from} onChange={(e) => updateDateRange(d.date, "from", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
               <span className="text-xs text-teal-500 shrink-0">a</span>
-              <input type="time" lang="es-AR" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+              <input type="time" lang="es-AR" value={d.to} onChange={(e) => updateDateRange(d.date, "to", e.target.value)} aria-invalid={!!(d.from && d.to && d.to <= d.from)} className="flex-1 min-w-0 px-2 py-1.5 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
             </div>
+            {d.from && d.to && d.to <= d.from && <p className="text-xs text-amber-400 mt-1" style={F.body}>Ese día no tiene turnos: tiene que terminar después de que empieza. Si se juega hasta medianoche, poné 23:59.</p>}
           </div>
         ))}
         {dates.length === 0 && <p className="text-xs opacity-60" style={F.body}>Todavía no agregaste fechas.</p>}
@@ -3613,6 +3893,7 @@ function VenueDaysField({ venue, dates, onChange, onWidenDay }) {
                     <input type="time" lang="es-AR" value={own.from} onChange={(e) => setDay(d.date, { from: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
                     <span className="text-teal-500">a</span>
                     <input type="time" lang="es-AR" value={own.to} onChange={(e) => setDay(d.date, { to: e.target.value })} className="px-1.5 py-1 rounded border text-xs" style={input} />
+                    {own.from && own.to && own.to <= own.from && <span className="text-amber-400">Tiene que terminar después de que empieza (hasta medianoche: 23:59).</span>}
                     {(own.from < d.from || own.to > d.to) && own.from < own.to && (
                       <span className="text-amber-400">
                         El torneo ese día va de {d.from} a {d.to}.{" "}
@@ -3858,13 +4139,78 @@ function PairAvailabilityEditor({ pair, playDates, onChange }) {
   );
 }
 
+/* Transmisiones en vivo: un link por cancha y por día (el de Beelup cambia en cada transmisión).
+   tournament.streams = { "2026-10-17": { "1": "https://...", "2": "https://..." } } */
+const streamOf = (t, date, court) => t?.streams?.[date]?.[court] || null;
+const linkValido = (url) => typeof url === "string" && /^https:\/\/\S+$/.test(url) && url.length <= 500;
+
+/* Editor de los links del día, en Horarios (se abre y se cierra para no tapar la planilla) */
+function StreamLinksEditor({ tournament, date, courts, onSave }) {
+  const delDia = tournament.streams?.[date] || {};
+  const cargados = courts.filter((c) => delDia[c]).length;
+  const [abierto, setAbierto] = useState(false);
+  const [textos, setTextos] = useState({});
+  const [error, setError] = useState("");
+  useEffect(() => { setTextos({}); setError(""); }, [date]);
+  const valor = (c) => textos[c] ?? delDia[c] ?? "";
+  const guardar = (c) => {
+    const url = valor(c).trim();
+    if ((delDia[c] || "") === url) return;
+    if (url && !linkValido(url)) { setError(`${courtName(tournament, c)}: pegá el link completo (empieza con https://).`); return; }
+    setError("");
+    const dia = { ...delDia };
+    if (url) dia[c] = url; else delete dia[c];
+    const streams = { ...(tournament.streams || {}), [date]: dia };
+    if (Object.keys(dia).length === 0) delete streams[date];
+    onSave(streams);
+  };
+  return (
+    <div className="mb-3 rounded-lg border border-teal-800" style={{ ...F.body, backgroundColor: "rgba(8,18,24,0.5)" }}>
+      <button type="button" onClick={() => setAbierto(!abierto)} aria-expanded={abierto} className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left">
+        <span><span style={{ color: "#f87171" }}>●</span> Transmisiones en vivo del {formatDateShort(date)}</span>
+        <span className="text-xs text-teal-400">{cargados > 0 ? `${cargados} de ${courts.length} canchas` : "sin links"} {abierto ? "▲" : "▼"}</span>
+      </button>
+      {abierto && (
+        <div className="px-3 pb-3 space-y-2">
+          <p className="text-[11px] text-teal-500">Pegá el link de la transmisión de cada cancha (Beelup u otro). Se ve en la página pública del torneo, arriba de los horarios de ese día. Para sacarlo, borralo.</p>
+          {courts.map((c) => (
+            <label key={c} className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-2 text-xs">
+              <span className="text-teal-300 truncate">{courtName(tournament, c)}</span>
+              <input type="url" inputMode="url" value={valor(c)} onChange={(e) => setTextos({ ...textos, [c]: e.target.value })} onBlur={() => guardar(c)} placeholder="https://beelup.com/..." className="w-full min-w-0 px-2 py-1.5 rounded border text-xs" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+            </label>
+          ))}
+          {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Botones "▶ Cancha 1" de las transmisiones de un día (vista pública) */
+function StreamLinks({ tournament, date }) {
+  const delDia = tournament.streams?.[date] || {};
+  const canchas = Object.keys(delDia).filter((c) => linkValido(delDia[c])).sort((a, b) => Number(a) - Number(b));
+  if (canchas.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-2" style={F.body}>
+      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>● En vivo</span>
+      {canchas.map((c) => (
+        <a key={c} href={delDia[c]} target="_blank" rel="noopener noreferrer" className="px-3 py-1 rounded-full text-xs font-semibold border" style={{ borderColor: "#f8717199", color: "#fecaca", backgroundColor: "#f871711a" }}>
+          ▶ {courtName(tournament, Number(c))}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /* Tarjeta chica de un partido dentro de una celda de la planilla (canchas x horarios). Arrastrable
    para moverla a otra celda; el color/borde cambia según esté finalizada, en borrador o en choque. */
-function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove }) {
+function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], onDragStart, onClear, onResult, onMove, onLive }) {
   const status = m.placeholder ? "pendiente" : matchDisplayStatus(m, format);
   const finished = status === "finalizado";
-  const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : "#38bdf8";
-  const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : "#38bdf81a";
+  const live = status === "en_curso";
+  const border = conflict ? "#f87171" : m.draft ? "#a78bfa" : finished ? "#9fe022" : live ? "#fb923c" : "#38bdf8";
+  const bg = conflict ? "#f8717122" : m.draft ? "#a78bfa1a" : finished ? "#9fe0221a" : live ? "#fb923c22" : "#38bdf81a";
   return (
     <div
       draggable={!!onDragStart}
@@ -3884,6 +4230,7 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
         {conflict && <span className="text-[9px] font-bold" style={{ color: "#f87171" }}>⚠ CHOQUE</span>}
         {m.draft && <span className="text-[9px] font-bold" style={{ color: "#a78bfa" }}>BORRADOR</span>}
         {finished && <span className="text-[9px] font-bold" style={{ color: "#9fe022" }}>✓</span>}
+        {live && <span className="text-[9px] font-bold" style={{ color: "#fb923c" }}>● EN CURSO</span>}
       </div>
       {m.placeholder ? (
         <p className="italic opacity-70 truncate">{m.placeholder}</p>
@@ -3905,6 +4252,9 @@ function GridMatchCard({ m, format, pairsById, conflict, offAvailability = [], o
       )}
       {onMove && !finished && (
         <button type="button" onClick={onMove} className="mt-0.5 ml-2 text-[10px] underline text-teal-300 hover:text-lime-400">⇄ Mover</button>
+      )}
+      {onLive && !finished && !m.placeholder && (
+        <button type="button" onClick={() => onLive(live ? null : "en_curso")} className="mt-0.5 ml-2 text-[10px] underline" style={{ color: live ? "#94a3b8" : "#fb923c" }}>{live ? "Quitar en curso" : "▶ En curso"}</button>
       )}
     </div>
   );
@@ -4014,6 +4364,84 @@ function MatchOutcomeButtons({ m, nameA, nameB, onWalkover, onRetired, className
 }
 
 /* Ventanita para cargar el resultado de un partido desde la grilla de horarios */
+/* Otro partido sin terminar "en curso" en la misma cancha: antes de poner este, se pregunta dónde se
+   juega (el organizador pudo cambiarlo de cancha o adelantarlo). Devuelve ese otro partido, o null. */
+function liveConflict(matches, m, format) {
+  if (!m?.schedule) return null;
+  return matches.find((x) => x.key !== m.key && x.liveStatus === "en_curso" && !x.placeholder && !matchIsPlayed(x, format) && x.schedule && x.schedule.court === m.schedule.court) || null;
+}
+
+function LiveCourtModal({ m, tournament, matches, pairsById, update, onOpenResult, onClose }) {
+  const format = tournament.matchFormat;
+  const orig = m.schedule.court;
+  const courts = courtsOfDay(tournament, m.schedule.date, matches.filter((x) => x.schedule));
+  const liveAt = (c) => matches.find((x) => x.key !== m.key && x.liveStatus === "en_curso" && !x.placeholder && !matchIsPlayed(x, format) && x.schedule && x.schedule.court === c);
+  const current = liveAt(orig);
+  const numero = (x) => (x.number ? `#${x.number}` : "anterior");
+  const describe = (x) => `${x.number ? `#${x.number} · ` : ""}${x.placeholder || `${pairsById[x.pairA]?.name || "—"} vs ${pairsById[x.pairB]?.name || "—"}`}`;
+  // Al pasarlo a otra cancha, si ahí había otro partido en ese mismo horario, se intercambian de cancha
+  const occupantAt = (c) => matches.find((x) => x.key !== m.key && x.schedule && x.schedule.date === m.schedule.date && x.schedule.time === m.schedule.time && x.schedule.court === c);
+  const enOtra = (c) => {
+    let next = tournament;
+    const occ = occupantAt(c);
+    if (occ) next = withMatchSchedule(next, occ.categoryId, occ.location, occ.matchId, { ...occ.schedule, court: orig });
+    next = withMatchSchedule(next, m.categoryId, m.location, m.matchId, { ...m.schedule, court: c });
+    next = withMatchLiveStatus(next, m.categoryId, m.location, m.matchId, "en_curso");
+    update(next);
+    onClose();
+  };
+  const reemplazar = () => {
+    let next = withMatchLiveStatus(tournament, current.categoryId, current.location, current.matchId, null);
+    next = withMatchLiveStatus(next, m.categoryId, m.location, m.matchId, "en_curso");
+    update(next);
+    onClose();
+  };
+  const otras = courts.filter((c) => c !== orig);
+  return (
+    <Modal title="¿En qué cancha se juega?" onClose={onClose}>
+      <p className="text-xs text-teal-500 mb-1" style={F.body}>{m.categoryName}{m.label ? ` · ${m.label}` : ""}</p>
+      <p className="text-sm mb-3" style={F.body}>{describe(m)}</p>
+      {current && (
+        <p className="text-sm mb-4 rounded-lg px-3 py-2" style={{ ...F.body, color: "#fdba74", border: "1px solid #fb923c66", backgroundColor: "#fb923c14" }}>
+          En {courtName(tournament, orig)} todavía figura en curso el {describe(current)}.
+        </p>
+      )}
+      {otras.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Se juega en otra cancha</p>
+          <div className="grid grid-cols-2 gap-2">
+            {otras.map((c) => {
+              const ocupada = liveAt(c);
+              const occ = occupantAt(c);
+              return ocupada ? (
+                <div key={c} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-500" style={F.body}>
+                  <span className="block font-semibold">{courtName(tournament, c)}</span>En curso: {describe(ocupada)}
+                </div>
+              ) : (
+                <ChoiceCard key={c} compact selected={false} onClick={() => enOtra(c)} title={courtName(tournament, c)} description={occ ? `Libre ahora · el ${describe(occ)} pasa a ${courtName(tournament, orig)}` : "Libre"} />
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {current && (
+        <div className="space-y-2 mb-2">
+          <p className="text-xs uppercase tracking-wide text-teal-400" style={F.body}>Se juega en {courtName(tournament, orig)}</p>
+          {onOpenResult && (
+            <button type="button" onClick={() => onOpenResult(current)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-left" style={{ ...F.body, backgroundColor: BRAND.lime, color: "#14181f" }}>
+              El {numero(current)} ya terminó: cargar su resultado
+            </button>
+          )}
+          <button type="button" onClick={reemplazar} className="w-full px-3 py-2 rounded-lg text-sm border border-orange-400 text-orange-300 text-left" style={F.body}>
+            Sacarle "en curso" al {numero(current)} y empezar este
+          </button>
+        </div>
+      )}
+      <button type="button" onClick={onClose} className="mt-2 text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cancelar</button>
+    </Modal>
+  );
+}
+
 function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onRetired, onClose }) {
   const nameA = pairsById[m.pairA]?.name || "—", nameB = pairsById[m.pairB]?.name || "—";
   return (
@@ -4045,11 +4473,16 @@ function useMatchActions(tournament, update) {
   const matches = useMemo(() => collectScheduleableMatches(tournament), [tournament]);
   const [resultKey, setResultKey] = useState(null);
   const [moveKey, setMoveKey] = useState(null);
+  const [liveKey, setLiveKey] = useState(null); // partido a poner "en curso" con otro en curso en su cancha
   const resultMatch = resultKey ? matches.find((m) => m.key === resultKey) : null;
   const moveMatch = moveKey ? matches.find((m) => m.key === moveKey) : null;
+  const liveMatch = liveKey ? matches.find((m) => m.key === liveKey) : null;
 
   const change = (m, fn) => update(withMatchResult(tournament, m.categoryId, m.location, m.matchId, fn));
-  const setLive = (m, liveStatus) => update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+  const setLive = (m, liveStatus) => {
+    if (liveStatus === "en_curso" && liveConflict(matches, m, tournament.matchFormat)) { setLiveKey(m.key); return; }
+    update(withMatchLiveStatus(tournament, m.categoryId, m.location, m.matchId, liveStatus));
+  };
 
   const modals = (
     <>
@@ -4065,6 +4498,7 @@ function useMatchActions(tournament, update) {
         />
       )}
       {moveMatch && <MoveMatchModal m={moveMatch} tournament={tournament} matches={matches} pairsById={pairsById} update={update} onClose={() => setMoveKey(null)} />}
+      {liveMatch && <LiveCourtModal m={liveMatch} tournament={tournament} matches={matches} pairsById={pairsById} update={update} onOpenResult={(x) => { setLiveKey(null); setResultKey(x.key); }} onClose={() => setLiveKey(null)} />}
     </>
   );
   return { pairsById, matches, openResult: (m) => setResultKey(m.key), openMove: (m) => setMoveKey(m.key), setLive, modals };
@@ -4423,7 +4857,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [gridOpen, setGridOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
-  const { pairsById, matches, openResult, openMove, modals } = useMatchActions(tournament, update);
+  const { pairsById, matches, openResult, openMove, setLive, modals } = useMatchActions(tournament, update);
   const scheduled = matches.filter((m) => m.schedule);
   const unscheduled = matches.filter((m) => !m.schedule);
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
@@ -4620,6 +5054,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                 )}
               </div>
 
+              <StreamLinksEditor tournament={tournament} date={dateInfo.date} courts={courtsOfDay(tournament, dateInfo.date, scheduled)} onSave={(streams) => update({ ...tournament, streams })} />
               <div className="lg:flex lg:items-start lg:gap-4">
                 <div className="flex-1 min-w-0 mb-6">
                   <ScheduleDayGrid
@@ -4627,10 +5062,10 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                     scheduled={scheduled} trayMatches={trayMatches} closed={closed} pairsById={pairsById} offAvailability={offAvailability}
                     venueFilter={venueFilter === "" ? null : Number(venueFilter)} inCategory={inCategory}
                     onDropOnCell={onDropOnCell} onDragStartMatch={onDragStartMatch} onAssign={editSchedule} onClear={clearSchedule}
-                    onResult={openResult} onMove={openMove} onNotice={setNotice}
+                    onResult={openResult} onMove={openMove} onLive={setLive} onNotice={setNotice}
                   />
                   <div className="flex flex-wrap gap-3 mt-3 text-[11px]" style={F.body}>
-                    {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
+                    {[["#38bdf8", "Fase de grupos", false], ["#a78bfa", "Llave (borrador)", true], ["#fb923c", "En curso", false], ["#9fe022", "Finalizado", false], ["#f87171", "Choque", false], ...(offAvailabilityCount > 0 ? [["#fbbf24", "⚠ Fuera de disponibilidad", false]] : [])].map(([color, label, dashed]) => (
                       <span key={label} className="flex items-center gap-1.5">
                         <span className="w-3 h-3 rounded-sm inline-block" style={{ border: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, backgroundColor: color + "22" }} />
                         {label}
@@ -4673,7 +5108,7 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
 /* Planilla de un día de la pestaña Horarios: en la compu, horas x canchas (arrastrar y soltar); en
    el celular, cancha por cancha. Con filtro de sede solo muestra sus canchas; con filtro de
    categoría, los partidos de las demás se ven como "Ocupado" (la cancha no está libre). */
-function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatches, closed, pairsById, offAvailability, venueFilter, inCategory, onDropOnCell, onDragStartMatch, onAssign, onClear, onResult, onMove, onNotice }) {
+function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatches, closed, pairsById, offAvailability, venueFilter, inCategory, onDropOnCell, onDragStartMatch, onAssign, onClear, onResult, onMove, onLive, onNotice }) {
   const duration = tournament.matchDurationMinutes || DEFAULT_MATCH_DURATION;
   const times = dayTimeSlots(dateInfo, duration);
   // Solo las canchas de las sedes que se usan ese día (y de la sede elegida)
@@ -4682,7 +5117,7 @@ function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatch
     <div key={m.key} className="rounded-md px-2 py-1.5 mb-1 text-[10px] text-slate-500 border border-slate-700" style={F.body}>Ocupado · {m.categoryName}</div>
   );
   const card = (m, conflict, draggable) => (inCategory(m)
-    ? <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={draggable ? onDragStartMatch(m.key) : undefined} onClear={() => onClear(m)} onResult={() => onResult(m)} onMove={() => onMove(m)} />
+    ? <GridMatchCard key={m.key} m={m} format={tournament.matchFormat} pairsById={pairsById} conflict={conflict} offAvailability={offAvailability[m.key]} onDragStart={draggable ? onDragStartMatch(m.key) : undefined} onClear={() => onClear(m)} onResult={() => onResult(m)} onMove={() => onMove(m)} onLive={onLive ? (st) => onLive(m, st) : undefined} />
     : busyCard(m));
 
   if (courts.length === 0) return <p className="opacity-60 text-sm" style={F.body}>Ninguna cancha de esta sede se usa ese día.</p>;
@@ -4794,9 +5229,10 @@ function Scoreboard({ match, pairsById, format }) {
     const id = side === "a" ? match.pairA : match.pairB;
     const other = side === "a" ? "b" : "a";
     const won = winner === id;
+    // Los nombres largos bajan de renglón (no se cortan); los games quedan arriba, a la derecha
     return (
-      <div className="flex items-center gap-2 min-w-0">
-        <span className={`flex-1 min-w-0 truncate ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
+      <div className="flex items-start gap-2 min-w-0">
+        <span className={`flex-1 min-w-0 break-words ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
           {pairsById[id]?.name || "—"}
           {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
           {match.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
@@ -4865,39 +5301,43 @@ function SchedulePublicView({ tournament }) {
         return (
           <div key={date} className="mb-6">
             <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill></div>
+            <StreamLinks tournament={tournament} date={date} />
             <div className="rounded-xl border divide-y min-w-0" style={{ borderColor: dateColor + "40" }}>
               {Object.keys(byTime).sort().map((time) => (
-                <div key={time} id={slotId(byTime[time][0])} className="flex gap-3 px-3 py-2 scroll-mt-4" style={{ borderColor: dateColor + "22" }}>
-                  <span className="text-sm font-extrabold w-11 shrink-0 pt-0.5" style={{ color: dateColor, ...F.body }}>{time}</span>
-                  <div className="flex-1 min-w-0 space-y-1.5">
-                    {byTime[time].map((m) => {
+                <div key={time} id={slotId(byTime[time][0])} className="px-3 py-2 scroll-mt-4 space-y-2.5" style={{ borderColor: dateColor + "22" }}>
+                    {byTime[time].map((m, i) => {
                       const hasResult = !m.placeholder && matchIsPlayed(m, tournament.matchFormat);
                       const w = hasResult ? matchWinnerId(m, tournament.matchFormat) : null;
                       const live = !hasResult && m.liveStatus === "en_curso";
                       const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
+                      // Columna izquierda: la hora (en el primer partido del horario) y el "vs"; a la
+                      // derecha, la cancha y la categoría arriba y cada pareja en su propio renglón
                       return (
-                        <div key={m.key} className="text-sm min-w-0" style={F.body}>
-                          {hasResult ? (
-                            <div className="flex items-start gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0 pt-0.5" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
-                              <div className="flex-1 min-w-0"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div>
-                            </div>
-                          ) : (
-                            <div className="flex items-baseline gap-2 min-w-0">
-                              <span className="text-[11px] font-bold shrink-0" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
-                              {m.placeholder
-                                ? <span className="italic opacity-70 truncate">{m.placeholder}</span>
-                                : <span className="min-w-0">{name(m.pairA)} <span className="text-xs text-teal-500">vs</span> {name(m.pairB)}</span>}
-                              {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
-                            </div>
-                          )}
-                          <div className="text-[10px] truncate pl-7" style={{ color: categoryColor[m.categoryId] }}>
-                            {m.number ? `#${m.number} · ` : ""}{m.categoryName}{m.label ? <span className="text-teal-500"> · {m.label}</span> : null}
+                        <div key={m.key} className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-x-2 text-sm" style={F.body}>
+                          <span className="text-sm font-extrabold" style={{ color: dateColor }}>{i === 0 ? time : ""}</span>
+                          <div className="flex items-baseline gap-2 min-w-0 text-[11px] pt-0.5">
+                            <span className="min-w-0 truncate">
+                              <span className="font-bold" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
+                              <span style={{ color: categoryColor[m.categoryId] }}> · {m.number ? `#${m.number} · ` : ""}{m.categoryName}</span>
+                              {m.label && <span className="text-teal-500"> · {m.label}</span>}
+                            </span>
+                            {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
+                            {live && streamOf(tournament, date, m.schedule.court) && <a href={streamOf(tournament, date, m.schedule.court)} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold shrink-0 underline" style={{ color: "#f87171" }}>▶ Ver</a>}
                           </div>
+                          {hasResult ? (
+                            <><span /><div className="min-w-0 mt-0.5"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div></>
+                          ) : m.placeholder ? (
+                            <><span /><span className="italic opacity-70 break-words">{m.placeholder}</span></>
+                          ) : (
+                            <>
+                              <span className="row-span-2 self-center text-xs text-teal-500 text-right pr-1">vs</span>
+                              <span className="min-w-0 break-words leading-snug">{name(m.pairA)}</span>
+                              <span className="min-w-0 break-words leading-snug">{name(m.pairB)}</span>
+                            </>
+                          )}
                         </div>
                       );
                     })}
-                  </div>
                 </div>
               ))}
             </div>
@@ -5018,8 +5458,69 @@ function ChevronCircle({ color }) {
 const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
-/* Contacto al pie de las pantallas públicas */
-function ContactFooter() {
+/* Política de privacidad (se llega con #privacidad en la dirección). Ley 25.326 de Protección de
+   los Datos Personales. Si cambia qué datos se guardan o con quién se comparten, actualizarla. */
+const PRIVACIDAD_FECHA = "11 de octubre de 2026";
+function PrivacidadView({ onBack }) {
+  const h2 = "text-base uppercase mt-6 mb-2";
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6 text-sm text-teal-200 leading-relaxed" style={F.body}>
+      <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Volver</button>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Política de privacidad</h1>
+      <p className="text-xs text-teal-500 mb-4">Última actualización: {PRIVACIDAD_FECHA}</p>
+
+      <p>En Smash Point cuidamos tus datos personales. Acá te contamos qué datos guardamos, para qué los usamos, con quién los compartimos y cómo podés consultarlos, corregirlos o pedir que los borremos, según la Ley 25.326 de Protección de los Datos Personales.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Quién es responsable</h2>
+      <p>Smash Point (Gualeguaychú, Entre Ríos, Argentina). Para cualquier consulta sobre tus datos escribinos a <a href={`mailto:${CONTACT_EMAIL}`} className="text-lime-400 underline">{CONTACT_EMAIL}</a>.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Qué datos guardamos</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li><span className="text-teal-100">Si reservás canchas:</span> tu mail (con el que entrás), nombre, apellido, WhatsApp y, si querés, tu fecha de nacimiento; y tus reservas (complejo, cancha, día, horario, precio y su estado).</li>
+        <li><span className="text-teal-100">Si te inscribís a un torneo:</span> el nombre de los jugadores y un WhatsApp de contacto, y si corresponde los días y horarios en que pueden jugar.</li>
+        <li><span className="text-teal-100">Si organizás torneos o trabajás en un complejo:</span> tu mail, tu nombre y lo que cargás en el panel (torneos, resultados, turnos, cobros).</li>
+        <li><span className="text-teal-100">En tu navegador:</span> guardamos la sesión para que no tengas que volver a entrar cada vez. Se borra al cerrar sesión. No usamos publicidad que te siga ni herramientas de seguimiento.</li>
+      </ul>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Para qué los usamos</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li>Para gestionar tus reservas e inscripciones y avisarte sobre ellas (por mail o por WhatsApp).</li>
+        <li>Para mostrar los torneos: fixture, resultados, posiciones y rankings.</li>
+        <li>La fecha de nacimiento, solo si la cargás, para armar más adelante rankings por edad.</li>
+      </ul>
+      <p className="mt-2">No vendemos ni alquilamos tus datos, y no los usamos para publicidad.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Quién los ve</h2>
+      <ul className="list-disc pl-5 space-y-1">
+        <li><span className="text-teal-100">El complejo donde reservás</span> (su dueño y sus empleados) ve tu nombre, tu WhatsApp y tus reservas en ese complejo, para confirmarlas y comunicarse con vos.</li>
+        <li><span className="text-teal-100">El organizador del torneo</span> ve el WhatsApp que cargaste al inscribirte.</li>
+        <li><span className="text-teal-100">Todos</span> pueden ver el nombre de los jugadores en los torneos públicos (parejas, grupos, resultados y rankings). Tu WhatsApp, tu mail y tu fecha de nacimiento nunca se muestran en público.</li>
+        <li><span className="text-teal-100">Nuestros proveedores</span>, que guardan y envían la información por nosotros y solo para esto: Supabase (base de datos y acceso), Netlify (publicación de la página) y Resend (envío de mails). Sus servidores pueden estar fuera de Argentina (por ejemplo, en Brasil o en Estados Unidos).</li>
+      </ul>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Cuánto tiempo los guardamos</h2>
+      <p>Mientras uses Smash Point. Las reservas y los resultados de torneos pueden quedar como historial (por ejemplo, para los rankings). Si pedís que borremos tu cuenta, borramos tus datos personales; en los torneos ya jugados puede quedar tu nombre como parte del resultado.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Tus derechos</h2>
+      <p>Podés pedir gratis acceso a tus datos, corregirlos o que los borremos, escribiéndonos a <a href={`mailto:${CONTACT_EMAIL}`} className="text-lime-400 underline">{CONTACT_EMAIL}</a>. Tu nombre, WhatsApp y fecha de nacimiento también los podés corregir vos desde "Mis reservas" → "Mis datos". Respondemos dentro de los plazos de la ley (10 días corridos para el acceso y 5 días hábiles para corregir o borrar).</p>
+      <p className="mt-2">El derecho de acceso se puede ejercer gratis cada seis meses, salvo que haya un interés legítimo para hacerlo antes (art. 14, inc. 3, Ley 25.326).</p>
+      <p className="mt-2">La Agencia de Acceso a la Información Pública, como órgano de control de la Ley 25.326, tiene la atribución de atender las denuncias y reclamos de quienes resulten afectados en sus derechos por incumplimiento de las normas vigentes sobre protección de datos personales.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Menores de edad</h2>
+      <p>Si sos menor de edad, usá Smash Point con el permiso de tu madre, padre o tutor.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Seguridad</h2>
+      <p>Tus datos se guardan con acceso restringido: cada persona ve solo lo que le corresponde (por ejemplo, un complejo no ve las reservas de otro). Entrás con tu mail y una contraseña que elegís vos; la contraseña se guarda cifrada y nadie la puede ver, ni nosotros.</p>
+
+      <h2 className={h2} style={{ ...F.display, color: BRAND.ink }}>Cambios</h2>
+      <p>Si cambiamos esta política, actualizamos la fecha de arriba. Si el cambio es importante, te avisamos en la app.</p>
+    </section>
+  );
+}
+
+/* Contacto al pie de las pantallas públicas, con el ingreso de organizadores y de empleados de
+   complejos (discreto, para que la portada sea del público) */
+function ContactFooter({ onGoLogin, conCuentas = true }) {
   return (
     <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-10 text-center" style={F.body}>
       <div className="rounded-2xl px-4 py-5" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -5029,15 +5530,27 @@ function ContactFooter() {
           {CONTACT_EMAIL}
         </a>
       </div>
+      {onGoLogin && (
+        <p className="mt-4 text-xs text-teal-600">
+          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">{conCuentas ? "Ingresar o crear cuenta" : "Acceso organizadores"}</button>
+          {" · "}
+          <a href="#privacidad" className="hover:text-lime-400 underline decoration-teal-800">Privacidad</a>
+        </p>
+      )}
     </footer>
   );
 }
 
-/* Encabezado público: el logo al medio y debajo las pestañas Torneos · Complejos · Entrenamientos
-   junto al acceso de organizadores (solo el ícono, para que entre todo en una fila) */
-function SiteHeader({ tab, onTab, onGoLogin }) {
+/* Encabezado público: arriba a la derecha "Ingresar" o "Mi cuenta", el logo al medio y debajo las
+   pestañas Torneos · Complejos · Entrenamientos */
+function SiteHeader({ tab, onTab, cuenta }) {
   return (
-    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
+    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-3 pb-3">
+      {cuenta && (
+        <div className="flex justify-end mb-1">
+          <button type="button" onClick={cuenta.onClick} className="px-3 py-1 rounded-full text-xs font-semibold border hover:border-lime-400" style={{ ...F.body, borderColor: `${BRAND.cyan}66`, color: cuenta.logueado ? BRAND.lime : "#cbd5e1" }}>{cuenta.logueado ? "Mi cuenta" : "Ingresar"}</button>
+        </div>
+      )}
       <div className="flex items-center justify-center gap-2">
         <Logo size={44} />
         <div>
@@ -5061,16 +5574,6 @@ function SiteHeader({ tab, onTab, onGoLogin }) {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={onGoLogin}
-          aria-label="Organizadores"
-          title="Acceso de organizadores"
-          className="flex items-center justify-center w-11 h-11 rounded-full shrink-0 transition hover:brightness-125"
-          style={{ ...F.body, ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)", color: BRAND.ink }}
-        >
-          <PeopleIcon />
-        </button>
       </nav>
     </header>
   );
@@ -5286,7 +5789,7 @@ function PublicTournamentCard({ t, big, organizerLabel, onOpen, onRegister, clas
             {progress.total > 0 && (
               <>
                 <p className="text-[11px] sm:text-sm text-teal-400 mt-1" style={F.body}>Avance: {progress.played} / {progress.total}</p>
-                <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct.toFixed(2)} %</p>
+                <p className="text-xs sm:text-base font-bold" style={F.body}>{progress.pct} %</p>
               </>
             )}
             <div className="mt-2 space-y-2">
@@ -5476,35 +5979,1060 @@ function DirectoryAvatar({ url, name, color, size = 64 }) {
   return <span className="rounded-full flex items-center justify-center shrink-0" style={{ ...style, ...F.display, color, fontSize: size * 0.4 }}>{(name || "?").trim().charAt(0).toUpperCase()}</span>;
 }
 
-/* Pestaña pública "Canchas": fichas de los complejos (logo, nombre, dirección, Instagram, WhatsApp) */
-function VenuesPublicView({ venues }) {
+/* Pestaña pública "Complejos": el buscador de turnos (filtros arriba y una tarjeta por complejo con
+   reserva online) y, abajo, el resto de los complejos de la ciudad */
+function VenuesPublicView({ venues, complejos = [], organizers = [], jugador, onReservar, onMisReservas }) {
+  const { reservas: conReservaOnline } = React.useContext(FuncionesContext);
   const sorted = [...venues].sort((a, b) => a.name.localeCompare(b.name, "es"));
+  const conReservas = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas && c.modulo_reservas !== false);
   return (
-    <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Complejos de pádel</h1>
-      <p className="text-sm text-teal-300 mb-5" style={F.body}>Dónde jugar en Gualeguaychú.</p>
-      {sorted.length === 0 && <p className="opacity-60" style={F.body}>Pronto vas a encontrar acá los complejos de la ciudad.</p>}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {sorted.map((v, i) => {
-          const color = i % 2 === 0 ? BRAND.lime : BRAND.cyan;
+    <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-6" style={F.body}>
+      <div className="flex items-end justify-between gap-3 pt-2">
+        <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>{conReservaOnline ? "Reservá tu cancha" : "Complejos"}</h1>
+        {jugador && conReservaOnline && <button type="button" onClick={onMisReservas} className="shrink-0 text-sm text-lime-400 underline">Mis reservas</button>}
+      </div>
+      {conReservaOnline && <BuscadorTurnos venues={venues} complejos={complejos} organizers={organizers} sinReservaOnline={sorted.filter((v) => !conReservas(v.id)).length} onElegir={onReservar} />}
+      <MasComplejos venues={sorted.filter((v) => !conReservas(v.id))} titulo={sorted.some((v) => conReservas(v.id)) ? "Más complejos en Gualeguaychú" : "Complejos en Gualeguaychú"} />
+    </section>
+  );
+}
+
+/* Complejos que reservan por WhatsApp (sin reserva online): logo, nombre y botones de WhatsApp e Instagram */
+function MasComplejos({ venues, titulo }) {
+  if (venues.length === 0) return null;
+  const boton = "w-10 h-10 shrink-0 rounded-full border flex items-center justify-center hover:brightness-125";
+  return (
+    <section className="mt-8">
+      <h2 className="text-base font-semibold text-slate-100 mb-3">{titulo}</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {venues.map((v) => {
+          const wa = normalizeArPhone(v.whatsapp);
+          const ig = instagramLink(v.instagram);
           return (
-            <article key={v.id} className="rounded-2xl p-4" style={{ ...neonStyle(color), backgroundColor: "rgba(8,18,24,0.7)" }}>
-              <div className="flex items-center gap-3">
-                <DirectoryAvatar url={v.logoUrl} name={v.name} color={color} />
-                <div className="min-w-0">
-                  <h2 className="text-base uppercase leading-tight break-words" style={{ ...F.display, color: BRAND.ink }}>{v.name}</h2>
-                  {v.address && (
-                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${v.address}, Gualeguaychú`)}`} target="_blank" rel="noopener noreferrer" className="text-sm text-teal-300 underline decoration-teal-700" style={F.body}>
-                      📍 {v.address}
-                    </a>
-                  )}
-                </div>
+            <article key={v.id} className="flex items-center gap-3 rounded-2xl border px-3 py-3 min-w-0" style={{ borderColor: "#1f3a44", backgroundColor: "rgba(10,24,30,0.7)" }}>
+              <DirectoryAvatar url={v.logoUrl} name={v.name} color={BRAND.cyan} size={48} />
+              <div className="flex-1 min-w-0">
+                <h3 className="font-semibold text-slate-100 leading-tight break-words">{v.name}</h3>
+                <p className="text-xs text-slate-400">{wa ? "Reserva por WhatsApp" : ig ? "Consultá por Instagram" : v.address || "Sin reserva online"}</p>
               </div>
-              <SocialButtons instagram={v.instagram} whatsapp={v.whatsapp} color={color} />
+              {wa && (
+                <a href={`https://wa.me/${wa}`} target="_blank" rel="noopener noreferrer" className={boton} style={{ borderColor: "#25d36655", color: "#25d366" }} aria-label={`WhatsApp de ${v.name}`}>
+                  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 00-8.6 15.1L2 22l5-1.3A10 10 0 1012 2zm0 18.2a8.2 8.2 0 01-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1112 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1-.7.8-.8 1-.3.2-.5.1a6.7 6.7 0 01-3.3-2.9c-.2-.4.2-.4.7-1.3.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 00-.7.3 3 3 0 00-.9 2.2 5.2 5.2 0 001.1 2.7 11.8 11.8 0 004.5 4c1.7.7 2.3.8 3.2.6a2.7 2.7 0 001.8-1.3 2.2 2.2 0 00.2-1.3c-.1-.1-.3-.2-.6-.3z" /></svg>
+                </a>
+              )}
+              {ig && (
+                <a href={ig.url} target="_blank" rel="noopener noreferrer" className={boton} style={{ borderColor: "#1f3a44", color: "#e2e8f0" }} aria-label={`Instagram de ${v.name}`}>
+                  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5" /><circle cx="12" cy="12" r="4" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
+                </a>
+              )}
             </article>
           );
         })}
       </div>
+    </section>
+  );
+}
+
+const mapsLink = (address) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${address}, Gualeguaychú`)}`;
+
+/* ---------- Reservas: lado del jugador ---------- */
+
+/* "hoy", "mañana", "el viernes 16" */
+function diaEnTexto(fecha, hoy) {
+  if (fecha === hoy) return "hoy";
+  if (fecha === sumarDias(hoy, 1)) return "mañana";
+  const [dia, num] = etiquetaFecha(fecha).split(" ");
+  return `el ${dia.toLowerCase()} ${num.slice(0, 2)}`;
+}
+
+/* Portada de un complejo sin foto: una cancha de pádel vista desde arriba, con los colores de la marca */
+function CanchaDibujo({ className = "" }) {
+  return (
+    <svg viewBox="0 0 320 130" preserveAspectRatio="xMidYMid slice" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id="sp-cancha-fondo" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#0b2a33" />
+          <stop offset="1" stopColor="#0f3d48" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="130" fill="url(#sp-cancha-fondo)" />
+      <rect x="80" y="15" width="160" height="100" rx="2" fill="#1d5a68" stroke="#d8f3f6" strokeWidth="2" />
+      <line x1="124.5" y1="15" x2="124.5" y2="115" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="195.5" y1="15" x2="195.5" y2="115" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="124.5" y1="65" x2="195.5" y2="65" stroke="#d8f3f6" strokeWidth="1.6" />
+      <line x1="160" y1="10" x2="160" y2="120" stroke="#ffffff" strokeWidth="2.6" />
+      <circle cx="160" cy="10" r="2.5" fill={BRAND.lime} />
+      <circle cx="160" cy="120" r="2.5" fill={BRAND.lime} />
+    </svg>
+  );
+}
+
+/* Buscador de turnos en todos los complejos a la vez: día, franja del día y duración (fijos arriba al
+   bajar) y una tarjeta por complejo con sus horarios libres. Elegir un horario abre adentro de la
+   tarjeta el resumen con "Reservar" (onElegir sigue con el flujo de siempre). */
+function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline = 0, onElegir }) {
+  const hoy = hoyArgentina();
+  const habilitados = complejos.filter((c) => c.reservas_habilitadas && c.modulo_reservas !== false && venues.some((v) => v.id === c.id));
+  const ids = habilitados.map((c) => c.id).join(",");
+  const [canchas, setCanchas] = useState(null); // todas las activas (las de reserva online, para los turnos)
+  const [fecha, setFecha] = useState(hoy);
+  const [franja, setFranja] = useState("todo"); // todo | manana | tarde | noche
+  const [duracion, setDuracion] = useState(null);
+  const [ocupado, setOcupado] = useState(null); // { [complejoId]: [...] }
+  const [fichas, setFichas] = useState({}); // { [complejoId]: ficha }
+  const [error, setError] = useState(""); // de los horarios del día
+  const [errorCanchas, setErrorCanchas] = useState("");
+  const diasRef = useRef(null);
+
+  useEffect(() => {
+    if (!ids) return;
+    supabaseTable(`complejo_fichas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})`)
+      .then((rows) => setFichas(Object.fromEntries((rows || []).map((r) => [r.complejo_id, r]))))
+      .catch(() => setFichas({}));
+  }, [ids]);
+
+  useEffect(() => {
+    if (!ids) return;
+    supabaseTable(`canchas?complejo_id=in.(${ids.split(",").map(encodeURIComponent).join(",")})&activa=is.true&order=orden.asc,created_at.asc`)
+      .then((rows) => {
+        setCanchas(rows || []);
+        const durs = DURACIONES.filter((d) => (rows || []).some((c) => c.reserva_online && duracionesOfrecidas(c).includes(d)));
+        setDuracion((cur) => cur ?? (durs.includes(90) ? 90 : durs[0] ?? null));
+      })
+      .catch(() => setErrorCanchas("No se pudieron cargar los turnos. Revisá la conexión."));
+  }, [ids]);
+
+  useEffect(() => {
+    if (!ids) return;
+    setOcupado(null);
+    let vigente = true;
+    Promise.all(ids.split(",").map((id) => supabaseRpc("disponibilidad_canchas", { p_complejo: id, p_fecha: fecha }).then((rows) => [id, (rows || []).map((r) => ({ ...r, estado: "confirmada" }))])))
+      .then((pares) => { if (vigente) { setOcupado(Object.fromEntries(pares)); setError(""); } })
+      .catch(() => { if (vigente) setError("No se pudieron cargar los horarios. Revisá la conexión."); });
+    return () => { vigente = false; };
+  }, [ids, fecha]);
+
+  if (habilitados.length === 0) return null;
+  const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
+  const online = (canchas || []).filter((c) => c.reserva_online);
+  const duraciones = DURACIONES.filter((d) => online.some((c) => duracionesOfrecidas(c).includes(d)));
+  const tarjetas = canchas && ocupado && duracion
+    ? habilitados.map((c) => {
+        const venue = venues.find((v) => v.id === c.id);
+        const suyas = online.filter((x) => x.complejo_id === c.id);
+        const horarios = horariosConLibres(suyas, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+        return {
+          venue, complejo: c, horarios, canchasSuyas: suyas,
+          totalCanchas: canchas.filter((x) => x.complejo_id === c.id).length,
+          ficha: fichas[c.id] || null,
+          portada: fichas[c.id]?.portada_url || organizers.find((o) => o.id === c.dueno_id)?.coverUrl || "",
+          precio: precioDesde(suyas, duracion), ofrece: suyas.some((x) => duracionesOfrecidas(x).includes(duracion)),
+        };
+      }).filter((t) => t.ofrece).sort((a, b) => (b.horarios.length > 0) - (a.horarios.length > 0) || a.venue.name.localeCompare(b.venue.name, "es"))
+    : null;
+  const conLibres = (tarjetas || []).filter((t) => t.horarios.length > 0).length;
+  const segmento = (activo) => (activo ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1" });
+  const moverDias = (d) => diasRef.current?.scrollBy({ left: d * 260, behavior: "smooth" });
+  const nombreFranja = FRANJAS.find(([k]) => k === franja)?.[1];
+
+  return (
+    <div className="mt-3">
+      {/* Filtros: quedan fijos arriba al bajar */}
+      <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 space-y-2 border-b border-teal-900/70" style={{ backgroundColor: "rgba(6,15,20,0.94)", backdropFilter: "blur(6px)" }}>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => moverDias(-1)} className="hidden sm:flex shrink-0 w-9 h-9 rounded-full border border-teal-800 text-slate-300 items-center justify-center hover:border-teal-600" aria-label="Días anteriores">‹</button>
+          <div ref={diasRef} className="flex-1 min-w-0 flex gap-2 overflow-x-auto sp-sin-barra">
+            {dias.map((d) => (
+              <button key={d} type="button" onClick={() => setFecha(d)} aria-pressed={fecha === d} className="shrink-0 whitespace-nowrap px-3.5 py-1.5 rounded-full text-sm border transition" style={fecha === d ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{etiquetaDiaCorta(d, hoy)}</button>
+            ))}
+          </div>
+          <button type="button" onClick={() => moverDias(1)} className="hidden sm:flex shrink-0 w-9 h-9 rounded-full border border-teal-800 text-slate-300 items-center justify-center hover:border-teal-600" aria-label="Días siguientes">›</button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex gap-1 p-1 rounded-full border border-teal-900" role="radiogroup" aria-label="Hora">
+            {[["todo", "Todo el día"], ...FRANJAS].map(([k, l]) => (
+              <button key={k} type="button" role="radio" aria-checked={franja === k} onClick={() => setFranja(k)} className="px-3 py-1 rounded-full text-sm whitespace-nowrap" style={segmento(franja === k)}>{l}</button>
+            ))}
+          </div>
+          {duraciones.length > 1 && (
+            <div className="flex gap-1 p-1 rounded-full border border-teal-900" role="radiogroup" aria-label="Duración">
+              {duraciones.map((d) => (
+                <button key={d} type="button" role="radio" aria-checked={duracion === d} onClick={() => setDuracion(d)} className="px-3 py-1 rounded-full text-sm whitespace-nowrap" style={segmento(duracion === d)}>{d} min</button>
+              ))}
+            </div>
+          )}
+        </div>
+        {tarjetas && (
+          <p className="text-sm text-slate-400">
+            {conLibres === 0 ? "Ningún complejo" : conLibres === 1 ? "1 complejo" : `${conLibres} complejos`} con turnos libres {diaEnTexto(fecha, hoy)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}
+            {sinReservaOnline > 0 && ` · ${sinReservaOnline} más reservan por WhatsApp`}
+          </p>
+        )}
+      </div>
+
+      <div className="mt-4">
+        {(errorCanchas || error) && <p className="text-sm text-red-400 mb-3">{errorCanchas || error}</p>}
+        {canchas && duracion == null ? (
+          <p className="text-sm text-slate-400">Todavía ningún complejo ofrece turnos online.</p>
+        ) : !tarjetas ? (
+          !error && !errorCanchas && <p className="text-sm text-slate-400">Buscando turnos…</p>
+        ) : tarjetas.length === 0 ? (
+          <p className="text-sm text-slate-400">Ningún complejo ofrece turnos de {duracion} min.</p>
+        ) : (
+          <div className={`grid gap-4 ${tarjetas.length > 1 ? "lg:grid-cols-2" : ""}`}>
+            {tarjetas.map((t) => (
+              // El logo: el que el dueño cargó en su Perfil; si no tiene, el de la ficha del complejo
+              <TarjetaComplejo key={`${t.venue.id}|${fecha}|${duracion}|${franja}`} {...t} venue={{ ...t.venue, logoUrl: organizers.find((o) => o.id === t.complejo.dueno_id)?.logoUrl || t.venue.logoUrl }} fecha={fecha} hoy={hoy} ultimoDia={dias[dias.length - 1]} duracion={duracion} franja={franja} onReservar={onElegir} onIrAFecha={(d) => { setFecha(d); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Ficha pública del complejo (ver 20261031_fichas_complejos.sql) ---------- */
+
+const TIPOS_CANCHA = [["cristal", "Cristal"], ["muro", "Muro"], ["mixto", "Cristal y muro"]];
+const TECHADAS = [["techadas", "Techadas"], ["descubiertas", "Descubiertas"], ["mixto", "Techadas y descubiertas"]];
+const ILUMINACION = [["led", "Iluminación LED"], ["comun", "Con iluminación"], ["sin", "Sin iluminación"]];
+const SERVICIOS = [
+  ["cantina", "Cantina", "M5 8h12v5a6 6 0 01-12 0zM17 9h1.5a2.5 2.5 0 010 5H17M8 3v2M11 3v2M14 3v2"],
+  ["vestuarios", "Vestuarios", "M8 3L3 6l2 4 3-1v12h8V9l3 1 2-4-5-3a4 4 0 01-8 0z"],
+  ["duchas", "Duchas", "M4 21V8a4 4 0 018 0M9 8h6M12 12v.01M15 12v.01M18 12v.01M12 15v.01M15 15v.01M18 15v.01"],
+  ["estacionamiento", "Estacionamiento", "M4 4h16v16H4zM10 16V8h3a2.5 2.5 0 010 5h-3"],
+  ["paletas", "Venta y alquiler de paletas", "M10 2a7 7 0 017 7c0 3.5-2.5 6-5.5 6.8L10 17l-5 5-2-2 5-5 1.2-1.5C6.5 12.5 3 12 3 9a7 7 0 017-7z"],
+  ["wifi", "Wi-Fi", "M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01"],
+];
+const etiquetaDe = (lista, k) => lista.find(([x]) => x === k)?.[1] || null;
+
+function ServicioIcono({ d }) {
+  return <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>;
+}
+
+/* Galería de fotos de un complejo, a pantalla completa: flechas, deslizar con el dedo y miniaturas */
+function GaleriaModal({ fotos, nombre, onClose }) {
+  const [i, setI] = useState(0);
+  const toque = useRef(null);
+  const mover = useCallback((d) => setI((x) => (x + d + fotos.length) % fotos.length), [fotos.length]);
+  useEffect(() => {
+    const tecla = (e) => { if (e.key === "Escape") onClose(); if (e.key === "ArrowRight") mover(1); if (e.key === "ArrowLeft") mover(-1); };
+    window.addEventListener("keydown", tecla);
+    const antes = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", tecla); document.body.style.overflow = antes; };
+  }, [mover, onClose]);
+  return (
+    <div className="fixed inset-0 z-[70] flex flex-col" style={{ backgroundColor: "rgba(3,8,11,0.96)", ...F.body }} role="dialog" aria-modal="true" aria-label={`Fotos de ${nombre}`}>
+      <div className="flex items-center justify-between px-4 py-3">
+        <p className="text-sm text-slate-300">{nombre} · {i + 1} de {fotos.length}</p>
+        <button type="button" onClick={onClose} className="w-10 h-10 rounded-full text-slate-200 hover:bg-white/10 text-xl" aria-label="Cerrar">✕</button>
+      </div>
+      <div className="flex-1 min-h-0 relative flex items-center justify-center px-2"
+        onTouchStart={(e) => { toque.current = e.touches[0].clientX; }}
+        onTouchEnd={(e) => { const dx = e.changedTouches[0].clientX - (toque.current ?? 0); if (Math.abs(dx) > 40) mover(dx < 0 ? 1 : -1); toque.current = null; }}>
+        <img src={fotos[i]} alt={`Foto ${i + 1} de ${nombre}`} className="max-w-full max-h-full object-contain rounded-lg" />
+        {fotos.length > 1 && (
+          <>
+            <button type="button" onClick={() => mover(-1)} className="hidden sm:flex absolute left-4 w-11 h-11 rounded-full items-center justify-center text-2xl text-slate-100" style={{ backgroundColor: "rgba(15,30,38,0.8)" }} aria-label="Foto anterior">‹</button>
+            <button type="button" onClick={() => mover(1)} className="hidden sm:flex absolute right-4 w-11 h-11 rounded-full items-center justify-center text-2xl text-slate-100" style={{ backgroundColor: "rgba(15,30,38,0.8)" }} aria-label="Foto siguiente">›</button>
+          </>
+        )}
+      </div>
+      {fotos.length > 1 && (
+        <div className="flex justify-center gap-2 px-4 py-3 overflow-x-auto sp-sin-barra">
+          {fotos.map((f, j) => (
+            <button key={f + j} type="button" onClick={() => setI(j)} className="shrink-0 rounded-md overflow-hidden border-2" style={{ borderColor: j === i ? BRAND.lime : "transparent" }} aria-label={`Ver la foto ${j + 1}`}>
+              <img src={f} alt="" className="w-16 h-12 object-cover" />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Perfil del complejo: lo que se ve en su tarjeta pública (portada, fotos, canchas y servicios) */
+function FichaComplejoForm({ complejoId, nombre, accessToken }) {
+  const vacia = { portada_url: "", fotos: [], tipo_canchas: null, techadas: null, iluminacion: null, servicios: [] };
+  const [ficha, setFicha] = useState(null);
+  const [subiendo, setSubiendo] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [estado, setEstado] = useState(""); // "" | "guardado" | mensaje de error
+  const fotoRef = useRef(null);
+
+  useEffect(() => {
+    supabaseTable(`complejo_fichas?complejo_id=eq.${encodeURIComponent(complejoId)}`, { accessToken })
+      .then((rows) => setFicha(rows?.[0] ? { ...vacia, ...rows[0], portada_url: rows[0].portada_url || "" } : vacia))
+      .catch(() => { setFicha(vacia); setEstado("No se pudo cargar la ficha. Revisá la conexión."); });
+  }, [complejoId, accessToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!ficha) return <p className="text-sm opacity-60">Cargando…</p>;
+  const set = (cambio) => { setFicha((f) => ({ ...f, ...cambio })); setEstado(""); };
+  const opcion = (lista, campo) => (
+    <div className="flex flex-wrap gap-2">
+      {lista.map(([k, l]) => (
+        <button key={k} type="button" onClick={() => set({ [campo]: ficha[campo] === k ? null : k })} aria-pressed={ficha[campo] === k} className="px-3 py-1.5 rounded-full text-sm border" style={ficha[campo] === k ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
+      ))}
+    </div>
+  );
+  const sumarFoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSubiendo(true); setEstado("");
+    try {
+      const url = await uploadImageToSupabase(file, accessToken, "complejos", { maxAncho: 1600 });
+      set({ fotos: [...ficha.fotos, url].slice(0, 5) });
+    } catch (err) { setEstado(err.message || "No se pudo subir la foto."); }
+    setSubiendo(false);
+    if (fotoRef.current) fotoRef.current.value = "";
+  };
+  const guardar = async () => {
+    setBusy(true); setEstado("");
+    try {
+      await supabaseTable("complejo_fichas?on_conflict=complejo_id", {
+        method: "POST", accessToken, prefer: "resolution=merge-duplicates,return=minimal",
+        body: { complejo_id: complejoId, portada_url: ficha.portada_url.trim() || null, fotos: ficha.fotos, tipo_canchas: ficha.tipo_canchas, techadas: ficha.techadas, iluminacion: ficha.iluminacion, servicios: ficha.servicios },
+      });
+      setEstado("guardado");
+    } catch (e) { setEstado(e.message === "foto_invalida" ? "Una de las fotos no es válida: quitala y subila de nuevo." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-4 text-sm">
+      <p className="text-xs text-slate-400">Es lo que ve la gente en la tarjeta de {nombre} en "Reservá tu cancha".</p>
+      <ImageUploadField label="Portada (horizontal: se ve ancha arriba de la tarjeta)" value={ficha.portada_url} onChange={(v) => set({ portada_url: v })} accessToken={accessToken} folder="complejos" maxAncho={1600} ancha />
+      <div>
+        <p className="text-xs text-teal-400 mb-1">Galería ({ficha.fotos.length} de 5 fotos)</p>
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+          {ficha.fotos.map((f, i) => (
+            <div key={f + i} className="relative">
+              <img src={f} alt={`Foto ${i + 1}`} className="w-full aspect-[4/3] object-cover rounded-lg border border-teal-800" />
+              <button type="button" onClick={() => set({ fotos: ficha.fotos.filter((_, j) => j !== i) })} className="absolute top-1 right-1 w-6 h-6 rounded-full text-xs text-white" style={{ backgroundColor: "rgba(0,0,0,0.65)" }} aria-label={`Quitar la foto ${i + 1}`}>✕</button>
+            </div>
+          ))}
+          {ficha.fotos.length < 5 && (
+            <label className={`flex flex-col items-center justify-center aspect-[4/3] rounded-lg border border-dashed border-teal-700 text-slate-400 text-xs text-center cursor-pointer hover:border-teal-500 ${subiendo ? "opacity-60" : ""}`}>
+              <span className="text-xl">+</span>{subiendo ? "Subiendo…" : "Sumar foto"}
+              <input ref={fotoRef} type="file" accept="image/*" disabled={subiendo} onChange={sumarFoto} className="sr-only" />
+            </label>
+          )}
+        </div>
+      </div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Tipo de canchas</p>{opcion(TIPOS_CANCHA, "tipo_canchas")}</div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Techo</p>{opcion(TECHADAS, "techadas")}</div>
+      <div className="space-y-1.5"><p className="text-xs text-teal-400">Iluminación</p>{opcion(ILUMINACION, "iluminacion")}</div>
+      <div className="space-y-1.5">
+        <p className="text-xs text-teal-400">Servicios</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {SERVICIOS.map(([k, l, d]) => {
+            const on = ficha.servicios.includes(k);
+            return (
+              <label key={k} className="flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer" style={on ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>
+                <input type="checkbox" checked={on} onChange={(e) => set({ servicios: e.target.checked ? [...ficha.servicios, k] : ficha.servicios.filter((x) => x !== k) })} className="sr-only" />
+                <ServicioIcono d={d} /> {l}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <button type="button" disabled={busy || subiendo} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar ficha"}</button>
+        {estado === "guardado" ? <span className="text-lime-400">Guardado ✓</span> : estado && <span className="text-red-400">{estado}</span>}
+      </div>
+    </div>
+  );
+}
+
+/* Tarjeta de un complejo con reserva online: portada, logo, datos, precio, horarios libres en grilla
+   (Mañana / Tarde / Noche, con cuántas canchas quedan) y, al elegir uno, el resumen con "Reservar" */
+function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
+  // Si ese día no hay lugar: el primer turno libre de los días siguientes (undefined = buscando, null = no hay)
+  const [proximo, setProximo] = useState(undefined);
+  useEffect(() => {
+    if (horarios.length > 0 || canchasSuyas.length === 0 || !ultimoDia) return;
+    let vigente = true;
+    setProximo(undefined);
+    (async () => {
+      for (let d = sumarDias(fecha, 1); d <= ultimoDia; d = sumarDias(d, 1)) {
+        try {
+          const ocupado = ((await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: d })) || []).map((r) => ({ ...r, estado: "confirmada" }));
+          const libres = horariosConLibres(canchasSuyas, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+          if (libres.length > 0) { if (vigente) setProximo({ fecha: d, desde: libres[0].desde }); return; }
+        } catch { break; }
+        if (!vigente) return;
+      }
+      if (vigente) setProximo(null);
+    })();
+    return () => { vigente = false; };
+  }, [venue.id, fecha, duracion, franja, horarios.length, ultimoDia]); // eslint-disable-line react-hooks/exhaustive-deps
+  const elDia = (d) => (d === hoy ? "hoy" : d === sumarDias(hoy, 1) ? "mañana" : `el ${etiquetaDiaCorta(d, hoy).toLowerCase()}`);
+  const [elegido, setElegido] = useState(null); // { desde, canchas }
+  const [viendoFotos, setViendoFotos] = useState(false);
+  const galeria = [ficha?.portada_url, ...(ficha?.fotos || [])].filter(Boolean);
+  const etiquetas = [
+    totalCanchas > 0 && `${totalCanchas} cancha${totalCanchas === 1 ? "" : "s"}`,
+    etiquetaDe(TIPOS_CANCHA, ficha?.tipo_canchas),
+    etiquetaDe(TECHADAS, ficha?.techadas),
+    ficha?.iluminacion !== "sin" && etiquetaDe(ILUMINACION, ficha?.iluminacion),
+  ].filter(Boolean);
+  const servicios = SERVICIOS.filter(([k]) => ficha?.servicios?.includes(k));
+  const [canchaId, setCanchaId] = useState(null); // null = cualquiera de las libres
+  const cancha = elegido && canchaId ? elegido.canchas.find((c) => c.id === canchaId) : null;
+  const precioElegido = elegido ? (cancha ? precioDe(cancha, duracion) : precioDesde(elegido.canchas, duracion)) : null;
+  const grupos = FRANJAS.map(([k, l]) => [l, horarios.filter((h) => franjaDe(h.desde) === k)]).filter(([, hs]) => hs.length > 0);
+  const elegir = (h) => {
+    if (elegido?.desde === h.desde) { setElegido(null); return; }
+    setElegido(h); setCanchaId(h.canchas.length === 1 ? h.canchas[0].id : null);
+  };
+  // Sin cancha elegida va la libre más barata: la del precio "desde" que muestra la tarjeta
+  const masBarata = () => [...elegido.canchas].sort((a, b) => (precioDe(a, duracion) ?? Infinity) - (precioDe(b, duracion) ?? Infinity))[0];
+  const reservar = () => onReservar(venue.id, { fecha, duracion, desde: elegido.desde, canchaId: canchaId || masBarata().id });
+  const nombreFranja = FRANJAS.find(([k]) => k === franja)?.[1];
+
+  return (
+    <article className="rounded-2xl overflow-hidden border min-w-0" style={{ borderColor: `${BRAND.lime}40`, backgroundColor: "rgba(10,24,30,0.85)" }}>
+      <div className="relative h-36 sm:h-44">
+        {portada
+          ? <img src={portada} alt="" className="absolute inset-0 w-full h-full object-cover" />
+          : <CanchaDibujo className="absolute inset-0 w-full h-full" />}
+        <span className="absolute top-3 left-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
+          Reserva online
+        </span>
+        {galeria.length > 0 && (
+          <button type="button" onClick={() => setViendoFotos(true)} className="absolute top-3 right-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold text-slate-100" style={{ backgroundColor: "rgba(6,15,20,0.75)" }}>
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 5h18v14H3zM3 15l5-5 5 5 3-3 5 5" /><circle cx="15.5" cy="8.5" r="1.5" /></svg>
+            Ver {galeria.length} foto{galeria.length === 1 ? "" : "s"}
+          </button>
+        )}
+      </div>
+      {viendoFotos && <GaleriaModal fotos={galeria} nombre={venue.name} onClose={() => setViendoFotos(false)} />}
+      <div className="px-4 pb-4">
+        <div className="relative z-10 -mt-9 mb-2">
+          <span className="inline-block rounded-full p-0.5" style={{ backgroundColor: "#0a181e" }}>
+            <DirectoryAvatar url={venue.logoUrl} name={venue.name} color={BRAND.lime} size={68} />
+          </span>
+        </div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-lg font-bold text-slate-100 leading-tight break-words">{venue.name}</h3>
+            {venue.address && (
+              <a href={mapsLink(venue.address)} target="_blank" rel="noopener noreferrer" className="text-sm text-cyan-300 hover:underline">📍 {venue.address} · Cómo llegar</a>
+            )}
+          </div>
+          {precio != null && (
+            <div className="text-right shrink-0">
+              <p className="text-xs text-slate-400">{duracion} min desde</p>
+              <p className="text-xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(precio)}</p>
+            </div>
+          )}
+        </div>
+        {etiquetas.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {etiquetas.map((e) => <span key={e} className="px-2.5 py-1 rounded-full text-xs text-slate-200" style={{ backgroundColor: "rgba(148,163,184,0.12)" }}>{e}</span>)}
+          </div>
+        )}
+        {servicios.length > 0 && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-2.5">
+            {servicios.map(([k, l, d]) => <span key={k} className="inline-flex items-center gap-1.5 text-xs text-slate-400"><ServicioIcono d={d} />{l}</span>)}
+          </div>
+        )}
+
+        <div className="border-t border-teal-900/70 mt-4 pt-3 space-y-3">
+          {horarios.length === 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-300">
+                No hay turnos libres {elDia(fecha)}{franja !== "todo" ? ` a la ${nombreFranja.toLowerCase()}` : ""}.
+                {proximo === undefined && <span className="text-slate-400"> Buscando el próximo libre…</span>}
+                {proximo && <> Próximo libre: <span className="font-semibold text-slate-100">{elDia(proximo.fecha).replace(/^el /, "")} a las {etiquetaHora(proximo.desde)}</span></>}
+                {proximo === null && <span className="text-slate-400"> Tampoco hay en los próximos días{franja !== "todo" ? " en ese horario" : ""}.</span>}
+              </p>
+              {proximo && (
+                <button type="button" onClick={() => onIrAFecha(proximo.fecha)} className="px-4 py-2 rounded-xl text-sm font-semibold border" style={{ borderColor: BRAND.lime, color: BRAND.lime }}>
+                  Ver {elDia(proximo.fecha).replace(/^el /, "")}
+                </button>
+              )}
+            </div>
+          ) : grupos.map(([nombre, hs]) => (
+            <div key={nombre}>
+              <p className="text-xs text-slate-400 mb-1.5">{nombre}</p>
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(4.75rem, 1fr))" }}>
+                {hs.map((h) => {
+                  const sel = elegido?.desde === h.desde;
+                  const ultima = h.canchas.length === 1;
+                  return (
+                    <button key={h.desde} type="button" onClick={() => elegir(h)} aria-pressed={sel} aria-label={`${etiquetaHora(h.desde)}, ${ultima ? "última cancha libre" : `${h.canchas.length} canchas libres`}`}
+                      className="rounded-xl border py-1.5 text-center transition" style={sel ? { backgroundColor: BRAND.lime, borderColor: BRAND.lime } : { borderColor: "#1f3a44" }}>
+                      <span className="block font-bold tabular-nums" style={{ color: sel ? "#14181f" : BRAND.lime }}>{etiquetaHora(h.desde)}</span>
+                      <span className="block text-[11px]" style={{ color: sel ? "#14181f" : ultima ? "#fbbf24" : "#94a3b8" }}>{ultima ? "Última" : `${h.canchas.length} libres`}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {elegido && (
+          <div className="mt-4 rounded-xl border p-3 space-y-3" style={{ borderColor: `${BRAND.lime}55`, backgroundColor: `${BRAND.lime}0f` }}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-100">
+                <span className="font-semibold">{etiquetaDiaCorta(fecha, hoy)} · {etiquetaHora(elegido.desde)} a {etiquetaHora(elegido.desde + duracion)}</span>
+                {" · "}{cancha ? cancha.nombre : elegido.canchas.length > 1 ? "Cancha a elegir" : elegido.canchas[0].nombre}
+                {precioElegido != null && <span className="font-semibold" style={{ color: BRAND.lime }}> · {formatoPrecio(precioElegido)}</span>}
+              </p>
+              <button type="button" onClick={reservar} className="px-5 py-2.5 rounded-xl font-bold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Reservar</button>
+            </div>
+            {elegido.canchas.length > 1 && (
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Cancha">
+                {elegido.canchas.map((c) => (
+                  <button key={c.id} type="button" role="radio" aria-checked={canchaId === c.id} onClick={() => setCanchaId(canchaId === c.id ? null : c.id)} className="px-3 py-1.5 rounded-full text-sm border" style={canchaId === c.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>
+                    {c.nombre} · {formatoPrecio(precioDe(c, duracion))}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+/* Entrar o crear la cuenta con mail y contraseña: la misma cuenta sirve para reservar turnos, para
+   trabajar en un complejo y para organizar. La primera vez llega un mail con un link para confirmarla.
+   onEntro(jugador, contraseña) se llama con la sesión ya iniciada. */
+function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
+  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar"); // entrar | crear | recuperar | enviado
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [ver, setVer] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [sinConfirmar, setSinConfirmar] = useState(false);
+  const mail = email.trim().toLowerCase();
+  const mailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail);
+  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); };
+
+  const entrar = async () => {
+    if (!mailOk || !password) { setError("Completá mail y contraseña."); return; }
+    setBusy(true); setError(""); setSinConfirmar(false);
+    try {
+      const j = await jugadorApi.login(await supabaseSignIn(mail, password));
+      await onEntro(j, password);
+    } catch (e) {
+      const texto = cuentaErrorText(e);
+      setError(texto);
+      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed);
+      setBusy(false);
+    }
+  };
+  const crear = async () => {
+    if (!mailOk) { setError("Revisá el mail."); return; }
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
+    setBusy(true); setError("");
+    try {
+      const r = await supabaseSignUp(mail, password);
+      if (r.access_token) { // sin confirmación por mail: ya entra
+        const j = await jugadorApi.login(r);
+        await onEntro(j, password);
+        return;
+      }
+      const user = r.user || r;
+      if (Array.isArray(user.identities) && user.identities.length === 0) {
+        setError("Ese mail ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\" (también si antes entrabas con un código).");
+      } else {
+        cambiar("enviado");
+      }
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const recuperar = async () => {
+    if (!mailOk) { setError("Revisá el mail."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRequestPasswordReset(mail);
+      setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const reenviar = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseResendConfirm(mail);
+      setSinConfirmar(false);
+      setAviso("Te mandamos de nuevo el mail para confirmar la cuenta.");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const enviar = modo === "crear" ? crear : modo === "recuperar" ? recuperar : entrar;
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  const boton = (texto, ocupado) => (
+    <button type="button" disabled={busy} onClick={enviar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? ocupado : texto}</button>
+  );
+
+  if (modo === "enviado") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-100 font-semibold">¡Ya casi! Revisá tu mail</p>
+        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta. Tocalo y listo: después entrás siempre con tu mail y contraseña.</p>
+        <p className="text-xs text-teal-500">Puede tardar un minuto. Si no llega, revisá el correo no deseado.</p>
+        {aviso && <p className="text-lime-400">{aviso}</p>}
+        {error && <p className="text-red-400">{error}</p>}
+        <div className="flex justify-between gap-3 text-xs">
+          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Reenviar el mail</button>
+          <button type="button" onClick={() => cambiar("entrar")} className="text-teal-400">Ya la confirmé: ingresar</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      {modo !== "recuperar" ? conCuentas && (
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-full border border-teal-800">
+          {[["entrar", "Ingresar"], ["crear", "Crear cuenta"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => cambiar(k)} className="py-1.5 rounded-full font-semibold" style={modo === k ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-teal-300">Poné tu mail y te mandamos un link para elegir una contraseña nueva. Si antes entrabas con un código, así te creás la contraseña.</p>
+      )}
+      <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
+      {modo !== "recuperar" && (
+        <div className="relative">
+          <input type={ver ? "text" : "password"} autoComplete={modo === "crear" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña"} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
+          <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">Mandarme de nuevo el mail para confirmar</button>}
+      {aviso && <p className="text-lime-400">{aviso}</p>}
+      {modo === "entrar" && boton("Ingresar", "Ingresando…")}
+      {modo === "crear" && boton("Crear mi cuenta", "Creando…")}
+      {modo === "recuperar" && boton("Mandarme el link", "Mandando…")}
+      {modo === "entrar" && <button type="button" onClick={() => cambiar("recuperar")} className="text-xs text-teal-400 hover:text-lime-400">Olvidé mi contraseña</button>}
+      {modo === "recuperar" && <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400 hover:text-lime-400">← Volver a ingresar</button>}
+    </div>
+  );
+}
+
+/* Elegir la contraseña nueva, después de tocar el link del mail de "Olvidé mi contraseña" */
+function NuevaClave({ jugadorApi, onListo }) {
+  const [password, setPassword] = useState("");
+  const [ver, setVer] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const guardar = async () => {
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseUpdatePassword(await jugadorApi.token(), password);
+      await onListo(jugadorApi.jugador, password);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
+  };
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-300">Elegí tu contraseña nueva para <span className="text-teal-100 break-all">{jugadorApi.jugador?.email}</span>.</p>
+      <div className="relative">
+        <input type={ver ? "text" : "password"} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && guardar()} placeholder="Contraseña nueva (mínimo 8 caracteres)" className="w-full px-3 py-2.5 rounded-lg border text-base pr-16" style={adminInput} aria-label="Contraseña nueva" autoFocus />
+        <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy} onClick={guardar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar contraseña"}</button>
+    </div>
+  );
+}
+
+/* Entrar para reservar: la cuenta y, la primera vez, sus datos (nombre, WhatsApp) */
+function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titulo = "Entrar para reservar" }) {
+  const { jugador } = jugadorApi;
+  const [step, setStep] = useState(jugador && !jugador.perfil && conPerfil ? "perfil" : "cuenta");
+  return (
+    <Modal title={step === "perfil" ? "Tus datos" : titulo} onClose={onClose}>
+      {step === "cuenta" && <CuentaForm jugadorApi={jugadorApi} onEntro={(j) => { if (j.perfil || !conPerfil) onDone(); else setStep("perfil"); }} />}
+      {step === "perfil" && (
+        <PerfilJugadorForm initial={jugadorApi.jugador?.perfil} email={jugadorApi.jugador?.email} submitLabel="Guardar y seguir"
+          onSave={async (perfil) => { await jugadorApi.savePerfil(perfil); onDone(); }} />
+      )}
+    </Modal>
+  );
+}
+
+/* Datos del jugador: nombre, apellido, WhatsApp y (opcional) fecha de nacimiento */
+function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
+  const [form, setForm] = useState({
+    nombre: initial?.nombre || "", apellido: initial?.apellido || "",
+    telefono: initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  const submit = async () => {
+    const nombre = form.nombre.trim().replace(/\s+/g, " ");
+    const apellido = form.apellido.trim().replace(/\s+/g, " ");
+    const telefono = normalizeArPhone(form.telefono);
+    if (!nombre || !apellido) { setError("Completá nombre y apellido."); return; }
+    if (!telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    setBusy(true); setError("");
+    try {
+      await onSave({ nombre, apellido, telefono, fecha_nacimiento: form.fecha_nacimiento || null });
+    } catch { setError("No se pudieron guardar tus datos. Probá de nuevo."); setBusy(false); }
+  };
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      {email && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email}</span>.</p>}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nombre">Nombre</label>
+          <input id="jug-nombre" autoComplete="given-name" value={form.nombre} onChange={set("nombre")} maxLength={40} className={inputCls} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-apellido">Apellido</label>
+          <input id="jug-apellido" autoComplete="family-name" value={form.apellido} onChange={set("apellido")} maxLength={40} className={inputCls} style={adminInput} />
+        </div>
+      </div>
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
+        <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
+      </div>
+      <div>
+        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nac">Fecha de nacimiento (opcional)</label>
+        <input id="jug-nac" type="date" value={form.fecha_nacimiento} onChange={set("fecha_nacimiento")} min="1920-01-02" className={inputCls} style={adminInput} />
+      </div>
+      <p className="text-xs text-teal-500">Usamos tus datos solo para tus reservas e inscripciones. El complejo donde reservás ve tu nombre y tu WhatsApp. <a href="#privacidad" target="_blank" rel="noopener noreferrer" className="underline text-teal-300">Política de privacidad</a></p>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : submitLabel}</button>
+    </div>
+  );
+}
+
+/* Desvanecido en el borde derecho de una fila que se desliza: avisa que hay más para ver */
+const FADE_RIGHT = "linear-gradient(to right, black 85%, transparent)";
+
+/* "Hoy", "Mañana", "Sáb 11" */
+function etiquetaDiaCorta(fecha, hoy) {
+  if (fecha === hoy) return "Hoy";
+  if (fecha === sumarDias(hoy, 1)) return "Mañana";
+  const [dia, num] = etiquetaFecha(fecha).split(" ");
+  return `${dia.slice(0, 3)} ${num.slice(0, 2)}`;
+}
+
+/* Reservar en un complejo: día, duración, y los horarios de cada cancha (libres y ocupados) */
+function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReservas }) {
+  const hoy = hoyArgentina();
+  const [canchas, setCanchas] = useState(null);
+  const [fecha, setFecha] = useState(inicial?.fecha || hoy);
+  const pendienteInicial = useRef(inicial?.desde != null ? inicial : null); // horario del buscador, a abrir apenas carguen los datos
+  const [duracion, setDuracion] = useState(null);
+  const [ocupado, setOcupado] = useState(null);
+  const [error, setError] = useState("");
+  const [elegido, setElegido] = useState(null); // { cancha, desde }
+  const [pidiendoLogin, setPidiendoLogin] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [pedidoError, setPedidoError] = useState("");
+  const [enviado, setEnviado] = useState(null);
+  const { jugador } = jugadorApi;
+
+  useEffect(() => {
+    supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(venue.id)}&activa=is.true&reserva_online=is.true&order=orden.asc,created_at.asc`)
+      .then((rows) => {
+        setCanchas(rows || []);
+        const durs = DURACIONES.filter((d) => (rows || []).some((c) => duracionesOfrecidas(c).includes(d)));
+        setDuracion(inicial?.duracion && durs.includes(inicial.duracion) ? inicial.duracion : durs.includes(90) ? 90 : durs[0] ?? null);
+      })
+      .catch(() => setError("No se pudieron cargar las canchas. Revisá la conexión."));
+  }, [venue.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadOcupado = useCallback(async () => {
+    try {
+      const rows = await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: fecha });
+      setOcupado((rows || []).map((r) => ({ ...r, estado: "confirmada" })));
+      setError("");
+    } catch { setError("No se pudieron cargar los horarios. Revisá la conexión."); }
+  }, [venue.id, fecha]);
+  useEffect(() => { setOcupado(null); loadOcupado(); }, [loadOcupado]);
+
+  const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
+  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
+  const ahora = Date.now();
+
+  const elegir = (cancha, desde) => {
+    setPedidoError("");
+    setElegido({ cancha, desde });
+    if (!jugador?.perfil) setPidiendoLogin(true);
+  };
+  // Vino del buscador con un horario: se abre la confirmación en la primera cancha libre
+  useEffect(() => {
+    const ini = pendienteInicial.current;
+    if (!ini || !canchas || !ocupado || duracion !== ini.duracion || fecha !== ini.fecha) return;
+    pendienteInicial.current = null;
+    const elegida = ini.canchaId ? canchas.find((c) => c.id === ini.canchaId) : null;
+    const libre = elegida
+      ? (motivoNoEntra(elegida, fecha, ini.desde, duracion, ocupado) === null ? { cancha: elegida, desde: ini.desde } : null)
+      : iniciosLibres(canchas, fecha, duracion, ocupado, { desdeMin: ini.desde }).find((l) => l.desde === ini.desde);
+    if (libre) elegir(libre.cancha, libre.desde);
+    else setError("Ese horario se acaba de ocupar. Elegí otro.");
+  }, [canchas, ocupado, duracion, fecha]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pedir = async () => {
+    setBusy(true); setPedidoError("");
+    try {
+      await supabaseRpc("pedir_turno", { p_cancha: elegido.cancha.id, p_fecha: fecha, p_minuto: elegido.desde, p_duracion: duracion }, await jugadorApi.token());
+      setEnviado(elegido); setElegido(null);
+      loadOcupado();
+    } catch (e) {
+      setPedidoError(pedidoErrorText(e));
+      if (e.code === "ocupado") loadOcupado();
+      if (e.code === "sin_perfil" || e.code === "sin_sesion") setPidiendoLogin(true);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400">← Complejos</button>
+        {jugador && <button type="button" onClick={onMisReservas} className="text-sm text-lime-400 underline">Mis reservas</button>}
+      </div>
+      <h1 className="text-xl sm:text-2xl uppercase" style={{ ...F.display, color: BRAND.ink }}>{venue.name}</h1>
+      <p className="text-sm text-teal-300 mb-5">Elegí el día y el horario. El turno se paga en el complejo.</p>
+
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {canchas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : canchas.length === 0 || duracion == null ? (
+        <p className="text-sm text-teal-300">Este complejo todavía no tiene turnos para reservar online. Escribiles por WhatsApp.</p>
+      ) : (
+        <>
+          <div className="flex gap-2 overflow-x-auto pb-2 mb-3" style={{ scrollbarWidth: "none", WebkitMaskImage: FADE_RIGHT, maskImage: FADE_RIGHT }}>
+            {dias.map((d) => (
+              <button key={d} type="button" onClick={() => setFecha(d)} className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm border ${fecha === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                {etiquetaDiaCorta(d, hoy)}
+              </button>
+            ))}
+          </div>
+          {duraciones.length > 1 && (
+            <div className="flex gap-2 mb-4">
+              {duraciones.map((d) => (
+                <button key={d} type="button" onClick={() => setDuracion(d)} className={`flex-1 px-3 py-2 rounded-lg text-sm border ${duracion === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{d} min</button>
+              ))}
+            </div>
+          )}
+          <p className="text-sm text-teal-200 font-semibold mb-3">{etiquetaFecha(fecha)} · turnos de {duracion} min</p>
+          {ocupado === null ? (
+            !error && <p className="text-sm opacity-60">Cargando horarios…</p>
+          ) : (
+            <div className="space-y-4">
+              {canchas.filter((c) => duracionesOfrecidas(c).includes(duracion)).map((c) => {
+                const inicios = iniciosPosibles(c, duracion).filter((m) => Date.parse(instante(fecha, m)) > ahora);
+                return (
+                  <div key={c.id} className="rounded-xl p-3" style={{ ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.7)" }}>
+                    <div className="flex justify-between items-baseline mb-2">
+                      <h2 className="font-semibold text-teal-100">{c.nombre}</h2>
+                      <span className="text-sm text-lime-400">{formatoPrecio(precioDe(c, duracion))}</span>
+                    </div>
+                    {inicios.length === 0 ? (
+                      <p className="text-sm text-teal-500">No quedan horarios este día.</p>
+                    ) : (
+                      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                        {inicios.map((m) => {
+                          const libre = motivoNoEntra(c, fecha, m, duracion, ocupado) === null;
+                          return libre ? (
+                            <button key={m} type="button" onClick={() => elegir(c, m)} className="px-1 py-2 rounded-lg text-sm font-semibold border border-lime-400 text-lime-400 hover:bg-lime-400/10">{etiquetaHora(m)}</button>
+                          ) : (
+                            <span key={m} className="px-1 py-2 rounded-lg text-sm text-center border border-teal-900 text-teal-700 line-through" aria-label={`${etiquetaHora(m)} ocupado`}>{etiquetaHora(m)}</span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {pidiendoLogin && (
+        <LoginJugadorModal jugadorApi={jugadorApi} onClose={() => { setPidiendoLogin(false); if (!jugadorApi.jugador?.perfil) setElegido(null); }} onDone={() => setPidiendoLogin(false)} />
+      )}
+      {elegido && !pidiendoLogin && jugador?.perfil && (
+        <Modal title="Confirmá tu pedido" onClose={() => setElegido(null)}>
+          <div className="space-y-3 text-sm" style={F.body}>
+            <div className="rounded-lg p-3 space-y-1" style={{ backgroundColor: "rgba(255,255,255,0.04)" }}>
+              <p className="text-base font-semibold text-teal-100">{venue.name} · {elegido.cancha.nombre}</p>
+              <p className="text-teal-200">{etiquetaFecha(fecha)} · {rangoLabel(elegido.desde, elegido.desde + duracion)}</p>
+              <p className="text-lime-400 font-semibold">{formatoPrecio(precioDe(elegido.cancha, duracion))} <span className="text-teal-400 font-normal">(se paga en el complejo)</span></p>
+            </div>
+            <div className="text-teal-300">
+              <p>{jugador.perfil.nombre} {jugador.perfil.apellido} · {formatArPhone(jugador.perfil.telefono)}</p>
+              <p className="text-xs text-teal-500">{jugador.email}</p>
+            </div>
+            <ul className="text-xs text-teal-400 space-y-1 list-disc pl-4">
+              <li>El complejo tiene que confirmar tu pedido. Si no lo confirma en 24 h (o antes del turno), vence y el horario se libera.</li>
+              <li>Si te equivocaste, tenés 30 minutos para cancelarlo. Después, se puede cancelar hasta 24 h antes del turno.</li>
+            </ul>
+            {pedidoError && <p className="text-red-400">{pedidoError}</p>}
+            <button type="button" disabled={busy} onClick={pedir} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Enviando…" : "Pedir turno"}</button>
+          </div>
+        </Modal>
+      )}
+      {enviado && (
+        <Modal title="¡Pedido enviado!" onClose={() => setEnviado(null)}>
+          <div className="space-y-3 text-sm" style={F.body}>
+            <p className="text-teal-200">{venue.name} · {enviado.cancha.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(enviado.desde, enviado.desde + duracion)}</p>
+            <p className="text-teal-300">El complejo tiene que confirmarlo. Podés ver cómo va en <span className="text-teal-100">Mis reservas</span>. Si te equivocaste, tenés 30 minutos para cancelarlo.</p>
+            <div className="flex gap-2">
+              <button type="button" onClick={onMisReservas} className="flex-1 px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver mis reservas</button>
+              <button type="button" onClick={() => setEnviado(null)} className="flex-1 px-4 py-2.5 rounded-lg border border-teal-700 text-teal-200">Seguir mirando</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+const ESTADO_RESERVA = {
+  pendiente: ["Esperando confirmación", "#fbbf24"],
+  confirmada: ["Confirmado", BRAND.lime],
+  rechazada: ["Rechazado por el complejo", "#f87171"],
+  vencida: ["Vencido (el complejo no lo confirmó)", "#94a3b8"],
+  cancelada: ["Cancelado", "#94a3b8"],
+};
+
+/* ¿El jugador puede cancelar esta reserva desde la app? (lo mismo que controla cancelar_mi_reserva) */
+function puedeCancelar(r, ahora = Date.now()) {
+  if (r.estado !== "pendiente" && r.estado !== "confirmada") return false;
+  const inicio = Date.parse(r.inicio);
+  if (inicio <= ahora) return false;
+  return ahora <= Date.parse(r.created_at) + 30 * 60000 || inicio - ahora >= 24 * 3600000;
+}
+
+/* Reservas del jugador logueado: próximas (con cancelar) y anteriores; y sus datos */
+function MisReservas({ jugadorApi, venues, onBack }) {
+  const { jugador } = jugadorApi;
+  const [reservas, setReservas] = useState(null);
+  const [canchas, setCanchas] = useState({});
+  const [error, setError] = useState("");
+  const [cancelandoId, setCancelandoId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [aviso, setAviso] = useState("");
+  const [editando, setEditando] = useState(false);
+  const [entrando, setEntrando] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!jugadorApi.jugador) return;
+    try {
+      const rows = await supabaseTable(`reservas?jugador_id=eq.${jugadorApi.jugador.id}&order=inicio.desc&limit=60`, { accessToken: await jugadorApi.token() });
+      const ids = [...new Set(rows.map((r) => r.cancha_id))];
+      if (ids.length > 0) {
+        const cs = await supabaseTable(`canchas?id=in.(${ids.join(",")})&select=id,nombre`);
+        setCanchas(Object.fromEntries(cs.map((c) => [c.id, c.nombre])));
+      }
+      setReservas(rows); setError("");
+    } catch { setError("No se pudieron cargar tus reservas. Revisá la conexión."); }
+  }, [jugadorApi]);
+  useEffect(() => { load(); }, [load]);
+
+  const cancelar = async (r) => {
+    setBusy(true); setAviso("");
+    try {
+      const res = await supabaseRpc("cancelar_mi_reserva", { p_id: r.id }, await jugadorApi.token());
+      setAviso(res === "avisada" ? "Turno cancelado. El complejo ya lo ve en su agenda." : "Turno cancelado.");
+      setCancelandoId(null);
+      load();
+    } catch (e) { setAviso(pedidoErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  if (!jugador) {
+    return (
+      <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+        <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
+        <p className="text-teal-300 mb-3">Entrá con tu mail para ver tus reservas.</p>
+        <button type="button" onClick={() => setEntrando(true)} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Entrar</button>
+        {entrando && <LoginJugadorModal jugadorApi={jugadorApi} onClose={() => setEntrando(false)} onDone={() => setEntrando(false)} />}
+      </section>
+    );
+  }
+
+  const ahora = Date.now();
+  const proximas = (reservas || []).filter((r) => Date.parse(r.fin) > ahora && (r.estado === "pendiente" || r.estado === "confirmada")).reverse();
+  const anteriores = (reservas || []).filter((r) => !proximas.includes(r));
+  const tarjeta = (r) => {
+    const venue = venues.find((v) => v.id === r.complejo_id);
+    const [label, color] = ESTADO_RESERVA[r.estado] || [r.estado, "#94a3b8"];
+    const desde = minutoEnGrilla(r.fecha, r.inicio);
+    const hasta = minutoEnGrilla(r.fecha, r.fin);
+    const wa = normalizeArPhone(venue?.whatsapp);
+    const activa = (r.estado === "pendiente" || r.estado === "confirmada") && Date.parse(r.inicio) > ahora;
+    return (
+      <article key={r.id} className="rounded-xl p-3 border border-teal-800" style={{ backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <div className="flex justify-between gap-2">
+          <p className="font-semibold text-teal-100">{venue?.name || "Complejo"} · {canchas[r.cancha_id] || "Cancha"}</p>
+          <span className="text-xs shrink-0" style={{ color }}>● {label}</span>
+        </div>
+        <p className="text-sm text-teal-300">{etiquetaFecha(r.fecha)} · {rangoLabel(desde, hasta)}{r.precio != null && ` · ${formatoPrecio(r.precio)}`}</p>
+        {activa && (puedeCancelar(r, ahora) ? (
+          cancelandoId === r.id ? (
+            <p className="text-sm text-red-300 mt-2">¿Cancelar este turno?{" "}
+              <button type="button" disabled={busy} onClick={() => cancelar(r)} className="font-semibold text-red-400">Sí, cancelar</button>{" "}
+              <button type="button" onClick={() => setCancelandoId(null)} className="text-teal-400 ml-2">No</button>
+            </p>
+          ) : (
+            <button type="button" onClick={() => { setCancelandoId(r.id); setAviso(""); }} className="mt-2 text-sm text-red-400">Cancelar turno</button>
+          )
+        ) : (
+          <p className="text-xs text-teal-500 mt-2">
+            Falta menos de 24 h: para cancelarlo, escribile al complejo
+            {wa && <> por <a href={waLink(wa, `Hola, tengo un turno el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchas[r.cancha_id] || "cancha"}) y no voy a poder ir.`)} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">WhatsApp</a></>}.
+          </p>
+        ))}
+      </article>
+    );
+  };
+
+  return (
+    <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
+      <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
+      <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Mis reservas</h1>
+      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email}</p>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {aviso && <p className="text-sm text-lime-400 mb-3">{aviso}</p>}
+      {reservas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : (
+        <>
+          <h2 className="text-xs uppercase tracking-wide text-teal-500 mb-2">Próximas</h2>
+          <div className="space-y-2 mb-6">
+            {proximas.map(tarjeta)}
+            {proximas.length === 0 && <p className="text-sm text-teal-400">No tenés turnos próximos.</p>}
+          </div>
+          {anteriores.length > 0 && (
+            <>
+              <h2 className="text-xs uppercase tracking-wide text-teal-500 mb-2">Anteriores y canceladas</h2>
+              <div className="space-y-2 mb-6 opacity-80">{anteriores.map(tarjeta)}</div>
+            </>
+          )}
+        </>
+      )}
+      <div className="border-t border-teal-900 pt-4 flex flex-wrap gap-4 text-sm">
+        <button type="button" onClick={() => setEditando(true)} className="text-teal-300 underline">Mis datos</button>
+        <button type="button" onClick={() => { jugadorApi.logout(); onBack(); }} className="text-teal-400">Cerrar sesión</button>
+      </div>
+      {editando && (
+        <Modal title="Mis datos" onClose={() => setEditando(false)}>
+          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} submitLabel="Guardar" onSave={async (p) => { await jugadorApi.savePerfil(p); setEditando(false); }} />
+        </Modal>
+      )}
     </section>
   );
 }
@@ -5656,8 +7184,13 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
-function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin }) {
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
+  // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
+  const [reservarId, setReservarId] = useState(null);
+  const [reservarInicial, setReservarInicial] = useState(null); // { fecha, duracion, desde } elegido en el buscador
+  const [misReservas, setMisReservas] = useState(false);
   const [selectedOrgId, setSelectedOrgId] = useState(null);
   const [selectedEventId, setSelectedEventId] = useState(null);
   const [showAll, setShowAll] = useState(false);
@@ -5668,21 +7201,28 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const onRegister = (t) => setRegisteringId(t.id);
   const organizerLabel = (t) => (isInfoOnly(t) ? t.organizerName || null : organizers.find((o) => o.id === t.organizerId)?.name || null);
 
-  const goTab = (key) => { setTab(key); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const goTab = (key) => { setTab(key); setReservarId(null); setMisReservas(false); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
   const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
   const selectedEvent = events.find((e) => e.id === selectedEventId);
   const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
   const [pickingEventRegistration, setPickingEventRegistration] = useState(false);
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
-  const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(STATUS.EN_CURSO); window.scrollTo(0, 0); };
+  const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(defaultStatusFilter(tournaments.filter((t) => t.organizerId === id))); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
   const backLink = (
     <button type="button" onClick={backHome} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al inicio</button>
   );
 
   let body;
-  if (tab === "canchas") {
-    body = <VenuesPublicView venues={venues} />;
+  const reservarVenue = venues.find((v) => v.id === reservarId);
+  const verMisReservas = () => { setReservarId(null); setMisReservas(true); window.scrollTo(0, 0); };
+  const volverAComplejos = () => { setReservarId(null); setMisReservas(false); window.scrollTo(0, 0); };
+  if (tab === "canchas" && misReservas) {
+    body = <MisReservas jugadorApi={jugadorApi} venues={venues} onBack={volverAComplejos} />;
+  } else if (tab === "canchas" && reservarVenue) {
+    body = <ReservarCancha key={reservarVenue.id} venue={reservarVenue} inicial={reservarInicial} jugadorApi={jugadorApi} onBack={volverAComplejos} onMisReservas={verMisReservas} />;
+  } else if (tab === "canchas") {
+    body = <VenuesPublicView venues={venues} complejos={complejos} organizers={organizers} jugador={jugadorApi?.jugador} onReservar={(id, inicial = null) => { setReservarId(id); setReservarInicial(inicial); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
   } else if (selectedEvent && eventTournaments.length > 0) {
@@ -5785,10 +7325,10 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} onGoLogin={onGoLogin} />
+      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
-      <ContactFooter />
+      <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
       {registering && (
         <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
       )}
@@ -5981,20 +7521,22 @@ function CategoryBracketPublicView({ category, format }) {
             renderMatch={(m, ri, mi) => {
               const color = colorOf(ri);
               const w = walked.winners[ri][mi];
-              const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+              // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
+              const jugados = matchIsPlayed(m, format) && !m.walkover ? countedSets(m, format) : [];
+              const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
               const winnerIsA = w == null ? null : w === m.pairA;
               return (
                 <div className="rounded-lg p-3 text-sm" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                   {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} wrap /></div>}
                   <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsA : ""}</span>
+                    {games("a")}
                   </div>
                   <div className={`flex justify-between gap-2 mt-1 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                    <span>{m.walkover ? "" : matchIsPlayed(m, format) ? setsB : ""}</span>
+                    {games("b")}
                   </div>
-                  {matchIsPlayed(m, format) && (
+                  {matchIsPlayed(m, format) && (m.walkover || m.retired) && (
                     <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
                   )}
                 </div>
@@ -6081,7 +7623,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
         )}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-          <Badge status={tournament.status} />
+          <Badge status={tournamentStatusOf(tournament)} />
         </div>
         <p className="text-xs text-teal-500 mt-2" style={F.body}>
           {tournamentTypeSummary(tournament)}
@@ -6160,121 +7702,22 @@ function PublicTournament({ tournament, organizers, onBack }) {
     </CourtNamesContext.Provider>
   );
 }
-function Login({ onLogin, onBack }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState("login"); // login | recuperar
-  const [recoverMsg, setRecoverMsg] = useState("");
-
-  const submit = async () => {
-    if (!email.trim() || !password) { setError("Completá email y contraseña."); return; }
-    setError("");
-    setLoading(true);
-    try {
-      const auth = await supabaseSignIn(email.trim(), password);
-      const orgs = await fetchOrganizers();
-      const profile = orgs.find((o) => o.id === auth.user.id);
-      if (!profile) { setError("Tu cuenta no tiene un perfil de organizador asociado."); setLoading(false); return; }
-      onLogin({ ...profile, ...authFields(auth) });
-    } catch (e) {
-      setError(e.message || "Usuario o contraseña incorrectos.");
-    }
-    setLoading(false);
-  };
-
-  const submitRecover = async () => {
-    if (!email.trim()) { setRecoverMsg("Ingresá tu email."); return; }
-    setRecoverMsg("");
-    setLoading(true);
-    try {
-      await supabaseRequestPasswordReset(email.trim());
-      setRecoverMsg("Si el email existe, te enviamos un correo para restablecer la contraseña.");
-    } catch (e) {
-      setRecoverMsg(e.message || "No pudimos enviar el correo de recuperación.");
-    }
-    setLoading(false);
-  };
-
+/* Entrada única: jugadores, empleados de complejos y organizadores, con mail y contraseña */
+function Login({ jugadorApi, onEntro, onBack, aviso }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   return (
-    <div className="min-h-[75vh] flex items-center justify-center px-6">
+    <div className="min-h-[75vh] flex items-center justify-center px-6 py-8">
       <div className="w-full max-w-sm">
         <div className="flex justify-center mb-8">
           <Logo size={72} withWordmark />
         </div>
-
-        <div className="border border-teal-800 rounded-xl p-7 bg-teal-950/40">
-          {mode === "login" ? (
-            <div>
-              <h1 className="text-lg font-semibold mb-1" style={F.body}>Acceso al panel</h1>
-              <p className="text-sm text-teal-400 mb-6" style={F.body}>Para organizadores y administración de la plataforma.</p>
-
-              <label className="block text-sm mb-1 text-teal-300" style={F.body}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                className="w-full mb-4 px-3 py-2 rounded-md border outline-none focus:border-lime-400 transition" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-              />
-
-              <label htmlFor="login-password" className="block text-sm mb-1 text-teal-300" style={F.body}>Contraseña</label>
-              <div className="relative mb-2">
-                <input
-                  id="login-password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                  className="w-full pl-3 pr-11 py-2 rounded-md border outline-none focus:border-lime-400 transition" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                />
-                {/* Ojo: muestra u oculta lo que se escribió */}
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  aria-pressed={showPassword}
-                  title={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  className="absolute inset-y-0 right-0 px-3 flex items-center text-slate-500 hover:text-slate-800"
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
-                    <circle cx="12" cy="12" r="3" />
-                    {showPassword && <line x1="3" y1="3" x2="21" y2="21" />}
-                  </svg>
-                </button>
-              </div>
-
-              {error && <p className="text-sm text-red-400 mb-2" style={F.body}>{error}</p>}
-
-              <button type="button" onClick={() => { setMode("recuperar"); setRecoverMsg(""); }} className="text-xs text-teal-400 hover:text-lime-400 mb-5 block" style={F.body}>
-                ¿Olvidaste tu contraseña?
-              </button>
-
-              <button type="button" disabled={loading} onClick={submit} className="w-full py-2.5 rounded-md font-semibold transition" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: loading ? 0.6 : 1, ...F.body }}>{loading ? "Ingresando…" : "Ingresar"}</button>
-              <button type="button" onClick={onBack} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al sitio público</button>
-            </div>
-          ) : (
-            <div>
-              <h1 className="text-lg font-semibold mb-1" style={F.body}>Recuperar acceso</h1>
-              <p className="text-sm text-teal-400 mb-6" style={F.body}>Ingresá tu email y te mandamos un link para restablecer la contraseña.</p>
-              <label className="block text-sm mb-1 text-teal-300" style={F.body}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitRecover(); }}
-                className="w-full mb-4 px-3 py-2 rounded-md border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-              />
-              {recoverMsg && <p className="text-sm text-lime-400 mb-3" style={F.body}>{recoverMsg}</p>}
-              <button type="button" disabled={loading} onClick={submitRecover} className="w-full py-2.5 rounded-md font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: loading ? 0.6 : 1, ...F.body }}>{loading ? "Enviando…" : "Enviar solicitud"}</button>
-              <button type="button" onClick={() => setMode("login")} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver a ingresar</button>
-            </div>
-          )}
+        <div className="border border-teal-800 rounded-xl p-6 bg-teal-950/40">
+          <h1 className="text-lg font-semibold mb-1" style={F.body}>Tu cuenta</h1>
+          <p className="text-sm text-teal-400 mb-4" style={F.body}>{conCuentas ? "Con tu cuenta reservás turnos en cualquier complejo. Si trabajás en uno u organizás torneos, también entrás a tu panel." : "Entrá con el mail y la contraseña de tu cuenta de organizador."}</p>
+          {aviso && <p className="text-sm text-lime-400 mb-3" style={F.body}>{aviso}</p>}
+          <CuentaForm jugadorApi={jugadorApi} onEntro={onEntro} />
         </div>
+        <button type="button" onClick={onBack} className="w-full mt-4 text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al sitio</button>
       </div>
     </div>
   );
@@ -6285,7 +7728,7 @@ function Login({ onLogin, onBack }) {
 /* Campo de imagen: permite elegir un archivo desde la compu o la galería del celular
    (el input type="file" con accept="image/*" abre la cámara/galería en mobile automáticamente),
    lo sube a Supabase Storage y guarda la URL pública resultante mediante onChange. */
-function ImageUploadField({ label, value, onChange, accessToken, folder }) {
+function ImageUploadField({ label, value, onChange, accessToken, folder, maxAncho = null, ancha = false }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef(null);
@@ -6297,7 +7740,7 @@ function ImageUploadField({ label, value, onChange, accessToken, folder }) {
     setUploading(true);
     setError("");
     try {
-      const url = await uploadImageToSupabase(file, accessToken, folder);
+      const url = await uploadImageToSupabase(file, accessToken, folder, { maxAncho });
       onChange(url);
     } catch (err) {
       setError(err.message || "No se pudo subir la imagen.");
@@ -6328,7 +7771,7 @@ function ImageUploadField({ label, value, onChange, accessToken, folder }) {
       </div>
       {error && <p className="text-xs text-red-400 mt-1" style={F.body}>{error}</p>}
       {value && (
-        <img src={value} alt="" className="mt-2 w-16 h-16 rounded object-cover border border-teal-700" />
+        <img src={value} alt="" className={`mt-2 rounded object-cover border border-teal-700 ${ancha ? "w-full max-w-sm aspect-[21/9]" : "w-16 h-16"}`} />
       )}
       <input
         value={value}
@@ -6353,8 +7796,8 @@ function NewOrganizerForm({ onCreate }) {
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
 
   const submit = async () => {
-    if (!name.trim() || !username.trim() || !email.trim() || password.length < 6) {
-      setError("Completá todos los campos (la contraseña necesita al menos 6 caracteres).");
+    if (!name.trim() || !username.trim() || !email.trim() || password.length < 8) {
+      setError("Completá todos los campos (la contraseña necesita al menos 8 caracteres).");
       return;
     }
     setSaving(true);
@@ -6396,7 +7839,7 @@ function NewOrganizerForm({ onCreate }) {
       </button>
       {error && <p className="text-xs text-red-400 mt-2" style={F.body}>{error}</p>}
       {okMsg && <p className="text-xs text-lime-400 mt-2" style={F.body}>{okMsg}</p>}
-      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "¿Olvidaste tu contraseña?" en el login.</p>
+      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "Olvidé mi contraseña" en el login.</p>
     </div>
   );
 }
@@ -6479,7 +7922,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
             <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={accessToken} folder="logos" />
           </div>
           <div className="min-w-[220px]">
-            <ImageUploadField label="Foto de portada" value={profileCover} onChange={setProfileCover} accessToken={accessToken} folder="covers" />
+            <ImageUploadField label="Foto de portada" value={profileCover} onChange={setProfileCover} accessToken={accessToken} folder="covers" maxAncho={1600} ancha />
           </div>
           <button type="button" disabled={saving} onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f", opacity: saving ? 0.6 : 1 }}>
             {saving ? "Guardando…" : "Guardar"}
@@ -6491,11 +7934,13 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
   );
 }
 
-function AdRow({ ad, onUpdate, onDelete, accessToken }) {
+function AdRow({ ad, onUpdate, onDelete, accessToken, cliente, clics, oculta }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(ad.name);
   const [imageUrl, setImageUrl] = useState(ad.imageUrl);
   const [linkUrl, setLinkUrl] = useState(ad.linkUrl);
+  const [desde, setDesde] = useState(ad.desde || "");
+  const [hasta, setHasta] = useState(ad.hasta || "");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
@@ -6509,10 +7954,14 @@ function AdRow({ ad, onUpdate, onDelete, accessToken }) {
         <ImageUploadField value={imageUrl} onChange={setImageUrl} accessToken={accessToken} folder="ads" />
         <label className="block text-xs text-teal-400" style={F.body}>URL de destino (a dónde va si lo tocan)</label>
         <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
+        <div className="flex flex-wrap gap-3">
+          <label className="text-xs text-teal-400" style={F.body}>Se muestra desde <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+          <label className="text-xs text-teal-400" style={F.body}>hasta (vacío = sin fin) <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+        </div>
         <div className="flex gap-2 pt-1">
           <button
             type="button"
-            onClick={() => { if (name.trim() && imageUrl.trim()) { onUpdate({ ...ad, name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim() }); setEditing(false); } }}
+            onClick={() => { if (name.trim() && imageUrl.trim()) { const { desde: _d, hasta: _h, ...resto } = ad; onUpdate({ ...resto, name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), ...(desde ? { desde } : {}), ...(hasta ? { hasta } : {}) }); setEditing(false); } }}
             className="px-3 py-1.5 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
           >
             Guardar
@@ -6533,6 +7982,12 @@ function AdRow({ ad, onUpdate, onDelete, accessToken }) {
       <div className="flex-1 min-w-0">
         <p className="font-medium truncate" style={F.body}>{ad.name}</p>
         <p className="text-xs text-teal-500 truncate" style={F.body}>{ad.linkUrl || "Sin link de destino"}</p>
+        <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px]" style={F.body}>
+          {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente: cargalo en Caja → Clientes para cobrarle</span>}
+          {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
+          <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
+          {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+        </div>
       </div>
       <label className="flex items-center gap-1 text-xs text-teal-300" style={F.body}>
         <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} />
@@ -6555,12 +8010,25 @@ function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
   const [name, setName] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
+  // El cliente de cada publicidad (Caja de la plataforma) y sus clics del mes y en total
+  const [clientes, setClientes] = useState([]);
+  const [clics, setClics] = useState([]);
+  useEffect(() => {
+    let vivo = true;
+    supabaseTable("plataforma_clientes?tipo=eq.publicidad", { accessToken }).then((r) => { if (vivo) setClientes(r || []); }).catch(() => {});
+    supabaseRpc("clics_publicidades", { p_desde: `${hoyArgentina().slice(0, 7)}-01` }, accessToken).then((r) => { if (vivo) setClics(r || []); }).catch(() => {});
+    return () => { vivo = false; };
+  }, [accessToken, ads.length]);
+  const clienteDe = (ad) => clientes.find((c) => c.ref_id === ad.id);
+  const ocultasPorCliente = clientes.filter((c) => c.ref_id && (!c.activo || PLAN_BLOQUEA.includes(estadoCliente(c, hoyArgentina()).estado))).map((c) => c.ref_id);
   const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
 
   const submit = () => {
     if (!name.trim() || !imageUrl.trim()) return;
-    onAdd({ name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), active: true });
-    setName(""); setImageUrl(""); setLinkUrl("");
+    onAdd({ name: name.trim(), imageUrl: imageUrl.trim(), linkUrl: linkUrl.trim(), active: true, ...(desde ? { desde } : {}), ...(hasta ? { hasta } : {}) });
+    setName(""); setImageUrl(""); setLinkUrl(""); setDesde(""); setHasta("");
   };
 
   return (
@@ -6580,13 +8048,17 @@ function AdManager({ ads, onAdd, onUpdate, onDelete, accessToken }) {
             <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={inputStyle} placeholder="https://..." />
           </div>
         </div>
+        <div className="flex flex-wrap gap-3 mb-3">
+          <label className="text-xs text-teal-400" style={F.body}>Se muestra desde (opcional) <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+          <label className="text-xs text-teal-400" style={F.body}>hasta (opcional) <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="block mt-1 px-2 py-1.5 rounded border text-sm" style={inputStyle} /></label>
+        </div>
         <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar anuncio</button>
-        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>La imagen se muestra en la home pública y dentro de cada torneo, rotando junto con el resto de los anuncios activos.</p>
+        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>La imagen se muestra en la home pública y dentro de cada torneo, rotando junto con el resto de los anuncios activos. Se oculta sola fuera de su vigencia o si su cliente (Caja → Clientes, tipo Publicidad) queda vencido, suspendido o de baja, y vuelve cuando le cobrás.</p>
       </div>
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Anuncios cargados</h2>
       <div className="space-y-3">
-        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} accessToken={accessToken} />)}
+        {ads.map((ad) => <AdRow key={ad.id} ad={ad} onUpdate={onUpdate} onDelete={onDelete} accessToken={accessToken} cliente={clienteDe(ad)} clics={clics.find((k) => k.ad_id === ad.id)} oculta={motivoPublicidadOculta(ad, hoyArgentina(), ocultasPorCliente)} />)}
         {ads.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no cargaste ningún anuncio.</p>}
       </div>
     </div>
@@ -6614,7 +8086,7 @@ function InfoTournamentForm({ initial, onSave, onCancel, accessToken }) {
     if (new Set(days.map((d) => d.date)).size !== days.length) { setError("Hay un día repetido."); return; }
     onSave({
       // Mismo objeto que un torneo gestionado, sin organizador ni categorías
-      ...(initial || { status: STATUS.PROXIMO, circuitId: null, organizerId: null, categories: [], matchFormat: { ...DEFAULT_MATCH_FORMAT } }),
+      ...(initial || { status: STATUS.PROXIMO, publico: false, circuitId: null, organizerId: null, categories: [], matchFormat: { ...DEFAULT_MATCH_FORMAT } }),
       id: initial?.id || uid(),
       infoOnly: true,
       name: name.trim(),
@@ -6728,20 +8200,47 @@ function DirectoryRow({ title, subtitle, imageUrl, onEdit, onDelete }) {
 }
 
 /* Pestaña "Complejos" del creador: ficha nueva arriba (o la que se está editando) y listado abajo */
-function VenueManager({ venues, onSave, onDelete, accessToken }) {
+function VenueManager({ venues, onSave, onDelete, accessToken, organizers = [], complejos = [], onSaveComplejo }) {
   const empty = { name: "", logoUrl: "", instagram: "", address: "", whatsapp: "" };
   const [form, setForm] = useState(empty);
+  // Panel del complejo: la cuenta del dueño, si está habilitado y qué módulos usa (tabla complejos, aparte de la ficha)
+  const reservaVacia = { duenoId: "", habilitada: false, torneos: true, reservas: true, cantina: true };
+  const [reserva, setReserva] = useState(reservaVacia);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
   const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
+  const owners = organizers.filter((o) => o.role !== "creador").sort((a, b) => a.name.localeCompare(b.name, "es"));
 
-  const submit = () => {
+  const submit = async () => {
     if (!form.name.trim()) { setError("Poné el nombre del complejo."); return; }
     if (form.whatsapp.trim() && !normalizeArPhone(form.whatsapp)) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
-    onSave({ id: editingId || uid(), ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
-    setForm(empty); setEditingId(null); setError("");
+    if (reserva.habilitada && !reserva.duenoId) { setError("Para habilitar el panel del complejo, elegí la cuenta del dueño."); return; }
+    if (reserva.habilitada && !reserva.torneos && !reserva.reservas && !reserva.cantina) { setError("Marcá al menos un módulo."); return; }
+    const id = editingId || uid();
+    onSave({ id, ...Object.fromEntries(Object.entries(form).map(([k, v]) => [k, String(v).trim()])) });
+    const before = complejos.find((c) => c.id === id);
+    if (before || reserva.duenoId || reserva.habilitada) {
+      try {
+        await onSaveComplejo({ id, dueno_id: reserva.duenoId || null, reservas_habilitadas: reserva.habilitada, modulo_torneos: reserva.torneos, modulo_reservas: reserva.reservas, modulo_cantina: reserva.cantina });
+      } catch (e) {
+        setError(`La ficha se guardó, pero no el panel del complejo: ${reservaErrorText(e)}`);
+        return;
+      }
+    }
+    setForm(empty); setReserva(reservaVacia); setEditingId(null); setError("");
   };
-  const edit = (v) => { setForm({ ...empty, ...v }); setEditingId(v.id); setError(""); window.scrollTo(0, 0); };
+  const edit = (v) => {
+    const c = complejos.find((x) => x.id === v.id);
+    setForm({ ...empty, ...v }); setReserva({ duenoId: c?.dueno_id || "", habilitada: !!c?.reservas_habilitadas, torneos: c?.modulo_torneos !== false, reservas: c?.modulo_reservas !== false, cantina: c?.modulo_cantina !== false });
+    setEditingId(v.id); setError(""); window.scrollTo(0, 0);
+  };
+  const reservaLabel = (v) => {
+    const c = complejos.find((x) => x.id === v.id);
+    if (!c?.reservas_habilitadas) return v.address;
+    const owner = organizers.find((o) => o.id === c.dueno_id);
+    const modulos = [c.modulo_torneos !== false && "Torneos", c.modulo_reservas !== false && "Reservas", c.modulo_cantina !== false && "Cantina"].filter(Boolean).join(", ");
+    return [v.address, `Panel: ${owner?.name || "sin dueño"} (${modulos})`].filter(Boolean).join(" · ");
+  };
 
   return (
     <div style={F.body}>
@@ -6766,16 +8265,41 @@ function VenueManager({ venues, onSave, onDelete, accessToken }) {
           </div>
           <ImageUploadField label="Logo" value={form.logoUrl} onChange={(url) => setForm((f) => ({ ...f, logoUrl: url }))} accessToken={accessToken} folder="venues" />
         </div>
+        <div className="border-t border-teal-900 pt-3 mb-3 grid gap-3 sm:grid-cols-2 items-end">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Dueño (cuenta que maneja el complejo)</label>
+            <select value={reserva.duenoId} onChange={(e) => setReserva({ ...reserva, duenoId: e.target.value })} className="w-full px-3 py-2 rounded border text-sm" style={adminInput}>
+              <option value="">Sin dueño</option>
+              {owners.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-teal-200 py-2">
+            <input type="checkbox" checked={reserva.habilitada} onChange={(e) => setReserva({ ...reserva, habilitada: e.target.checked })} />
+            Panel del complejo habilitado
+          </label>
+          {reserva.habilitada && (
+            <div className="sm:col-span-2">
+              <p className="text-xs text-teal-400 mb-1">Qué usa (el dueño y sus empleados ven solo esto)</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1">
+                {[["torneos", "Torneos"], ["reservas", "Reservas de canchas"], ["cantina", "Cantina"]].map(([k, label]) => (
+                  <label key={k} className="flex items-center gap-2 text-sm text-teal-200">
+                    <input type="checkbox" checked={reserva[k]} onChange={(e) => setReserva({ ...reserva, [k]: e.target.checked })} /> {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
         {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
         <div className="flex gap-3 items-center">
           <button type="button" onClick={submit} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>{editingId ? "Guardar cambios" : "Agregar complejo"}</button>
-          {editingId && <button type="button" onClick={() => { setForm(empty); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
+          {editingId && <button type="button" onClick={() => { setForm(empty); setReserva(reservaVacia); setEditingId(null); setError(""); }} className="text-sm text-teal-400">Cancelar</button>}
         </div>
       </div>
 
       <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Complejos cargados</h2>
       <div className="space-y-2">
-        {venues.map((v) => <DirectoryRow key={v.id} title={v.name} subtitle={v.address} imageUrl={v.logoUrl} onEdit={() => edit(v)} onDelete={() => onDelete(v.id)} />)}
+        {venues.map((v) => <DirectoryRow key={v.id} title={v.name} subtitle={reservaLabel(v)} imageUrl={v.logoUrl} onEdit={() => edit(v)} onDelete={() => onDelete(v.id)} />)}
         {venues.length === 0 && <p className="opacity-60 text-sm">Todavía no cargaste ningún complejo.</p>}
       </div>
     </div>
@@ -6848,10 +8372,10 @@ function CoachManager({ coaches, onSave, onDelete, accessToken }) {
 
 /* Fila de torneo en el panel del creador. Los gestionados son de solo lectura + eliminar (la
    edición es tarea del organizador); los informativos los carga el creador y se pueden editar. */
-function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
+function CreatorTournamentRow({ t, organizerName, onDelete, onEdit, onTogglePublico }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const info = isInfoOnly(t);
-  const totalPairs = t.categories.reduce((sum, c) => sum + c.pairs.length, 0);
+  const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
   return (
     <div className="border border-teal-800 rounded-lg p-3 flex justify-between items-center flex-wrap gap-2">
       <div>
@@ -6864,6 +8388,12 @@ function CreatorTournamentRow({ t, organizerName, onDelete, onEdit }) {
         </p>
       </div>
       <div className="flex items-center gap-3">
+        {onTogglePublico && (
+          <button type="button" onClick={() => onTogglePublico(t)} aria-pressed={esPublico(t)} title={esPublico(t) ? "Se ve en la página pública. Tocá para ocultarlo." : "No se ve en la página pública. Tocá para publicarlo."}
+            className="text-xs px-2.5 py-1 rounded-full border font-semibold" style={{ ...F.body, ...(esPublico(t) ? { borderColor: "#9fe02299", color: "#9fe022" } : { borderColor: "#64748b", color: "#94a3b8" }) }}>
+            {esPublico(t) ? "● Público" : "○ No público"}
+          </button>
+        )}
         <Badge status={tournamentStatusOf(t)} />
         {info && onEdit && <button type="button" onClick={() => onEdit(t)} className="text-sm text-teal-300" style={F.body}>Editar</button>}
         {!confirmingDelete ? (
@@ -7032,39 +8562,104 @@ function BackupManager({ organizers, tournaments, circuits, ads, venues, coaches
   );
 }
 
-function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout }) {
+/* Funciones en prueba (ver 20261037_funciones.sql): se publican apagadas y se prenden acá cuando
+   están probadas. Apagadas no se ven en la página ni en los paneles, y la base no las acepta. */
+const FUNCIONES_INFO = [
+  ["reservas", "Reservas de canchas", "Reservá tu cancha y buscador de turnos en la página, agenda del complejo, turnos fijos y clases."],
+  ["cuentas", "Cuentas y empleados", "Botón Ingresar / Mi cuenta para jugadores, crear cuenta y empleados de los complejos. Para que los jugadores puedan crearse una cuenta, además hay que prender \"Allow new users to sign up\" en Supabase (Authentication › Sign In / Providers)."],
+  ["cantina", "Cantina, caja y gestión", "Mostrador, cuentas (fiado), productos y stock, compras, Caja, Caja del día, Clientes y Reportes, y \"+ Consumo\" en los cobros de los torneos."],
+];
+function FuncionesManager({ accessToken, onCambio }) {
+  const [filas, setFilas] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(null);
+  const [confirmando, setConfirmando] = useState(null);
+
+  const load = useCallback(async () => {
+    try { setFilas((await supabaseTable("funciones?select=clave,activa,cambiada_at", { accessToken })) || []); setError(""); }
+    catch { setError("No se pudieron cargar las funciones. ¿Ya se corrió la migración 20261037_funciones.sql?"); }
+  }, [accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const cambiar = async (clave, activa) => {
+    setBusy(clave); setError("");
+    try {
+      await supabaseTable(`funciones?clave=eq.${clave}`, { method: "PATCH", body: { activa }, accessToken, prefer: "return=minimal" });
+      setConfirmando(null);
+      await load();
+      onCambio?.(await fetchFunciones());
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="space-y-4 text-sm max-w-2xl" style={F.body}>
+      <p className="text-teal-300">Secciones publicadas pero apagadas mientras las probás. Apagadas, nadie las ve (ni los organizadores ni el público) y la base no deja cargar nada de ellas. Al prenderlas aparecen para todos enseguida, sin volver a publicar.</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {filas === null ? (!error && <p className="opacity-60">Cargando…</p>) : FUNCIONES_INFO.map(([clave, titulo, detalle]) => {
+        const fila = filas.find((x) => x.clave === clave);
+        const activa = !!fila?.activa;
+        return (
+          <div key={clave} className="rounded-xl border p-4" style={{ borderColor: activa ? `${BRAND.lime}66` : "#1f3a44", backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-semibold text-teal-100">{titulo}</p>
+                <p className="text-xs" style={{ color: activa ? BRAND.lime : "#94a3b8" }}>{activa ? "Prendida: la ve todo el mundo" : "Apagada: no la ve nadie"}{fila?.cambiada_at ? ` · desde el ${fechaCorta(fechaArgentina(fila.cambiada_at))}` : ""}</p>
+              </div>
+              {confirmando === clave ? (
+                <span className="text-teal-200">{activa ? "¿Apagarla?" : "¿Prenderla para todos?"}
+                  <button type="button" disabled={!!busy} onClick={() => cambiar(clave, !activa)} className="ml-2 font-semibold" style={{ color: activa ? "#f87171" : BRAND.lime }}>Sí</button>
+                  <button type="button" onClick={() => setConfirmando(null)} className="ml-2 text-teal-400">No</button>
+                </span>
+              ) : (
+                <button type="button" disabled={!fila || !!busy} onClick={() => setConfirmando(clave)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={activa ? { border: "1px solid #f8717166", color: "#f87171" } : { backgroundColor: BRAND.lime, color: "#14181f" }}>{activa ? "Apagar" : "Prender"}</button>
+              )}
+            </div>
+            <p className="text-xs text-teal-400 mt-2">{detalle}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, coaches, events, complejos, onSaveComplejo, onUpdateOrganizer, onCreateOrganizer, onDeleteOrganizer, onDeleteTournament, onSaveInfoTournament, onDeleteCircuit, onAddAd, onUpdateAd, onDeleteAd, onSaveVenue, onDeleteVenue, onSaveCoach, onDeleteCoach, onRestoreBackup, onLogout, onMiCuenta, onFunciones }) {
   const [tab, setTab] = useState("organizadores"); // organizadores | publicidad | torneos | canchas | profes | circuitos | respaldo
   const [infoForm, setInfoForm] = useState(null); // null | "nuevo" | torneo informativo que se está editando
 
   const staff = organizers.filter((o) => o.role !== "creador");
   const organizerName = (id) => organizers.find((o) => o.id === id)?.name || "Organizador";
 
+  // El mismo panel que los organizadores: menú al costado (en el celular, ☰)
+  const grupos = [
+    { titulo: "Plataforma", items: [["organizadores", "Organizadores", "clientes"], ["canchas", "Complejos", "complejos"], ["profes", "Entrenamientos", "clases"]] },
+    { titulo: "Contenido", items: [["torneos", "Torneos", "torneos"], ["circuitos", "Circuitos", "circuitos"], ["publicidad", "Publicidad", "publicidad"]] },
+    { titulo: "Gestión", items: [["caja", "Caja", "caja"], ["funciones", "Funciones", "funciones"], ["respaldo", "Respaldo", "respaldo"]] },
+  ];
+  const titulo = grupos.flatMap((g) => g.items).find(([k]) => k === tab)?.[1] || "Panel";
+
   return (
-    <div className="px-6 py-8 max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-xl" style={F.display}>ADMINISTRACIÓN — {creator.name.toUpperCase()}</h1>
-        <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
-      </div>
-
-      <div className="flex gap-2 mb-6 flex-wrap">
-        {[["organizadores", "Organizadores"], ["publicidad", "Publicidad"], ["torneos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["circuitos", "Circuitos"], ["respaldo", "Respaldo"]].map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={`px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "publicidad" ? (
+    <PanelLayout
+      nombre={creator.name}
+      logoUrl={creator.logoUrl}
+      subtitulo="Administración de la plataforma"
+      grupos={grupos}
+      activa={tab}
+      onElegir={(key) => { setTab(key); setInfoForm(null); }}
+      onLogout={onLogout}
+      onMiCuenta={onMiCuenta}
+      titulo={titulo}
+    >
+      {tab === "caja" ? (
+        <CajaPlataforma accessToken={creator.accessToken} ads={ads} organizers={organizers} coaches={coaches} venues={venues} />
+      ) : tab === "funciones" ? (
+        <FuncionesManager accessToken={creator.accessToken} onCambio={onFunciones} />
+      ) : tab === "publicidad" ? (
         <AdManager ads={ads} onAdd={onAddAd} onUpdate={onUpdateAd} onDelete={onDeleteAd} accessToken={creator.accessToken} />
       ) : tab === "respaldo" ? (
         <BackupManager organizers={organizers} tournaments={tournaments} circuits={circuits} ads={ads} venues={venues} coaches={coaches} events={events} onRestore={onRestoreBackup} />
       ) : tab === "canchas" ? (
-        <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} />
+        <VenueManager venues={venues} onSave={onSaveVenue} onDelete={onDeleteVenue} accessToken={creator.accessToken} organizers={organizers} complejos={complejos} onSaveComplejo={onSaveComplejo} />
       ) : tab === "profes" ? (
         <CoachManager coaches={coaches} onSave={onSaveCoach} onDelete={onDeleteCoach} accessToken={creator.accessToken} />
       ) : tab === "torneos" ? (
@@ -7085,7 +8680,7 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
           <p className="text-sm text-teal-400 mb-4" style={F.body}>Todos los torneos de la plataforma, de cualquier organizador, más los informativos que cargás vos. Los de los organizadores podés eliminarlos si hace falta; editarlos sigue siendo tarea de cada organizador.</p>
           <div className="space-y-2">
             {tournaments.map((t) => (
-              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} onEdit={(it) => { setInfoForm(it); window.scrollTo(0, 0); }} />
+              <CreatorTournamentRow key={t.id} t={t} organizerName={organizerName(t.organizerId)} onDelete={onDeleteTournament} onEdit={(it) => { setInfoForm(it); window.scrollTo(0, 0); }} onTogglePublico={(it) => onSaveInfoTournament({ ...it, publico: !esPublico(it) })} />
             ))}
             {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no hay torneos cargados.</p>}
           </div>
@@ -7120,11 +8715,18 @@ function CreatorHome({ creator, organizers, tournaments, circuits, ads, venues, 
           </div>
         </>
       )}
-    </div>
+    </PanelLayout>
   );
 }
 
-function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, pendingCount = 0 }) {
+function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, accessToken, pendingCount = 0, puedeEditar = true, puedeBorrar = true }) {
+  // Duplicar para la fecha siguiente: nombre y fecha (por defecto, una semana después)
+  const [duplicando, setDuplicando] = useState(null); // { name, date }
+  const crearCopia = () => {
+    if (!duplicando.name.trim() || !duplicando.date) return;
+    onDuplicate(duplicarTorneo(t, { name: duplicando.name.trim(), date: duplicando.date, estado: STATUS.PROXIMO, nuevoId: uid }));
+    setDuplicando(null);
+  };
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(t.name);
   const [date, setDate] = useState(t.date);
@@ -7199,10 +8801,10 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
     );
   }
 
-  const totalPairs = t.categories.reduce((sum, c) => sum + c.pairs.length, 0);
+  const totalPairs = t.categories.reduce((sum, c) => sum + categoryPairsCount(c), 0);
   const bracketsGenerated = t.categories.filter((c) => c.bracket).length;
   const circuit = (circuits || []).find((c) => c.id === t.circuitId);
-  const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[t.status];
+  const accent = { [STATUS.EN_CURSO]: "#9fe022", [STATUS.PROXIMO]: "#38bdf8", [STATUS.FINALIZADO]: "#64748b" }[tournamentStatusOf(t)];
 
   return (
     <div className="p-4 rounded-lg transition" style={{ backgroundColor: accent + "0d", border: `1px solid ${accent}33`, borderLeft: `3px solid ${accent}` }}>
@@ -7213,7 +8815,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
           )}
           <div>
             <span style={F.body} className="block font-medium">{t.name}</span>
-            <span className="text-xs text-teal-500" style={F.body}>
+            <span className="block text-xs text-teal-500" style={F.body}>
               {new Date(t.date + "T00:00:00").toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })}
               {" · "}{t.categories.length} categoría{t.categories.length !== 1 ? "s" : ""}
               {" · "}{totalPairs} pareja{totalPairs !== 1 ? "s" : ""}
@@ -7221,7 +8823,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
               {t.venue ? ` · ${t.venue}` : ""}
             </span>
             <span className="inline-block mt-1 mr-1"><TournamentTypeTag tournament={t} /></span>
-            {t.inscripcionesAbiertas && <span className="inline-block mt-1 mr-1"><OpenRegistrationsBadge tournament={t} /></span>}
+            {withAutoStatus(t).inscripcionesAbiertas && <span className="inline-block mt-1 mr-1"><OpenRegistrationsBadge tournament={t} /></span>}
             {pendingCount > 0 && (
               <span className="inline-block mt-1 mr-1 px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold" style={{ ...F.body, backgroundColor: "#fb923c", color: "#14181f" }}>
                 {pendingCount} {pendingCount === 1 ? "nueva" : "nuevas"}
@@ -7230,7 +8832,10 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
             {circuit && <span className="inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full border border-lime-800 text-lime-400" style={F.body}>Fecha de: {circuit.name}</span>}
           </div>
         </div>
-        <Badge status={t.status} />
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <Badge status={tournamentStatusOf(t)} />
+          {!esPublico(t) && <span className="text-[10px] px-2 py-0.5 rounded-full border border-slate-600 text-slate-400" style={F.body} title="No se ve en la página pública: se publica en Configuración">○ No público</span>}
+        </div>
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -7240,11 +8845,12 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
           className="px-4 py-2 rounded font-semibold text-sm"
           style={{ backgroundColor: "#9fe022", color: "#14181f" }}
         >
-          Cargar parejas y grupos →
+          {puedeEditar ? "Cargar parejas y grupos →" : "Cargar resultados →"}
         </button>
         <div className="flex gap-3 items-center">
-          <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>
-          {!confirmingDelete ? (
+          {puedeEditar && <button type="button" onClick={startEditing} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar datos e inscripciones</button>}
+          {puedeEditar && onDuplicate && !duplicando && <button type="button" onClick={() => setDuplicando({ name: nombreSiguiente(t.name), date: t.date ? sumarDias(t.date, 7) : hoyArgentina() })} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Duplicar</button>}
+          {!puedeBorrar ? null : !confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
             <span className="text-sm">
@@ -7254,6 +8860,19 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, accessToken, p
           )}
         </div>
       </div>
+      {duplicando && (
+        <div className="mt-3 rounded-lg border border-teal-700 p-3 space-y-2 text-sm" style={F.body}>
+          <p className="text-teal-200">Se copia todo el armado (tipo, categorías, cupos, precios, sedes, días y horarios, circuito y portada), sin parejas ni resultados. Las inscripciones quedan cerradas hasta que las abras.</p>
+          <div className="flex flex-wrap gap-2">
+            <input value={duplicando.name} onChange={(e) => setDuplicando({ ...duplicando, name: e.target.value })} aria-label="Nombre de la copia" className="flex-1 min-w-[12rem] px-3 py-2 rounded border" style={adminInput} />
+            <input type="date" value={duplicando.date} onChange={(e) => setDuplicando({ ...duplicando, date: e.target.value })} aria-label="Fecha de la copia" className="px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={!duplicando.name.trim() || !duplicando.date} onClick={crearCopia} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Crear copia</button>
+            <button type="button" onClick={() => setDuplicando(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -7683,85 +9302,1658 @@ function EventManager({ events, tournaments, onSave, onDelete, onUpdateTournamen
   );
 }
 
-function AdminHome({ organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onOpen, onLogout, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones }) {
-  const [tab, setTab] = useState("torneos"); // torneos | circuitos
+/* ---------- Panel del organizador / dueño: menú lateral e Inicio ---------- */
+
+/* Íconos del menú (trazos simples, toman el color del texto) */
+const PANEL_ICONOS = {
+  inicio: "M3 11l9-7 9 7M5 10v10h5v-6h4v6h5V10",
+  mostrador: "M3 4h2l2.4 11h10.2L20 8H6.2M9 20a1 1 0 100-2 1 1 0 000 2zM17 20a1 1 0 100-2 1 1 0 000 2z",
+  productos: "M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5",
+  reservas: "M4 6h16v14H4zM4 10h16M8 3v5M16 3v5",
+  consumos: "M6 8h12l-1.5 12h-9zM9 8V6a3 3 0 016 0v2",
+  torneos: "M8 4h8v5a4 4 0 01-8 0zM8 6H5a3 3 0 003 4M16 6h3a3 3 0 01-3 4M12 13v4M8 20h8",
+  caja: "M3 7h18v12H3zM3 11h18M7 15h3",
+  perfil: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
+  salir: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11",
+  cajadia: "M4 8h16v11H4zM8 8V5h8v3M12 12v3M10 13.5h4",
+  clientes: "M9 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 6.5M18 14a6.5 6.5 0 013.5 6",
+  reportes: "M4 20V10M10 20V4M16 20v-7M22 20H2",
+  clases: "M2 9l10-5 10 5-10 5zM6 11v5c3 2 9 2 12 0v-5M22 9v6",
+  compras: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM17 19a1.5 1.5 0 100-3 1.5 1.5 0 000 3z",
+  complejos: "M3 21h18M5 21V8l7-4 7 4v13M9 21v-5h6v5M9 11h.01M15 11h.01",
+  circuitos: "M6 19a2 2 0 100-4 2 2 0 000 4zM18 9a2 2 0 100-4 2 2 0 000 4zM6 15V9a4 4 0 014-4h6M18 9v6a4 4 0 01-4 4H8",
+  publicidad: "M3 10v4h3l6 4V6L6 10zM16 9a4 4 0 010 6M19 6a8 8 0 010 12",
+  respaldo: "M12 3v12M7 10l5 5 5-5M4 17v3h16v-3",
+  funciones: "M4 8h10M18 8h2M4 16h2M10 16h10M16 6v4M8 14v4",
+  menu: "M4 7h16M4 12h16M4 17h16",
+  cerrar: "M6 6l12 12M18 6L6 18",
+};
+function PanelIcono({ nombre, className = "w-5 h-5" }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={PANEL_ICONOS[nombre]} />
+    </svg>
+  );
+}
+
+/* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
+   botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, children }) {
+  const [abierto, setAbierto] = useState(false);
+  useEffect(() => {
+    if (!abierto) return;
+    const cerrar = (e) => { if (e.key === "Escape") setAbierto(false); };
+    window.addEventListener("keydown", cerrar);
+    return () => window.removeEventListener("keydown", cerrar);
+  }, [abierto]);
+  const elegir = (clave) => { onElegir(clave); setAbierto(false); window.scrollTo(0, 0); };
+
+  const menu = (
+    <div className="flex flex-col h-full" style={F.body}>
+      <div className="flex items-center gap-3 px-4 py-5 border-b border-teal-900">
+        {logoUrl
+          ? <img src={logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700 shrink-0" />
+          : <img src={logoMarkUrl} alt="" className="w-10 h-10 rounded-full object-contain shrink-0" />}
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-100 truncate">{nombre}</p>
+          <p className="text-xs text-teal-500 truncate">{subtitulo}</p>
+        </div>
+      </div>
+      <nav className="flex-1 overflow-y-auto px-2 py-3" style={{ scrollbarColor: "#1f3a44 transparent", scrollbarWidth: "thin" }} aria-label="Secciones del panel">
+        {grupos.map((g, i) => (
+          <div key={g.titulo || i} className="mb-3">
+            {g.titulo && <p className="px-3 mb-1 text-[11px] uppercase tracking-widest text-teal-600">{g.titulo}</p>}
+            {g.items.map(([clave, etiqueta, icono, aviso]) => (
+              <button
+                key={clave}
+                type="button"
+                onClick={() => elegir(clave)}
+                aria-current={activa === clave ? "page" : undefined}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-left transition ${activa === clave ? "font-semibold" : "text-slate-300 hover:bg-white/5"}`}
+                style={activa === clave ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime, boxShadow: `inset 3px 0 0 ${BRAND.lime}` } : undefined}
+              >
+                <PanelIcono nombre={icono} />
+                <span className="flex-1">{etiqueta}</span>
+                {aviso > 0 && <span className="min-w-[1.5rem] px-1.5 py-0.5 rounded-full text-xs font-bold text-center" style={{ backgroundColor: "#f59e0b", color: "#14181f" }}>{aviso}</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      {/* Mi cuenta: reservar un turno u otro panel, sin cerrar la sesión */}
+      {onMiCuenta && (
+        <button type="button" onClick={onMiCuenta} className="flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg text-sm text-teal-400 hover:text-lime-400 hover:bg-white/5">
+          <PanelIcono nombre="perfil" /> Mi cuenta
+        </button>
+      )}
+      <button type="button" onClick={onLogout} className="flex items-center gap-3 mx-2 mb-4 px-3 py-2.5 rounded-lg text-sm text-teal-400 hover:text-lime-400 hover:bg-white/5">
+        <PanelIcono nombre="salir" /> Cerrar sesión
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="lg:pl-64">
+      {/* PC: menú fijo */}
+      <aside className="hidden lg:block fixed inset-y-0 left-0 w-64 border-r border-teal-900 z-30" style={{ backgroundColor: "rgba(6,15,20,0.92)", colorScheme: "dark" }}>
+        {menu}
+      </aside>
+      {/* Celular: barra de arriba y menú desplegable */}
+      <div className="lg:hidden flex items-center gap-3 px-4 py-3 border-b border-teal-900" style={{ backgroundColor: "rgba(6,15,20,0.85)" }}>
+        <button type="button" onClick={() => setAbierto(true)} className="p-2 -ml-2 rounded-lg text-slate-200 hover:bg-white/5" aria-label="Abrir menú" aria-expanded={abierto}>
+          <PanelIcono nombre="menu" className="w-6 h-6" />
+        </button>
+        <p className="flex-1 min-w-0 text-sm font-semibold truncate" style={F.body}>{nombre}</p>
+        {grupos.flatMap((g) => g.items).some(([, , , aviso]) => aviso > 0) && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} aria-label="Hay avisos" />}
+      </div>
+      {abierto && (
+        <div className="lg:hidden fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Menú">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setAbierto(false)} />
+          <aside className="absolute inset-y-0 left-0 w-72 max-w-[85vw] border-r border-teal-900" style={{ backgroundColor: "#071319", colorScheme: "dark" }}>
+            <button type="button" onClick={() => setAbierto(false)} className="absolute top-4 right-3 p-2 rounded-lg text-teal-400 hover:bg-white/5" aria-label="Cerrar menú">
+              <PanelIcono nombre="cerrar" />
+            </button>
+            {menu}
+          </aside>
+        </div>
+      )}
+      <main className={`px-4 sm:px-6 lg:px-10 py-6 lg:py-8 ${anchoCompleto ? "" : "max-w-5xl"}`}>
+        {titulo && <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>}
+        {children}
+      </main>
+    </div>
+  );
+}
+
+/* Tarjeta de resumen (Inicio, y más adelante Caja y Cuentas) */
+const TONOS_RESUMEN = { lime: "#9fe022", rojo: "#f87171", cyan: "#22d3ee", ambar: "#f59e0b", gris: "#94a3b8" };
+function TarjetaResumen({ titulo, valor, detalle, tono = "cyan", onClick }) {
+  const color = TONOS_RESUMEN[tono];
+  const Tag = onClick ? "button" : "div";
+  return (
+    <Tag
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      className={`block w-full text-left rounded-xl p-4 border min-w-0 ${onClick ? "hover:brightness-125 transition" : ""}`}
+      style={{ borderColor: `${color}55`, background: `linear-gradient(160deg, ${color}1a, rgba(8,18,24,0.75) 60%)` }}
+    >
+      <p className="text-[11px] uppercase tracking-widest font-semibold" style={{ color }}>{titulo}</p>
+      <p className="text-2xl font-bold mt-1 tabular-nums truncate" style={{ color }}>{valor}</p>
+      {detalle && <p className="text-xs text-teal-400 mt-1 truncate">{detalle}</p>}
+    </Tag>
+  );
+}
+
+/* Inicio del panel: lo del día de un vistazo. Cada bloque aparece si el complejo tiene ese módulo y
+   quien entra tiene el permiso; la plata del día, solo el dueño. */
+function InicioPanel({ organizer, colaborador, permisos, complejosReservas, complejosCantina, complejos, tournaments, inscripciones, pedidosPendientes, verTorneos, onIr, onOpen, venues }) {
+  const hoy = hoyArgentina();
+  const accessToken = organizer.accessToken;
+  const verAgenda = complejosReservas.length > 0 && permisos.agenda;
+  const verCantina = complejosCantina.length > 0 && permisos.consumos;
+  const verPlata = !colaborador;
+  const [datos, setDatos] = useState(null);
+  const [error, setError] = useState("");
+  const lista = (cs) => cs.map((c) => encodeURIComponent(c.id)).join(",");
+  const idsReservas = lista(complejosReservas);
+  const idsCantina = lista(complejosCantina);
+  const idsTodos = lista(complejos);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  useEffect(() => {
+    let vivo = true;
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    const desdeHoy = `created_at=gte.${enAr(hoy)}&created_at=lt.${enAr(sumarDias(hoy, 1))}`;
+    const nada = Promise.resolve([]);
+    Promise.all([
+      verAgenda ? supabaseTable(`reservas?complejo_id=in.(${idsReservas})&fecha=eq.${hoy}&tipo=eq.turno&estado=in.(confirmada,pendiente)&order=inicio.asc`, { accessToken }) : nada,
+      verAgenda ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&select=id,nombre`) : nada,
+      verCantina ? supabaseTable(`productos?complejo_id=in.(${idsCantina})&activo=eq.true&stock=not.is.null&select=id,nombre,stock,aviso_stock,activo,complejo_id`, { accessToken }).catch(() => []) : nada,
+      verCantina ? Promise.all(idsCantina.split(",").map((id) => supabaseRpc("cuentas_con_saldo", { p_complejo: decodeURIComponent(id) }, accessToken).catch(() => []))).then((r) => r.flat()) : nada,
+      // La plata de hoy (solo el dueño): lo mismo que suma la Caja, para el día
+      verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata ? supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=eq.${hoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`venta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto,ventas!inner(anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : nada,
+      // Lo mismo que suma la Caja: clases, compras pagadas hoy, pagos a profes y lo cargado en las cajas del día
+      verPlata && idsTodos ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=eq.${hoy}&select=monto:total`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`pagos_profes?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${desdeHoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
+    ]).then(([turnos, canchas, productos, cuentas, pagos, manuales, turnosCobrados, pagosCuentas, pagosVentas, cuotas, compras, pagosProfes, movCajas]) => {
+      if (!vivo) return;
+      const suma = (rows) => rows.reduce((s, r) => s + Number(r.monto ?? r.precio ?? 0), 0);
+      setDatos({
+        turnos, canchas,
+        pocoStock: productos.filter(pocoStock),
+        deudores: cuentas.map((c) => ({ ...c, saldo: totalDe(c) })).filter((c) => c.saldo > 0).sort((a, b) => b.saldo - a.saldo),
+        ingresos: suma(pagos) + suma(turnosCobrados) + suma(pagosCuentas) + suma(pagosVentas) + suma(cuotas) + suma([...manuales, ...movCajas].filter((m) => m.tipo === "ingreso")),
+        egresos: suma([...manuales, ...movCajas].filter((m) => m.tipo === "gasto")) + suma(compras) + suma(pagosProfes),
+      });
+      setError("");
+    }).catch(() => { if (vivo) setError("No se pudo cargar el resumen. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [hoy, accessToken, organizer.id, verAgenda, verCantina, verPlata, idsReservas, idsCantina, idsTodos]);
+
+  const proximos = verTorneos
+    ? tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO).sort((a, b) => (a.date || "").localeCompare(b.date || "")).slice(0, 4)
+    : [];
+  const pendientesDe = (id) => (inscripciones || []).filter((i) => i.torneo_id === id && i.estado === "pendiente").length;
+  const ahora = minutoEnGrilla(hoy, new Date().toISOString());
+  const nombreCancha = (id) => datos?.canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const totalDeben = (datos?.deudores || []).reduce((s, c) => s + c.saldo, 0);
+  const cargando = !datos && !error;
+
+  return (
+    <div className="space-y-6" style={F.body}>
+      <p className="text-sm text-teal-300 -mt-3">{etiquetaFecha(hoy)}</p>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+        {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, mostrador, cuentas, inscripciones" onClick={() => onIr("caja")} />}
+        {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos, compras y pagos a profes" onClick={() => onIr("caja")} />}
+        {verAgenda && <TarjetaResumen titulo="Turnos de hoy" tono="cyan" valor={cargando ? "…" : String(datos?.turnos.filter((r) => r.estado === "confirmada").length || 0)} detalle={pedidosPendientes > 0 ? `${pedidosPendientes} pedido${pedidosPendientes === 1 ? "" : "s"} por confirmar` : "Sin pedidos pendientes"} onClick={() => onIr("reservas")} />}
+        {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("consumos")} />}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {verAgenda && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Próximos turnos</h2>
+              <button type="button" onClick={() => onIr("reservas")} className="text-xs text-teal-300 hover:text-lime-400">Ver agenda →</button>
+            </div>
+            {!datos ? <p className="text-sm opacity-60">{cargando ? "Cargando…" : ""}</p> : (() => {
+              const siguientes = datos.turnos.filter((r) => minutoEnGrilla(hoy, r.fin) > ahora).slice(0, 6);
+              return siguientes.length === 0 ? <p className="text-sm text-teal-300">No quedan turnos hoy.</p> : (
+                <ul className="divide-y divide-teal-900">
+                  {siguientes.map((r) => (
+                    <li key={r.id} className="flex items-center gap-3 py-2 text-sm">
+                      <span className="w-12 shrink-0 font-semibold tabular-nums text-slate-100">{etiquetaHora(minutoEnGrilla(hoy, r.inicio))}</span>
+                      <span className="flex-1 min-w-0 truncate">{r.nombre || "Sin nombre"}<span className="text-teal-500"> · {nombreCancha(r.cancha_id)}{complejosReservas.length > 1 ? ` · ${nombreComplejo(r.complejo_id)}` : ""}</span></span>
+                      {r.estado === "pendiente" && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>Pedido</span>}
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </section>
+        )}
+
+        {verCantina && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Cantina</h2>
+              <button type="button" onClick={() => onIr("mostrador")} className="text-xs text-teal-300 hover:text-lime-400">Ir al mostrador →</button>
+            </div>
+            {!datos ? <p className="text-sm opacity-60">{cargando ? "Cargando…" : ""}</p> : (
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs text-teal-500 mb-1">Stock bajo</p>
+                  {datos.pocoStock.length === 0 ? <p className="text-sm text-teal-300">Todo con stock.</p> : (
+                    <ul className="flex flex-wrap gap-2">
+                      {datos.pocoStock.map((p) => (
+                        <li key={p.id} className="text-xs px-2 py-1 rounded-full" style={{ backgroundColor: p.stock <= 0 ? "#f8717126" : "#f59e0b26", color: p.stock <= 0 ? "#fca5a5" : "#fbbf24" }}>{p.nombre}: {p.stock <= 0 ? "sin stock" : `quedan ${p.stock}`}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="text-xs text-teal-500 mb-1">Los que más deben</p>
+                  {datos.deudores.length === 0 ? <p className="text-sm text-teal-300">Nadie debe nada.</p> : (
+                    <ul className="divide-y divide-teal-900">
+                      {datos.deudores.slice(0, 4).map((c) => (
+                        <li key={c.id} className="flex justify-between gap-3 py-1.5 text-sm">
+                          <span className="truncate">{c.nombre}</span>
+                          <span className="shrink-0 font-semibold tabular-nums text-red-300">{formatoPrecio(c.saldo)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {verTorneos && (
+          <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Torneos</h2>
+              <button type="button" onClick={() => onIr("torneos")} className="text-xs text-teal-300 hover:text-lime-400">Ver todos →</button>
+            </div>
+            {proximos.length === 0 ? <p className="text-sm text-teal-300">No hay torneos próximos ni en curso.</p> : (
+              <ul className="divide-y divide-teal-900">
+                {proximos.map((t) => {
+                  const pend = pendientesDe(t.id);
+                  return (
+                    <li key={t.id}>
+                      <button type="button" onClick={() => onOpen(t.id)} className="w-full flex items-center gap-3 py-2 text-sm text-left hover:text-lime-400">
+                        <span className="flex-1 min-w-0 truncate">{t.name}<span className="text-teal-500"> · {t.date ? formatDateShort(t.date) : "sin fecha"}</span></span>
+                        {tournamentStatusOf(t) === STATUS.EN_CURSO && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#9fe02226", color: BRAND.lime }}>En curso</span>}
+                        {pend > 0 && <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>{pend} inscripción{pend === 1 ? "" : "es"}</span>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Plan de la cuenta y de sus complejos (ver mi_plan en 20261034_planes_en_la_app.sql): carteles de
+   vencimiento arriba del panel. Al dueño también le avisa de la prueba gratis; al empleado, solo lo que
+   le cambia el trabajo (en gracia, vencido, suspendido). */
+const PLAN_BLOQUEA = ["vencido", "suspendido"];
+const CONTACTO_PLAN = "smashpoint.arg@gmail.com";
+
+function PlanAviso({ filas = [], colaborador = false }) {
+  const avisos = filas.map((f) => {
+    const quien = f.tipo === "organizador" ? "Tu plan de organizador" : `El plan de ${f.nombre}`;
+    const fin = f.fin ? fechaCorta(f.fin) : "";
+    const limite = f.fin ? fechaCorta(sumarDias(f.fin, f.dias_gracia ?? 7)) : "";
+    const queBloquea = f.tipo === "organizador"
+      ? "no se pueden crear torneos nuevos ni recibir inscripciones online (los torneos que ya tenés se siguen jugando normalmente)"
+      : "el complejo quedó en solo lectura (no se cargan turnos ni reservas online, ventas, consumos, cajas ni compras)";
+    // Lo mismo, pero lo que va a pasar si no renueva (en los días de gracia)
+    const vaABloquear = f.tipo === "organizador"
+      ? "no se van a poder crear torneos nuevos ni recibir inscripciones online (los torneos que ya tenés se siguen jugando normalmente)"
+      : "el complejo queda en solo lectura (no se van a poder cargar turnos ni reservas online, ventas, consumos, cajas ni compras)";
+    switch (f.estado) {
+      case "prueba": return colaborador || !f.fin ? null : { color: "#22d3ee", texto: `Estás usando la prueba gratis${f.plan_nombre ? ` del plan ${f.plan_nombre}` : ""} hasta el ${fin}.` };
+      case "por_vencer": return colaborador ? null : { color: "#fbbf24", texto: `${quien} vence el ${fin}. Para renovarlo escribinos a ${CONTACTO_PLAN}.` };
+      case "en_gracia": return { color: "#fb923c", texto: `${quien} venció el ${fin}. Hay tiempo hasta el ${limite} para renovarlo; después ${vaABloquear}.` };
+      case "vencido": return { color: "#f87171", texto: `${quien} está vencido: ${queBloquea}. Escribinos a ${CONTACTO_PLAN} para renovarlo.` };
+      case "suspendido": return { color: "#f87171", texto: `${quien} está suspendido: ${queBloquea}, y no se ve en la página pública. Escribinos a ${CONTACTO_PLAN}.` };
+      default: return null;
+    }
+  }).filter(Boolean);
+  if (avisos.length === 0) return null;
+  return (
+    <div className="space-y-2 mb-4" role="status">
+      {avisos.map((a, i) => (
+        <p key={i} className="text-sm rounded-lg px-3 py-2" style={{ ...F.body, color: a.color, border: `1px solid ${a.color}66`, backgroundColor: `${a.color}14` }}>{a.texto}</p>
+      ))}
+    </div>
+  );
+}
+
+function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournaments, circuits, events = [], onSaveEvent, onDeleteEvent, onCreate, onDuplicate, onOpen, onLogout, onMiCuenta, onUpdate, onDelete, onAddCircuit, onUpdateCircuit, onDeleteCircuit, onUpdateProfile, inscripciones, complejos = [], venues = [] }) {
+  // Secciones del panel: Perfil · Torneos · Reservas (esta, solo si es dueño de un complejo habilitado).
+  // Dentro de Torneos: Torneos, Eventos y Circuitos.
+  // Un colaborador trabaja en nombre del dueño (organizer.id es el del dueño) con sus permisos
+  const colaborador = organizer.role === "colaborador";
+  const permisos = colaborador ? organizer.permisos : { agenda: true, resultados: true, torneos: true, canchas: true, consumos: true };
+  // Módulos de cada complejo (los marca el creador, ver 20261023_modulos_complejo.sql). Un
+  // organizador sin complejo ve Torneos como siempre.
+  const complejosReservas = complejos.filter((c) => c.modulo_reservas !== false);
+  const complejosCantina = complejos.filter((c) => c.modulo_cantina !== false);
+  const moduloTorneos = complejos.length === 0 || complejos.some((c) => c.modulo_torneos !== false);
+  const verTorneos = moduloTorneos && (permisos.resultados || permisos.torneos);
+  const verReservas = complejosReservas.length > 0 && (permisos.agenda || permisos.canchas);
+  const verConsumos = complejosCantina.length > 0 && permisos.consumos;
+  // Complejos que operan (con Reservas o Cantina). Uno solo con Torneos es como no tener complejo
+  const complejosOperativos = complejos.filter((c) => c.modulo_reservas !== false || c.modulo_cantina !== false);
+  const verInicio = complejosOperativos.length > 0;
+  const verCajaDia = complejosOperativos.length > 0 && (!colaborador || (verReservas && permisos.agenda) || verConsumos);
+  const verClientes = complejosOperativos.length > 0 && (!colaborador || permisos.agenda || permisos.consumos);
+  // El plan de la cuenta y de sus complejos (lo administra el creador, ver 20261034_planes_en_la_app.sql)
+  const { filas: misPlanes } = React.useContext(MiPlanContext);
+  const funciones = React.useContext(FuncionesContext);
+  const planDe = (tipo, ref) => misPlanes.find((f) => f.tipo === tipo && f.ref_id === ref);
+  const orgBloqueado = !colaborador && PLAN_BLOQUEA.includes(planDe("organizador", organizer.id)?.estado);
+  // Reportes: salvo que todos sus complejos tengan un plan sin Reportes
+  const verReportes = !colaborador && complejosOperativos.length > 0 && !complejosOperativos.every((c) => { const f = planDe("complejo", c.id); return f && f.plan_nombre && f.reportes === false; });
+  // Caja: no con un plan de organizador solo de Torneos (sin complejos que operen)
+  const planOrg = planDe("organizador", organizer.id);
+  const verCaja = !colaborador && funciones.cantina && (complejosOperativos.length > 0 || !planOrg?.plan_nombre || planOrg.modulo_reservas || planOrg.modulo_cantina);
+  const filasAviso = misPlanes.filter((f) => (f.tipo === "organizador" && !colaborador) || (f.tipo === "complejo" && complejos.some((c) => c.id === f.ref_id)));
+  const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
+  const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
+  // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
+  const [pedidosPendientes, setPedidosPendientes] = useState(0);
+  const complejoIds = complejosReservas.map((c) => c.id).join(",");
+  useEffect(() => {
+    if (!complejoIds) return;
+    const load = () => supabaseTable(`reservas?complejo_id=in.(${complejoIds.split(",").map(encodeURIComponent).join(",")})&estado=eq.pendiente&or=(vence_at.is.null,vence_at.gt.${encodeURIComponent(new Date().toISOString())})&select=id`, { accessToken: organizer.accessToken })
+      .then((rows) => setPedidosPendientes(rows.length)).catch(() => {});
+    load();
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [complejoIds, organizer.accessToken, seccion]);
   const [creating, setCreating] = useState(false);
-  const [editingProfile, setEditingProfile] = useState(false);
+  const [perfilGuardado, setPerfilGuardado] = useState(false);
   const [profileName, setProfileName] = useState(organizer.name);
   const [profileLogo, setProfileLogo] = useState(organizer.logoUrl || "");
   const [profileCover, setProfileCover] = useState(organizer.coverUrl || "");
 
   const saveProfile = () => {
     onUpdateProfile({ name: profileName.trim() || organizer.name, logoUrl: profileLogo.trim(), coverUrl: profileCover.trim() });
-    setEditingProfile(false);
+    setPerfilGuardado(true);
   };
+  // Menú lateral, agrupado: [clave, etiqueta, ícono, aviso]
+  const grupos = [
+    { titulo: "", items: verInicio ? [["inicio", "Inicio", "inicio"]] : [] },
+    { titulo: "Operación", items: [
+      ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
+      ...(verClientes ? [["clientes", "Clientes", "clientes"]] : []),
+      ...(verReservas && permisos.agenda ? [["clases", "Clases", "clases"]] : []),
+      ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
+      ...(verCajaDia ? [["cajadia", "Caja del día", "cajadia"]] : []),
+    ] },
+    { titulo: "Gestión", items: [
+      ...(verConsumos ? [["productos", "Productos y stock", "productos"]] : []),
+      ...(verConsumos && !colaborador ? [["compras", "Compras", "compras"]] : []),
+      ...(verTorneos ? [["torneos", "Torneos", "torneos"]] : []),
+      ...(verCaja ? [["caja", "Caja", "caja"]] : []),
+      ...(verReportes ? [["reportes", "Reportes", "reportes"]] : []),
+    ] },
+    { titulo: "Cuenta", items: colaborador ? [] : [["perfil", complejosOperativos.length > 0 && funciones.cuentas ? "Perfil y empleados" : "Perfil", "perfil"]] },
+  ].filter((g) => g.items.length > 0);
+  const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
 
   return (
-    <div className="px-6 py-8 max-w-3xl mx-auto">
-      <div className="flex justify-between items-center mb-2">
-        <div className="flex items-center gap-3">
-          {organizer.logoUrl && <img src={organizer.logoUrl} alt="" className="w-10 h-10 rounded-full object-cover border border-teal-700" />}
-          <h1 className="text-xl" style={F.display}>PANEL — {organizer.name.toUpperCase()}</h1>
+    <PanelLayout
+      nombre={organizer.name}
+      logoUrl={organizer.logoUrl}
+      subtitulo={colaborador ? `Empleado · ${organizer.email}` : complejosOperativos.length > 0 ? "Panel del complejo" : "Panel del organizador"}
+      grupos={grupos}
+      activa={torneoAbierto ? "torneos" : seccion}
+      onElegir={(key) => { if (torneoAbierto) onCerrarTorneo(); setSeccion(key); setPerfilGuardado(false); }}
+      onLogout={onLogout}
+      onMiCuenta={onMiCuenta}
+      titulo={torneoAbierto ? null : tituloSeccion}
+      anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
+    >
+      <PlanAviso filas={filasAviso} colaborador={colaborador} />
+      {torneoAbierto ? torneoAbierto : seccion === "inicio" && verInicio ? (
+        <InicioPanel
+          organizer={organizer} colaborador={colaborador} permisos={permisos}
+          complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina}
+          tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
+          verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
+        />
+      ) : seccion === "clases" && verReservas && permisos.agenda ? (
+        <ClasesPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+      ) : seccion === "reportes" && verReportes ? (
+        <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} />
+      ) : seccion === "clientes" && verClientes ? (
+        <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
+      ) : seccion === "compras" && verConsumos && !colaborador ? (
+        <ComprasPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} />
+      ) : seccion === "cajadia" && verCajaDia ? (
+        <CajaDelDia complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} conVentas={verConsumos ? complejosCantina.map((c) => c.id) : []} />
+      ) : seccion === "mostrador" && verConsumos ? (
+        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} />
+      ) : seccion === "productos" && verConsumos ? (
+        <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+      ) : seccion === "consumos" && verConsumos ? (
+        <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+      ) : seccion === "caja" && verCaja ? (
+        <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
+      ) : seccion === "perfil" && !colaborador ? (
+        <div className="grid gap-6 lg:grid-cols-2 items-start" style={F.body}>
+          <div className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">Datos del organizador</h2>
+            <div>
+              <label className="block text-xs text-teal-400 mb-1" htmlFor="perfil-nombre">Nombre</label>
+              <input id="perfil-nombre" value={profileName} onChange={(e) => { setProfileName(e.target.value); setPerfilGuardado(false); }} className="w-full max-w-sm px-3 py-2 rounded border outline-none focus:border-lime-400" style={adminInput} />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ImageUploadField label="Logo" value={profileLogo} onChange={(v) => { setProfileLogo(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="logos" maxAncho={600} />
+              <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={(v) => { setProfileCover(v); setPerfilGuardado(false); }} accessToken={organizer.accessToken} folder="covers" maxAncho={1600} ancha />
+            </div>
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+              {perfilGuardado && <span className="text-sm text-lime-400">Guardado ✓</span>}
+            </div>
+          </div>
+          {funciones.reservas && complejos.map((c) => (
+            <div key={`ficha-${c.id}`} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Ficha del complejo · {nombreComplejo(c.id)}</h2>
+              <FichaComplejoForm complejoId={c.id} nombre={nombreComplejo(c.id)} accessToken={organizer.accessToken} />
+            </div>
+          ))}
+          {funciones.cuentas && complejos.map((c) => (
+            <div key={c.id} className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3">Empleados{complejos.length > 1 ? ` · ${nombreComplejo(c.id)}` : ""}</h2>
+              <ColaboradoresConfig complejoId={c.id} modulos={c} accessToken={organizer.accessToken} />
+            </div>
+          ))}
         </div>
-        <button onClick={onLogout} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>Cerrar sesión</button>
-      </div>
-
-      <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-xs text-teal-400 hover:text-lime-400 mb-6" style={F.body}>
-        {editingProfile ? "Ocultar" : "Editar nombre, logo y portada"}
-      </button>
-
-      {editingProfile && (
-        <div className="border border-teal-800 rounded-lg p-4 mb-6 flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Nombre del organizador</label>
-            <input value={profileName} onChange={(e) => setProfileName(e.target.value)} className="px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
-          </div>
-          <div className="min-w-[220px]">
-            <ImageUploadField label="Logo" value={profileLogo} onChange={setProfileLogo} accessToken={organizer.accessToken} folder="logos" />
-          </div>
-          <div className="min-w-[220px]">
-            <ImageUploadField label="Foto de portada (fondo de tu tarjeta en el inicio)" value={profileCover} onChange={setProfileCover} accessToken={organizer.accessToken} folder="covers" />
-          </div>
-          <button type="button" onClick={saveProfile} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
-            Guardar
-          </button>
-        </div>
-      )}
-
-      <div className="flex gap-2 mb-6 overflow-x-auto">
-        {[["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]].map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={`shrink-0 px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
-            style={F.body}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "eventos" ? (
-        <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
-      ) : tab === "circuitos" ? (
-        <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
+      ) : (seccion === "reservas" || !verTorneos) && verReservas ? (
+        <ReservasPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} rol={colaborador ? "colaborador" : "dueno"} permisos={permisos} />
+      ) : !verTorneos ? (
+        <p className="text-sm text-teal-300" style={F.body}>{verConsumos ? "" : "El dueño todavía no te dio permisos. Pedile que te habilite lo que necesitás."}</p>
       ) : (
         <>
-          <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
-            + Crear torneo
-          </button>
-          {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
-
-          <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
-          <div className="space-y-2">
-            {tournaments.map((t) => (
-              <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} />
+          <div className="flex gap-2 mb-6 overflow-x-auto">
+            {(permisos.torneos ? [["torneos", "Torneos"], ["eventos", "Eventos"], ["circuitos", "Circuitos"]] : [["torneos", "Torneos"]]).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={`shrink-0 px-4 py-2 rounded text-sm border ${tab === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}
+                style={F.body}
+              >
+                {label}
+              </button>
             ))}
-            {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>Todavía no creaste torneos.</p>}
           </div>
+
+          {tab === "eventos" && permisos.torneos ? (
+            <EventManager events={events} tournaments={tournaments} onSave={onSaveEvent} onDelete={onDeleteEvent} onUpdateTournament={onUpdate} onCreateTournament={onCreate} onOpenTournament={onOpen} accessToken={organizer.accessToken} />
+          ) : tab === "circuitos" && permisos.torneos ? (
+            <CircuitManager circuits={circuits} tournaments={tournaments} onAdd={onAddCircuit} onUpdate={onUpdateCircuit} onDelete={onDeleteCircuit} />
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-3 mb-6">
+                <TarjetaResumen titulo="En curso" tono="lime" valor={String(tournaments.filter((t) => tournamentStatusOf(t) === STATUS.EN_CURSO).length)} />
+                <TarjetaResumen titulo="Próximos" tono="cyan" valor={String(tournaments.filter((t) => tournamentStatusOf(t) === STATUS.PROXIMO).length)} />
+                <TarjetaResumen titulo="Por aprobar" tono="ambar" valor={String((inscripciones || []).filter((i) => i.estado === "pendiente" && tournaments.some((t) => t.id === i.torneo_id)).length)} detalle="Inscripciones" />
+              </div>
+              {permisos.torneos && (orgBloqueado ? (
+                <p className="text-sm text-red-300 mb-8" style={F.body}>Con el plan vencido no se pueden crear torneos nuevos. Los que ya tenés se siguen manejando normalmente.</p>
+              ) : (
+                <button type="button" onClick={() => setCreating(true)} className="px-4 py-2 rounded font-semibold mb-8" style={{ backgroundColor: "#9fe022", color: "#14181f", ...F.body }}>
+                  + Crear torneo
+                </button>
+              ))}
+              {creating && <CreateTournamentWizard circuits={circuits} onCreate={onCreate} onClose={() => setCreating(false)} />}
+
+              <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-3" style={F.body}>Mis torneos</h2>
+              <div className="space-y-2">
+                {tournaments.map((t) => (
+                  <TournamentRow key={t.id} t={t} circuits={circuits} onOpen={onOpen} onUpdate={onUpdate} onDelete={onDelete} onDuplicate={orgBloqueado ? null : onDuplicate} accessToken={organizer.accessToken} pendingCount={(inscripciones || []).filter((i) => i.torneo_id === t.id && i.estado === "pendiente").length} puedeEditar={permisos.torneos} puedeBorrar={!colaborador} />
+                ))}
+                {tournaments.length === 0 && <p className="opacity-60 text-sm" style={F.body}>{colaborador ? "Todavía no hay torneos." : "Todavía no creaste torneos."}</p>}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </PanelLayout>
+  );
+}
+
+/* ---------- Reservas: panel del dueño del complejo ---------- */
+
+const HORAS_DEL_DIA = Array.from({ length: 48 }, (_, i) => etiquetaHora(i * PASO));
+const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"]];
+const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
+const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
+
+/* Pestaña "Reservas" del organizador que es dueño de un complejo: la agenda del día y sus canchas */
+function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos = { agenda: true, canchas: true } }) {
+  const dueno = rol === "dueno";
+  const verAgenda = dueno || permisos.agenda;
+  const verCanchas = dueno || permisos.canchas;
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | fijos | canchas
+  const [canchas, setCanchas] = useState(null);
+  const [error, setError] = useState("");
+  const [fecha, setFecha] = useState(hoyArgentina());
+  // Sube con cada cambio, para que la agenda y los pedidos pendientes se vuelvan a cargar juntos
+  const [version, setVersion] = useState(0);
+  const changed = useCallback(() => setVersion((v) => v + 1), []);
+  const nombre = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
+
+  const loadCanchas = useCallback(async () => {
+    try {
+      setCanchas(await supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las canchas. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setCanchas(null); loadCanchas(); }, [loadCanchas]);
+
+  const activas = (canchas || []).filter((c) => c.activa);
+  const tab = (key, label) => (
+    <button type="button" onClick={() => setView(key)} className={`px-3 py-1.5 rounded-full text-sm border ${view === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-400"}`}>{label}</button>
+  );
+
+  return (
+    <div style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="mb-4 px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombre(c.id)}</option>)}
+        </select>
+      )}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400 mr-2">{nombre(complejoId)}</h2>
+        {verAgenda && tab("agenda", "Agenda")}
+        {verAgenda && tab("fijos", "Turnos fijos")}
+        {verCanchas && tab("canchas", "Canchas y precios")}
+      </div>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {canchas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : !verCanchas && activas.length === 0 ? (
+        <p className="text-sm text-teal-300">El complejo todavía no cargó sus canchas.</p>
+      ) : view === "fijos" && verAgenda && activas.length > 0 ? (
+        <TurnosFijos complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} onChanged={changed} />
+      ) : (view === "canchas" && verCanchas) || activas.length === 0 ? (
+        <>
+          {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
+          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
+        </>
+      ) : (
+        <>
+          <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
         </>
       )}
     </div>
+  );
+}
+
+/* Turnos fijos del complejo: cada serie con su día y horario, cuántas fechas quedan cargadas, y
+   extender o dar de baja. Cada turno se cobra por separado en la agenda. */
+function TurnosFijos({ complejoId, canchas, venueName, accessToken, onChanged }) {
+  const hoy = hoyArgentina();
+  const [reservas, setReservas] = useState(null);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [accion, setAccion] = useState(null); // { serieId, tipo: "extender" | "baja", semanas, desde }
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre || "Cancha";
+
+  const load = useCallback(async () => {
+    try {
+      setReservas(await supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&serie_id=not.is.null&tipo=eq.turno&estado=eq.confirmada&fecha=gte.${hoy}&order=fecha.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los turnos fijos."); }
+  }, [complejoId, accessToken, hoy]);
+  useEffect(() => { load(); }, [load]);
+
+  const series = agruparSeries(reservas || []);
+  const extender = async (s, semanas) => {
+    const u = s.ultima;
+    const desde = minutoEnGrilla(u.fecha, u.inicio);
+    const dur = Math.round((Date.parse(u.fin) - Date.parse(u.inicio)) / 60000);
+    setBusy(true); setError(""); setAviso("");
+    const fallidas = [];
+    for (const f of fechasSemanales(sumarDias(u.fecha, 7), semanas)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: u.cancha_id, tipo: "turno", fecha: f, inicio: instante(f, desde), fin: instante(f, desde + dur), estado: "confirmada", origen: "manual", nombre: u.nombre, telefono: u.telefono, precio: u.precio, nota: u.nota, serie_id: s.serieId },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false); setAccion(null);
+    if (fallidas.length) setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+    else setAviso(`Listo: ${s.proxima.nombre} tiene ${semanas} semanas más.`);
+    await load(); onChanged();
+  };
+  const darDeBaja = async (s, desde) => {
+    setBusy(true); setError(""); setAviso("");
+    try {
+      await supabaseTable(`reservas?serie_id=eq.${s.serieId}&fecha=gte.${desde}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" });
+      setAviso(`Se dieron de baja los turnos de ${s.proxima.nombre} desde el ${etiquetaFecha(desde).toLowerCase()}.`);
+      setAccion(null);
+      await load(); onChanged();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const recordatorio = (s) => `Hola ${s.proxima.nombre}! Te recordamos tu turno fijo en ${venueName}: ${etiquetaFecha(s.proxima.fecha).split(" ")[0].toLowerCase()} a las ${etiquetaHora(minutoEnGrilla(s.proxima.fecha, s.proxima.inicio))} en ${nombreCancha(s.proxima.cancha_id)}. ¡Te esperamos! 🎾`;
+
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-300">Se cargan desde "+ Cargar turno" eligiendo cuántas semanas repetir. Acá ves cada turno fijo, lo extendés antes de que se termine o lo das de baja.</p>
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+      {reservas === null ? (!error && <p className="opacity-60">Cargando…</p>) : series.length === 0 ? <p className="text-teal-400">No hay turnos fijos de hoy en adelante.</p> : (
+        <ul className="space-y-2">
+          {series.map((s) => {
+            const p = s.proxima;
+            const desde = minutoEnGrilla(p.fecha, p.inicio);
+            const hasta = minutoEnGrilla(p.fecha, p.fin);
+            const seTermina = s.cantidad <= 2;
+            const ab = accion?.serieId === s.serieId ? accion : null;
+            return (
+              <li key={s.serieId} className="rounded-xl border px-4 py-3 space-y-2" style={{ borderColor: seTermina ? "#f59e0b66" : "#134e4a", backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-100">{p.nombre}</p>
+                    <p className="text-teal-300">{etiquetaFecha(p.fecha).split(" ")[0].replace(/([^s])$/, "$1s")} · {rangoLabel(desde, hasta)} · {nombreCancha(p.cancha_id)}{p.precio != null ? ` · ${formatoPrecio(p.precio)}` : ""}</p>
+                    <p className="text-xs text-teal-500">Próximo: {etiquetaFecha(p.fecha)} · cargado hasta el {etiquetaFecha(s.ultima.fecha).toLowerCase()} ({s.cantidad} turno{s.cantidad === 1 ? "" : "s"})</p>
+                  </div>
+                  {seTermina && <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: "#fbbf24", backgroundColor: "#f59e0b26" }}>Se termina pronto</span>}
+                </div>
+                {ab?.tipo === "extender" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-teal-200">Agregar</span>
+                    {[4, 8, 12, 24].map((n) => <button key={n} type="button" disabled={busy} onClick={() => extender(s, n)} className="px-3 py-1.5 rounded-lg border border-lime-400/70 text-lime-400 disabled:opacity-50">{n} semanas</button>)}
+                    <button type="button" onClick={() => setAccion(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                ) : ab?.tipo === "baja" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-red-300">Dar de baja desde</span>
+                    <input type="date" value={ab.desde} min={hoy} onChange={(e) => setAccion({ ...ab, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+                    <button type="button" disabled={busy || !ab.desde} onClick={() => darDeBaja(s, ab.desde)} className="px-3 py-1.5 rounded-lg border border-red-400 text-red-400 font-semibold disabled:opacity-50">Confirmar baja</button>
+                    <button type="button" onClick={() => setAccion(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <button type="button" onClick={() => setAccion({ serieId: s.serieId, tipo: "extender" })} className="text-lime-400 font-semibold">Extender</button>
+                    {p.telefono && <a href={waLink(p.telefono, recordatorio(s))} target="_blank" rel="noopener noreferrer" className="text-teal-300 underline">Recordarle por WhatsApp</a>}
+                    <button type="button" onClick={() => setAccion({ serieId: s.serieId, tipo: "baja", desde: p.fecha })} className="text-red-400">Dar de baja</button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* Permisos que el dueño le da a cada colaborador (ver 20261017_colaboradores_permisos.sql) */
+const PERMISOS_COLABORADOR = [
+  ["p_agenda", "Agenda de reservas", "Cargar, confirmar y cancelar turnos, bloquear horarios, \"no vino\" y cobros."],
+  ["p_resultados", "Cargar resultados", "Resultados, W.O. y partidos en curso de tus torneos, sin cambiar su armado."],
+  ["p_torneos", "Gestionar torneos", "Crear y editar torneos, eventos y circuitos, grupos, llaves, horarios e inscripciones."],
+  ["p_canchas", "Canchas y precios", "Horarios y precios de las canchas, y si reciben reservas online."],
+  ["p_consumos", "Cantina", "Vender en el mostrador, anotar consumos a las cuentas, cobrarlas y reponer stock."],
+];
+
+/* Colaboradores del complejo (empleados): el dueño agrega su mail y elige qué puede hacer cada uno.
+   Ellos entran con su cuenta (mail y contraseña) usando ese mail. */
+function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
+  // Solo los permisos de los módulos que tiene el complejo (los marca el plan, ver 20261023_modulos_complejo.sql)
+  const reservas = modulos.modulo_reservas !== false;
+  const cantina = modulos.modulo_cantina !== false;
+  const torneos = modulos.modulo_torneos !== false;
+  const MODULO_PERMISO = { p_agenda: reservas, p_canchas: reservas, p_consumos: cantina, p_resultados: torneos, p_torneos: torneos };
+  const permisos = PERMISOS_COLABORADOR.filter(([campo]) => MODULO_PERMISO[campo]);
+  const tuyo = [
+    reservas || cantina ? "la Caja, los Reportes" : "",
+    cantina ? "las Compras" : "",
+    reservas || cantina ? "anular cobros y ventas" : "",
+    reservas ? "borrar canchas" : "",
+    torneos ? "borrar torneos, eventos y circuitos" : "",
+    "esta lista",
+    reservas ? "bloquear jugadores" : "",
+    "tu perfil",
+  ].filter(Boolean);
+  const [lista, setLista] = useState(null);
+  const [form, setForm] = useState({ email: "", nombre: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [quitando, setQuitando] = useState(null);
+  const base = `colaboradores?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+
+  const load = useCallback(async () => {
+    try { setLista(await supabaseTable(`${base}&order=created_at.asc`, { accessToken })); setError(""); }
+    catch { setError("No se pudieron cargar los colaboradores."); }
+  }, [base, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const agregar = async () => {
+    const email = form.email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError("Revisá el mail."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, email, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
+      setForm({ email: "", nombre: "" });
+      load();
+    } catch (e) { setError(e.pgCode === "23505" ? "Ese mail ya está en la lista." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const quitar = async (email) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`${base}&email=eq.${encodeURIComponent(email)}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setQuitando(null);
+      load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const entrada = `${window.location.origin}${window.location.pathname}#complejo`;
+  const cambiarPermiso = async (c, campo, valor) => {
+    setLista((l) => l.map((x) => (x.email === c.email ? { ...x, [campo]: valor } : x)));
+    try {
+      await supabaseTable(`${base}&email=eq.${encodeURIComponent(c.email)}`, { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
+    } catch (e) { setError(reservaErrorText(e)); load(); }
+  };
+
+  return (
+    <div className="space-y-4 text-sm">
+      <p className="text-teal-300">
+        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
+        A cada uno le elegís qué puede hacer. Siempre quedan para vos: {tuyo.slice(0, -1).join(", ")} y {tuyo[tuyo.length - 1]}.
+      </p>
+      <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-email">Mail</label>
+          <input id="colab-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="empleado@mail.com" className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-nombre">Nombre (opcional)</label>
+          <input id="colab-nombre" value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <button type="button" disabled={busy} onClick={agregar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Agregar</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {lista === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : lista.length === 0 ? (
+        <p className="text-teal-400">Todavía no agregaste colaboradores.</p>
+      ) : (
+        <ul className="space-y-2">
+          {lista.map((c) => (
+            <li key={c.email} className="border border-teal-800 rounded-lg p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex-1 min-w-[12rem]">
+                  <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
+                  {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+                </div>
+                {quitando === c.email ? (
+                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
+                ) : (
+                  <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+                )}
+              </div>
+              {c.p_agenda !== undefined && (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {permisos.map(([campo, titulo, ayuda]) => (
+                    <label key={campo} className="flex items-start gap-2 cursor-pointer">
+                      <input type="checkbox" className="mt-1" checked={!!c[campo]} onChange={(e) => cambiarPermiso(c, campo, e.target.checked)} />
+                      <span>
+                        <span className="text-teal-100">{titulo}</span>
+                        <span className="block text-xs text-teal-500">{ayuda}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* Mi cuenta: desde acá cada uno va a lo suyo. Reservar turnos (cualquiera), el panel de los complejos
+   donde trabaja (si el dueño lo cargó con su mail; ver 20261016_reservas_colaboradores.sql) y su
+   panel de organizador. Se llega también con #complejo en la dirección (el link viejo de empleados). */
+function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, aviso, onEntrarComplejo, onPanelOrganizador, onIngresar, onReservar, onSalir }) {
+  const { jugador } = jugadorApi;
+  const [complejos, setComplejos] = useState(null);
+  const [error, setError] = useState("");
+  const jugadorId = jugador?.id;
+  const { token } = jugadorApi;
+  const nombre = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  useEffect(() => {
+    if (!jugadorId) { setComplejos(null); return; }
+    (async () => {
+      try {
+        setComplejos((await supabaseRpc("mis_complejos_colaborador", {}, await token())) || []);
+        setError("");
+      } catch { setError("No se pudieron cargar tus complejos. Revisá la conexión."); }
+    })();
+  }, [jugadorId, token]);
+
+  if (!jugador) {
+    return (
+      <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
+        <h1 className="text-xl mb-4" style={F.display}>MI CUENTA</h1>
+        <p className="text-sm text-teal-300 mb-4">Ingresá con tu mail y contraseña. Si trabajás en un complejo, usá el mail que te cargó el dueño.</p>
+        <button type="button" onClick={onIngresar} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ingresar o crear cuenta</button>
+        <button type="button" onClick={onReservar} className="block mt-6 text-sm text-teal-400 hover:text-lime-400">← Volver al sitio</button>
+      </div>
+    );
+  }
+
+  const opcion = (texto, detalle, onClick, key) => (
+    <button key={key} type="button" onClick={onClick} className="w-full text-left px-4 py-3 rounded-lg border border-teal-700 hover:border-lime-400">
+      <span className="block font-semibold text-teal-100">{texto}</span>
+      {detalle && <span className="block text-xs text-teal-400">{detalle}</span>}
+    </button>
+  );
+  return (
+    <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
+      <div className="flex justify-between items-center mb-1 gap-3">
+        <h1 className="text-xl" style={F.display}>MI CUENTA</h1>
+        <button type="button" onClick={onSalir} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
+      </div>
+      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email}</p>
+      {aviso && <p className="text-sm text-lime-400 mb-4">{aviso}</p>}
+      <div className="space-y-2">
+        {opcion("Reservar un turno", "En cualquier complejo, y ver mis reservas", onReservar, "reservar")}
+        {esOrganizador && (conPanelOrganizador
+          ? opcion("Mi panel de organizador", null, onPanelOrganizador, "organizador")
+          : opcion("Mi panel de organizador", "Ingresá de nuevo con tu contraseña para abrirlo", onIngresar, "organizador"))}
+        {error && <p className="text-sm text-red-400">{error}</p>}
+        {complejos === null && !error && <p className="text-sm opacity-60">Cargando…</p>}
+        {(complejos || []).map((c) => opcion(`Panel de ${nombre(c.complejo_id)}`, "Donde trabajás", () => onEntrarComplejo(c), c.complejo_id))}
+      </div>
+      {complejos?.length === 0 && !esOrganizador && (
+        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con este mail y vas a ver acá el panel.</p>
+      )}
+    </div>
+  );
+}
+
+/* Canchas del complejo: nombre, horario, precio de cada duración y si recibe reservas online */
+function CanchasConfig({ complejoId, canchas, accessToken, onChanged, puedeBorrar = true }) {
+  const [adding, setAdding] = useState(false);
+  return (
+    <div className="space-y-3">
+      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
+      {adding
+        ? <CanchaForm initial={null} complejoId={complejoId} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
+        : <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cancha</button>}
+    </div>
+  );
+}
+
+function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
+  const toForm = (c) => ({
+    nombre: c?.nombre || `Cancha ${orden + 1}`,
+    apertura: c ? etiquetaHora(horarioCancha(c).desde) : "14:00",
+    cierre: c ? etiquetaHora(horarioCancha(c).hasta) : "23:00",
+    precio_60: c?.precio_60 != null ? String(Math.round(c.precio_60)) : "",
+    precio_90: c?.precio_90 != null ? String(Math.round(c.precio_90)) : "",
+    precio_120: c?.precio_120 != null ? String(Math.round(c.precio_120)) : "",
+    reserva_online: c ? c.reserva_online : true,
+    activa: c ? c.activa : true,
+  });
+  const [form, setForm] = useState(() => toForm(initial));
+  const [editing, setEditing] = useState(!initial);
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+
+  const save = async () => {
+    const row = {
+      nombre: form.nombre.trim(),
+      apertura: form.apertura,
+      cierre: form.cierre,
+      precio_60: leerPrecio(form.precio_60),
+      precio_90: leerPrecio(form.precio_90),
+      precio_120: leerPrecio(form.precio_120),
+      reserva_online: form.reserva_online,
+      activa: form.activa,
+    };
+    if (!row.nombre) { setError("Poné el nombre de la cancha."); return; }
+    if (row.apertura === row.cierre) { setError("La apertura y el cierre no pueden ser la misma hora."); return; }
+    if (row.reserva_online && duracionesOfrecidas(row).length === 0) { setError("Para recibir reservas online cargá el precio de al menos una duración."); return; }
+    setBusy(true); setError("");
+    try {
+      if (initial) await supabaseTable(`canchas?id=eq.${initial.id}`, { method: "PATCH", body: row, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("canchas", { method: "POST", body: { ...row, complejo_id: complejoId, orden }, accessToken, prefer: "return=minimal" });
+      setEditing(false);
+      onDone();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`canchas?id=eq.${initial.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      onDone();
+    } catch (e) { setError(reservaErrorText(e)); setConfirmDelete(false); }
+    finally { setBusy(false); }
+  };
+
+  if (initial && !editing) {
+    const { desde, hasta } = horarioCancha(initial);
+    const precios = DURACIONES.filter((d) => precioDe(initial, d) != null).map((d) => `${d}' ${formatoPrecio(precioDe(initial, d))}`);
+    return (
+      <div className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+        <div className="flex-1 min-w-[12rem]">
+          <p className="font-semibold">{initial.nombre}{!initial.activa && <span className="ml-2 text-xs text-amber-400">desactivada</span>}</p>
+          <p className="text-sm text-teal-300">{rangoLabel(desde, hasta)} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
+          <p className="text-xs text-teal-500">{initial.reserva_online ? "Recibe reservas online" : "Solo turnos cargados por el complejo"}</p>
+        </div>
+        <button type="button" onClick={() => { setForm(toForm(initial)); setEditing(true); }} className="text-sm text-lime-400">Editar</button>
+      </div>
+    );
+  }
+
+  const precioInput = (d) => (
+    <div key={d}>
+      <label className="block text-xs text-teal-400 mb-1">{d} min</label>
+      <input inputMode="numeric" value={form[`precio_${d}`]} onChange={(e) => set(`precio_${d}`, e.target.value)} placeholder="—" className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
+    </div>
+  );
+  const horaSelect = (field, label) => (
+    <div>
+      <label className="block text-xs text-teal-400 mb-1">{label}</label>
+      <select value={form[field]} onChange={(e) => set(field, e.target.value)} className="w-full px-3 py-2 rounded border text-sm" style={adminInput}>
+        {HORAS_DEL_DIA.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+  const overnight = form.cierre <= form.apertura;
+
+  return (
+    <div className="border border-teal-700 rounded-lg p-4">
+      <div className="grid gap-3 sm:grid-cols-3 mb-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
+        </div>
+        {horaSelect("apertura", "Abre")}
+        {horaSelect("cierre", "Cierra")}
+      </div>
+      {overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
+      <p className="text-xs text-teal-400 mb-1">Precio por duración (dejá vacío lo que no ofrecés)</p>
+      <div className="grid gap-3 grid-cols-3 mb-3">{DURACIONES.map(precioInput)}</div>
+      <div className="flex flex-col gap-2 mb-3 text-sm text-teal-200">
+        <label className="flex items-center gap-2"><input type="checkbox" checked={form.reserva_online} onChange={(e) => set("reserva_online", e.target.checked)} /> Recibe reservas online (si no, solo turnos cargados por el complejo, por ejemplo clases)</label>
+        {initial && <label className="flex items-center gap-2"><input type="checkbox" checked={form.activa} onChange={(e) => set("activa", e.target.checked)} /> Activa (desactivada no aparece en la agenda)</label>}
+      </div>
+      {error && <p className="text-sm text-red-400 mb-2">{error}</p>}
+      <div className="flex flex-wrap gap-3 items-center">
+        <button type="button" disabled={busy} onClick={save} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{initial ? "Guardar cambios" : "Agregar cancha"}</button>
+        <button type="button" disabled={busy} onClick={() => { setError(""); if (initial) setEditing(false); else onCancel(); }} className="text-sm text-teal-400">Cancelar</button>
+        {initial && puedeBorrar && (confirmDelete
+          ? <span className="text-sm text-red-300 ml-auto">¿Borrar la cancha? <button type="button" disabled={busy} onClick={remove} className="font-semibold text-red-400 ml-1">Sí, borrar</button> <button type="button" onClick={() => setConfirmDelete(false)} className="text-teal-400 ml-2">No</button></span>
+          : <button type="button" onClick={() => setConfirmDelete(true)} className="text-sm text-red-400 ml-auto">Borrar</button>)}
+      </div>
+    </div>
+  );
+}
+
+/* Colores de cada cosa en la agenda */
+function estiloReserva(r) {
+  if (r.tipo === "bloqueo") return { backgroundColor: "rgba(148,163,184,0.18)", border: "1px dashed #94a3b8", color: "#cbd5e1" };
+  if (r.tipo === "clase") return { backgroundColor: "rgba(34,211,238,0.14)", border: `1px solid ${BRAND.cyan}`, color: BRAND.ink };
+  if (r.estado === "pendiente") return { backgroundColor: "rgba(251,191,36,0.16)", border: "1px solid #fbbf24", color: "#fde68a" };
+  if (r.no_vino) return { backgroundColor: "rgba(248,113,113,0.14)", border: "1px solid #f87171", color: "#fecaca" };
+  return { backgroundColor: "rgba(159,224,34,0.14)", border: `1px solid ${BRAND.lime}`, color: BRAND.ink };
+}
+
+/* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
+function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
+  const [reservas, setReservas] = useState(null);
+  const [error, setError] = useState("");
+  const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
+  const [bloqueando, setBloqueando] = useState(false);
+  const [detalleId, setDetalleId] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      await supabaseRpc("vencer_pedidos", {}, accessToken).catch(() => {}); // pedidos sin confirmar que ya vencieron
+      setReservas(await supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&fecha=eq.${fecha}&order=inicio.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las reservas. Revisá la conexión."); }
+  }, [complejoId, fecha, accessToken]);
+  useEffect(() => { setReservas(null); load(); }, [load]);
+  useEffect(() => { if (version > 0) load(); }, [version, load]);
+  // Se actualiza sola cada minuto, por si otra persona del complejo cargó algo
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const filas = useMemo(() => filasAgenda(canchas), [canchas]);
+  const finGrilla = filas[filas.length - 1] + PASO;
+  const lista = useMemo(() => reservas || [], [reservas]);
+  // Lo que ocupa cada cancha, con la fila de la agenda donde se dibuja (la de su inicio, o la primera
+  // si empezó antes); lo que queda entero fuera de la agenda no se dibuja
+  const porCancha = useMemo(() => Object.fromEntries(canchas.map((c) => [c.id,
+    ocupacion(fecha, c.id, lista)
+      .filter((o) => o.hasta > filas[0] && o.desde < finGrilla)
+      .map((o) => ({ ...o, fila: filas[0] + Math.max(0, Math.floor((o.desde - filas[0]) / PASO)) * PASO })),
+  ])), [canchas, fecha, lista, filas, finGrilla]);
+  // Las que el jugador canceló dentro de sus 30 minutos (por error) no se muestran
+  const canceladas = lista.filter((r) => r.tipo === "turno" && r.estado === "cancelada" && !r.cancelacion_silenciosa);
+  const detalle = lista.find((r) => r.id === detalleId);
+  const hoy = hoyArgentina();
+
+  // Lo que se dibuja en cada celda: un turno que empieza ahí (ocupa varias filas), una celda tapada
+  // por un turno que empezó antes, horario libre o cancha cerrada
+  const celda = (c, m) => {
+    const { desde, hasta } = horarioCancha(c);
+    const o = porCancha[c.id].find((x) => x.fila === m);
+    if (o) return { tipo: "reserva", o, span: Math.max(1, Math.ceil((Math.min(o.hasta, finGrilla) - m) / PASO)) };
+    if (porCancha[c.id].some((x) => x.fila < m && x.hasta > m)) return { tipo: "tapada" };
+    if (m < desde || m >= hasta) return { tipo: "cerrada" };
+    return { tipo: "libre" };
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <button type="button" onClick={() => setFecha(sumarDias(fecha, -1))} className="px-3 py-1.5 rounded border border-teal-800 text-teal-300" aria-label="Día anterior">‹</button>
+        <input type="date" value={fecha} onChange={(e) => e.target.value && setFecha(e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label="Fecha" />
+        <button type="button" onClick={() => setFecha(sumarDias(fecha, 1))} className="px-3 py-1.5 rounded border border-teal-800 text-teal-300" aria-label="Día siguiente">›</button>
+        <span className="text-sm text-teal-200 font-semibold">{etiquetaFecha(fecha)}{fecha === hoy && " · hoy"}</span>
+        {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
+      </div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
+        <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
+        <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
+      </div>
+      {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+
+      {reservas !== null && (() => {
+        const turnos = lista.filter((r) => r.tipo === "turno" && r.estado === "confirmada");
+        const cobrados = turnos.filter((r) => r.medio_pago && r.precio != null);
+        const porCobrar = turnos.filter((r) => !r.medio_pago && !r.no_vino && r.precio != null);
+        const pedidos = lista.filter((r) => r.estado === "pendiente").length;
+        return (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+            <TarjetaResumen titulo="Turnos" tono="cyan" valor={String(turnos.length)} detalle={pedidos > 0 ? `+ ${pedidos} pedido${pedidos === 1 ? "" : "s"}` : "Confirmados"} />
+            <TarjetaResumen titulo="Cobrado" tono="lime" valor={formatoPrecio(cobrados.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${cobrados.length} turno${cobrados.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Por cobrar" tono="ambar" valor={formatoPrecio(porCobrar.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${porCobrar.length} turno${porCobrar.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Bloqueos" tono="gris" valor={String(lista.filter((r) => r.tipo === "bloqueo" && r.estado === "confirmada").length)} detalle="Horarios cerrados" />
+          </div>
+        );
+      })()}
+
+      {reservas === null ? (
+        !error && <p className="text-sm opacity-60">Cargando…</p>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-teal-800">
+          <table className="w-full border-collapse text-xs" style={{ minWidth: 80 + canchas.length * 120 }}>
+            <thead>
+              <tr style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                <th className="sticky left-0 z-10 w-14 px-2 py-2.5 text-left text-teal-300 font-semibold uppercase tracking-wider text-[11px]" style={{ backgroundColor: "#16332a" }}>Hora</th>
+                {canchas.map((c) => <th key={c.id} className="px-2 py-2.5 text-left text-slate-100 font-semibold uppercase tracking-wider text-[11px]">{c.nombre}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {filas.map((m) => (
+                <tr key={m} className="border-t border-teal-900/60">
+                  <td className="sticky left-0 z-10 px-2 align-top text-teal-500 h-9" style={{ backgroundColor: "#0b1c24" }}>{m % 60 === 0 ? etiquetaHora(m) : ""}</td>
+                  {canchas.map((c) => {
+                    const x = celda(c, m);
+                    if (x.tipo === "tapada") return null;
+                    if (x.tipo === "cerrada") return <td key={c.id} className="h-9" style={{ backgroundColor: "rgba(0,0,0,0.35)" }} />;
+                    if (x.tipo === "libre") {
+                      return (
+                        <td key={c.id} className="h-9 p-0.5">
+                          <button type="button" onClick={() => setNueva({ canchaId: c.id, desde: m })} className="w-full h-full rounded text-teal-700 hover:text-lime-400 hover:bg-white/5" aria-label={`Cargar turno ${c.nombre} ${etiquetaHora(m)}`}>+</button>
+                        </td>
+                      );
+                    }
+                    const { r, desde, hasta } = x.o;
+                    return (
+                      <td key={c.id} rowSpan={x.span} className="p-0.5 align-top">
+                        <button type="button" onClick={() => setDetalleId(r.id)} className="w-full rounded px-2 py-1 text-left leading-tight overflow-hidden flex flex-col justify-start" style={{ ...estiloReserva(r), height: `calc(${x.span * 2.25}rem + ${x.span - 1}px - 4px)` }}>
+                          <span className="block font-semibold truncate">{r.tipo === "bloqueo" ? `🔒 ${r.nota || "Bloqueado"}` : r.nombre}</span>
+                          <span className="block opacity-80">{rangoLabel(desde, hasta)}</span>
+                          {r.tipo !== "bloqueo" && (
+                            <span className="block opacity-80">
+                              {r.estado === "pendiente" ? "Pendiente" : r.no_vino ? "No vino" : r.medio_pago ? `✓ ${medioPagoLabel(r.medio_pago)}` : formatoPrecio(r.precio)}
+                            </span>
+                          )}
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {canceladas.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs uppercase tracking-wide text-teal-500 mb-1">Turnos cancelados este día</p>
+          <ul className="text-sm text-teal-300 space-y-0.5">
+            {canceladas.map((r) => (
+              <li key={r.id}>{canchas.find((c) => c.id === r.cancha_id)?.nombre || "Cancha"} · {rangoLabel(minutoEnGrilla(fecha, r.inicio), minutoEnGrilla(fecha, r.fin))} · {r.nombre}{r.cancelada_por === "jugador" && " · canceló el jugador"}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {nueva && (
+        <NuevoTurnoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
+          onClose={() => setNueva(null)} onDone={() => { setNueva(null); onChanged(); }} />
+      )}
+      {bloqueando && (
+        <BloqueoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
+          onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
+      )}
+      {detalle && (
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
+          onClose={() => setDetalleId(null)} onChanged={onChanged} />
+      )}
+    </div>
+  );
+}
+
+/* Turno cargado por el complejo (por WhatsApp, teléfono o en persona). Puede repetirse varias
+   semanas para los turnos fijos. Queda confirmado. */
+function NuevoTurnoModal({ complejoId, canchas, fecha, reservas, preset, accessToken, onClose, onDone }) {
+  const primeraDuracion = (c) => duracionesOfrecidas(c)[0] || 90;
+  const [canchaId, setCanchaId] = useState(preset.canchaId);
+  const cancha = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const [duracion, setDuracion] = useState(() => primeraDuracion(cancha));
+  const inicios = iniciosPosibles(cancha, duracion);
+  const [desde, setDesde] = useState(preset.desde ?? inicios[0] ?? null);
+  const [form, setForm] = useState({ nombre: "", telefono: "", precio: precioDe(cancha, primeraDuracion(cancha)) ?? "", medio_pago: "", nota: "", semanas: 1 });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (field, value) => setForm((f) => ({ ...f, [field]: value }));
+
+  const cambiarCancha = (id) => {
+    const c = canchas.find((x) => x.id === id);
+    const d = duracionesOfrecidas(c).includes(duracion) ? duracion : primeraDuracion(c);
+    setCanchaId(id); setDuracion(d); set("precio", precioDe(c, d) ?? "");
+  };
+  const cambiarDuracion = (d) => { setDuracion(d); set("precio", precioDe(cancha, d) ?? form.precio); };
+
+  const submit = async () => {
+    const nombre = form.nombre.trim();
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!nombre) { setError("Poné el nombre de quien reserva."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    if (desde == null) { setError("Elegí el horario."); return; }
+    const motivo = motivoNoEntra(cancha, fecha, desde, duracion, reservas);
+    if (motivo === "fuera_de_horario") { setError("Ese turno no entra en el horario de la cancha."); return; }
+    if (motivo === "superpuesto") { setError("Ese horario se pisa con otro turno o bloqueo."); return; }
+    setBusy(true); setError("");
+    const fallidas = [];
+    const serieId = Number(form.semanas) > 1 ? nuevoUuid() : null; // turno fijo
+    for (const f of fechasSemanales(fecha, Number(form.semanas) || 1)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: {
+            complejo_id: complejoId, cancha_id: cancha.id, tipo: "turno", fecha: f,
+            inicio: instante(f, desde), fin: instante(f, desde + duracion), estado: "confirmada", origen: "manual",
+            nombre, telefono, precio: leerPrecio(form.precio), medio_pago: f === fecha ? form.medio_pago || null : null, nota: form.nota.trim() || null,
+            ...(serieId ? { serie_id: serieId } : {}),
+          },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length === 0) { onDone(); return; }
+    setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+  };
+
+  return (
+    <Modal title="Cargar turno" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">{etiquetaFecha(fecha)}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+            <select value={cancha.id} onChange={(e) => cambiarCancha(e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Desde</label>
+            <select value={desde ?? ""} onChange={(e) => setDesde(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {desde != null && !inicios.includes(desde) && <option value={desde}>{etiquetaHora(desde)} (no entra)</option>}
+              {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Duración</label>
+          <div className="flex gap-2">
+            {DURACIONES.map((d) => (
+              <button key={d} type="button" onClick={() => cambiarDuracion(d)} className={`flex-1 px-3 py-2 rounded border ${duracion === d ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                {d} min
+              </button>
+            ))}
+          </div>
+          {desde != null && <p className="text-xs text-teal-500 mt-1">{rangoLabel(desde, desde + duracion)}</p>}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+            <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+            <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Precio</label>
+            <input inputMode="numeric" value={form.precio} onChange={(e) => set("precio", e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Cobro</label>
+            <select value={form.medio_pago} onChange={(e) => set("medio_pago", e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {MEDIOS_PAGO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nota (opcional)</label>
+          <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        <div className="flex items-center gap-2 text-teal-200">
+          <label htmlFor="turno-semanas">Turno fijo: repetir</label>
+          <select id="turno-semanas" value={form.semanas} onChange={(e) => set("semanas", e.target.value)} className="px-2 py-1 rounded border" style={adminInput}>
+            {[1, 2, 3, 4, 6, 8, 12, 16, 24].map((n) => <option key={n} value={n}>{n === 1 ? "solo este día" : `${n} semanas`}</option>)}
+          </select>
+        </div>
+        {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+        <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : "Guardar turno"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Bloqueo de una cancha (o de todas) un rato: lluvia, mantenimiento, un torneo */
+function BloqueoModal({ complejoId, canchas, fecha, reservas, accessToken, onClose, onDone }) {
+  const filas = filasAgenda(canchas);
+  const [canchaId, setCanchaId] = useState("todas");
+  const [desde, setDesde] = useState(filas[0]);
+  const [hasta, setHasta] = useState(filas[filas.length - 1] + PASO);
+  const [motivo, setMotivo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (hasta <= desde) { setError("El horario de fin tiene que ser después del de inicio."); return; }
+    // A cada cancha se le bloquea solo la parte del rango en que está abierta
+    const elegidas = (canchaId === "todas" ? canchas : canchas.filter((c) => c.id === canchaId))
+      .map((c) => ({ c, d: Math.max(desde, horarioCancha(c).desde), h: Math.min(hasta, horarioCancha(c).hasta) }))
+      .filter(({ d, h }) => h > d);
+    if (elegidas.length === 0) { setError("La cancha está cerrada en ese horario: no hace falta bloquearlo."); return; }
+    const pisadas = elegidas.filter(({ c, d, h }) => ocupacion(fecha, c.id, reservas).some((o) => o.desde < h && d < o.hasta)).map(({ c }) => c);
+    if (pisadas.length > 0) { setError(`Hay turnos o bloqueos en ese horario (${pisadas.map((c) => c.nombre).join(", ")}). Cancelalos primero o elegí otro horario.`); return; }
+    setBusy(true); setError("");
+    const fallidas = [];
+    for (const { c, d, h } of elegidas) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: c.id, tipo: "bloqueo", fecha, inicio: instante(fecha, d), fin: instante(fecha, h), estado: "confirmada", origen: "manual", nota: motivo.trim() || null },
+        });
+      } catch (e) { fallidas.push(`${c.nombre}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length === 0) { onDone(); return; }
+    setError(fallidas.join("\n"));
+  };
+
+  return (
+    <Modal title="Bloquear horario" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">{etiquetaFecha(fecha)}</p>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+          <select value={canchaId} onChange={(e) => setCanchaId(e.target.value)} className="w-full px-3 py-2 rounded border" style={adminInput}>
+            <option value="todas">Todas las canchas</option>
+            {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+          </select>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Desde</label>
+            <select value={desde} onChange={(e) => setDesde(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {filas.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">Hasta</label>
+            <select value={hasta} onChange={(e) => setHasta(Number(e.target.value))} className="w-full px-3 py-2 rounded border" style={adminInput}>
+              {filas.map((m) => m + PASO).map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Motivo (opcional)</label>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} maxLength={200} placeholder="Ej: lluvia, mantenimiento, torneo" className="w-full px-3 py-2 rounded border" style={adminInput} />
+        </div>
+        {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+        <button type="button" disabled={busy} onClick={submit} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : "Bloquear"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Confirmar o rechazar un pedido */
+function resolverPedido(id, confirmar, accessToken) {
+  return supabaseTable(`reservas?id=eq.${id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
+}
+
+/* Mensaje de WhatsApp para avisarle al jugador que su turno quedó confirmado o rechazado */
+function mensajeTurno(r, venueName, canchaNombre, confirmado) {
+  const desde = minutoEnGrilla(r.fecha, r.inicio);
+  const turno = `el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchaNombre || "cancha"})`;
+  return confirmado
+    ? `Hola ${r.nombre}, te confirmamos el turno en ${venueName} ${turno}. ¡Te esperamos!`
+    : `Hola ${r.nombre}, no podemos darte el turno en ${venueName} ${turno}. Si querés, pedí otro horario.`;
+}
+
+/* "sábado 10/10 a las 23:30" (hora de Argentina) */
+function etiquetaVencimiento(iso) {
+  const ar = new Date(Date.parse(iso) - 3 * 3600000).toISOString();
+  return `${etiquetaFecha(ar.slice(0, 10)).toLowerCase()} a las ${ar.slice(11, 16)}`;
+}
+
+/* Pedidos online que esperan confirmación (de cualquier día) y cancelaciones recientes de jugadores.
+   Arriba de la agenda, para que el complejo los vea apenas entra. */
+function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
+  const [pendientes, setPendientes] = useState([]);
+  const [canceladas, setCanceladas] = useState([]);
+  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState("");
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre;
+
+  const load = useCallback(async () => {
+    try {
+      await supabaseRpc("vencer_pedidos", {}, accessToken).catch(() => {});
+      const base = `reservas?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+      const hace48 = new Date(Date.now() - 48 * 3600000).toISOString();
+      const [p, c] = await Promise.all([
+        supabaseTable(`${base}&estado=eq.pendiente&order=inicio.asc`, { accessToken }),
+        supabaseTable(`${base}&estado=eq.cancelada&cancelada_por=eq.jugador&cancelacion_silenciosa=is.false&cancelada_at=gte.${encodeURIComponent(hace48)}&order=cancelada_at.desc`, { accessToken }),
+      ]);
+      setPendientes(p); setCanceladas(c); setError("");
+    } catch { setError("No se pudieron cargar los pedidos pendientes."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { load(); }, [load, version]);
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const resolver = async (r, confirmar) => {
+    setBusyId(r.id); setError("");
+    try {
+      await resolverPedido(r.id, confirmar, accessToken);
+      setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
+      onChanged();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusyId(null); }
+  };
+
+  const avisables = resueltos.filter((r) => r.telefono);
+  if (pendientes.length === 0 && canceladas.length === 0 && avisables.length === 0 && !error) return null;
+  const linea = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id) || "Cancha"}`;
+
+  return (
+    <div className="rounded-xl p-3 mb-5 space-y-3" style={{ ...neonStyle("#fbbf24"), backgroundColor: "rgba(8,18,24,0.7)" }}>
+      {pendientes.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-amber-300 mb-2">Pedidos para confirmar ({pendientes.length})</p>
+          <ul className="space-y-3">
+            {pendientes.map((r) => {
+              const venceEn = Date.parse(r.vence_at) - Date.now();
+              return (
+                <li key={r.id} className="text-sm">
+                  <p className="font-semibold text-teal-100">{r.nombre} {r.telefono && <a href={`https://wa.me/${r.telefono}`} target="_blank" rel="noopener noreferrer" className="text-xs text-lime-400 underline font-normal ml-1">WhatsApp</a>}</p>
+                  <p className="text-teal-300">{linea(r)} <button type="button" onClick={() => onVer(r.fecha)} className="text-xs text-teal-400 underline ml-1">ver día</button></p>
+                  {r.vence_at && <p className={`text-xs ${venceEn < 3 * 3600000 ? "text-amber-300" : "text-teal-500"}`}>Si no lo confirmás, vence el {etiquetaVencimiento(r.vence_at)}</p>}
+                  <div className="flex gap-2 mt-2 max-w-sm">
+                    <button type="button" disabled={busyId === r.id} onClick={() => resolver(r, true)} className="flex-1 px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
+                    <button type="button" disabled={busyId === r.id} onClick={() => resolver(r, false)} className="flex-1 px-3 py-1.5 rounded-lg border border-red-400 text-red-400 disabled:opacity-50">Rechazar</button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {avisables.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {avisables.map((r) => (
+            <li key={r.id} className="text-teal-300">
+              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} ·{" "}
+              <a href={waLink(r.telefono, mensajeTurno(r, venueName, nombreCancha(r.cancha_id), r.confirmado))} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">Avisarle por WhatsApp</a>
+            </li>
+          ))}
+        </ul>
+      )}
+      {canceladas.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-teal-400 mb-1">Turnos que cancelaron los jugadores (últimas 48 h)</p>
+          <ul className="text-sm text-teal-300 space-y-0.5">
+            {canceladas.map((r) => <li key={r.id}>{r.nombre} · {linea(r)}</li>)}
+          </ul>
+        </div>
+      )}
+      {error && <p className="text-sm text-red-400">{error}</p>}
+    </div>
+  );
+}
+
+/* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
+   bloquear al jugador si lo pidió online */
+function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
+  const dueno = rol === "dueno";
+  const [busy, setBusy] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [error, setError] = useState("");
+  const [bloqueado, setBloqueado] = useState(null); // ¿el jugador está bloqueado en este complejo?
+  const [confirmBloqueo, setConfirmBloqueo] = useState(false);
+  // Lo que se cargó a este turno desde el mostrador y todavía no se cobró (ver 20261029_cargar_a_turno.sql)
+  const [consumos, setConsumos] = useState(null); // { pendiente, detalle } | null
+  const [aviso, setAviso] = useState("");
+  const pendiente = Number(consumos?.pendiente || 0);
+  const desde = minutoEnGrilla(fecha, r.inicio);
+  const hasta = minutoEnGrilla(fecha, r.fin);
+  const bloqueoUrl = `jugadores_bloqueados?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&jugador_id=eq.${r.jugador_id}`;
+
+  useEffect(() => {
+    if (!r.jugador_id || !dueno) return;
+    supabaseTable(bloqueoUrl, { accessToken }).then((rows) => setBloqueado(rows.length > 0)).catch(() => {});
+  }, [bloqueoUrl, r.jugador_id, accessToken, dueno]);
+
+  const cargarConsumos = useCallback(async () => {
+    if (r.tipo === "bloqueo") return;
+    try {
+      const rows = await supabaseRpc("consumos_de_turnos", { p_complejo: r.complejo_id, p_fecha: fecha }, accessToken);
+      setConsumos((rows || []).find((x) => x.reserva_id === r.id) || null);
+    } catch { setConsumos(null); }
+  }, [r.id, r.tipo, r.complejo_id, fecha, accessToken]);
+  useEffect(() => { cargarConsumos(); }, [cargarConsumos]);
+
+  const run = async (fn) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); await onChanged(); await cargarConsumos(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cobrarConsumos = (medio) => run(async () => {
+    const n = await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medio }, accessToken);
+    setAviso(`Consumos cobrados: ${formatoPrecio(n) || "$0"}.`);
+  });
+  // No vinieron o se cancela: lo pendiente pasa a la cuenta del titular (por WhatsApp o nombre; si no tiene, se le crea)
+  const pasarACuenta = () => run(async () => {
+    const base = `cuentas?complejo_id=eq.${encodeURIComponent(r.complejo_id)}&select=id`;
+    let [c] = r.telefono ? await supabaseTable(`${base}&telefono=eq.${r.telefono}`, { accessToken }) : [];
+    if (!c) [c] = await supabaseTable(`${base}&nombre=eq.${encodeURIComponent(r.nombre)}`, { accessToken });
+    if (!c) [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: r.complejo_id, nombre: r.nombre, telefono: r.telefono || null }, accessToken, prefer: "return=representation" });
+    const n = await supabaseRpc("pasar_consumos_a_cuenta", { p_reserva: r.id, p_cuenta: c.id }, accessToken);
+    setAviso(`${formatoPrecio(n) || "$0"} pasaron a la cuenta de ${r.nombre}.`);
+  });
+  const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
+  const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  // Turno fijo: este y todos los que siguen de la serie
+  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const confirmar = () => patch({ estado: "confirmada" });
+  const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
+  const cobro = (medio) => run(async () => {
+    await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" });
+    if (medio && !r.medio_pago && pendiente > 0) await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medio }, accessToken);
+  });
+  const cambiarBloqueo = async () => {
+    setBusy(true); setError("");
+    try {
+      if (bloqueado) await supabaseTable(bloqueoUrl, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      else await supabaseTable("jugadores_bloqueados", { method: "POST", body: { complejo_id: r.complejo_id, jugador_id: r.jugador_id }, accessToken, prefer: "return=minimal" });
+      setBloqueado(!bloqueado); setConfirmBloqueo(false);
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const btn = "px-3 py-2 rounded-lg text-sm border disabled:opacity-50";
+
+  return (
+    <Modal title={r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-200">{cancha?.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(desde, hasta)} ({hasta - desde} min)</p>
+        {r.tipo === "bloqueo" ? (
+          <>
+            {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
+            <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>
+          </>
+        ) : (
+          <>
+            <div className="text-teal-300 space-y-1">
+              {r.precio != null && <p>Precio: {formatoPrecio(r.precio)}</p>}
+              {r.telefono && <p>WhatsApp: <a href={`https://wa.me/${r.telefono}`} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">{formatArPhone(r.telefono)}</a></p>}
+              {r.nota && <p>Nota: {r.nota}</p>}
+              <p className="text-xs text-teal-500">{r.origen === "online" ? "Pedido online" : "Cargado por el complejo"}{r.serie_id && " · turno fijo (se repite todas las semanas)"}{r.estado === "pendiente" && " · esperando confirmación"}</p>
+            </div>
+            {r.estado === "pendiente" && (
+              <div className="flex gap-2">
+                <button type="button" disabled={busy} onClick={confirmar} className="flex-1 px-3 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Confirmar</button>
+                <button type="button" disabled={busy} onClick={rechazar} className={`flex-1 ${btn} border-red-400 text-red-400`}>Rechazar</button>
+              </div>
+            )}
+            {r.estado === "confirmada" && (
+              <>
+                {r.origen === "online" && r.telefono && (
+                  <a href={waLink(r.telefono, mensajeTurno(r, venueName, cancha?.nombre, true))} target="_blank" rel="noopener noreferrer" className="block text-lime-400 underline">Avisarle por WhatsApp que está confirmado</a>
+                )}
+                <div>
+                  <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {MEDIOS_PAGO.map(([k, l]) => (
+                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`${btn} px-3 flex-auto ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                    ))}
+                  </div>
+                </div>
+                {pendiente > 0 && (
+                  <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b66" }}>
+                    <p className="text-amber-300 font-semibold">Consumos sin cobrar: {formatoPrecio(pendiente)}</p>
+                    {consumos?.detalle && <p className="text-xs text-slate-400">{consumos.detalle}</p>}
+                    {r.medio_pago ? (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {MEDIOS_PAGO.filter(([k]) => k).map(([k, l]) => (
+                          <button key={k} type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className={`${btn} px-2 border-teal-700 text-slate-100`}>{l}</button>
+                        ))}
+                      </div>
+                    ) : <p className="text-xs text-slate-400">Se cobran junto con la cancha, o solos:{" "}
+                      {MEDIOS_PAGO.filter(([k]) => k).map(([k, l], i) => <span key={k}>{i > 0 && " · "}<button type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className="underline text-slate-200">{l}</button></span>)}
+                    </p>}
+                    {verCuentas && <button type="button" disabled={busy} onClick={pasarACuenta} className="text-xs text-cyan-300 underline">Pasar a la cuenta de {r.nombre}</button>}
+                  </div>
+                )}
+                {aviso && <p className="text-lime-400">{aviso}</p>}
+                <label className="flex items-center gap-2 text-teal-200">
+                  <input type="checkbox" checked={r.no_vino} disabled={busy} onChange={(e) => patch({ no_vino: e.target.checked })} /> No vino
+                </label>
+                {confirmCancel && pendiente > 0 ? (
+                  <p className="text-amber-300">Este turno tiene {formatoPrecio(pendiente)} de consumos sin cobrar: cobralos o pasalos a la cuenta de {r.nombre} antes de cancelar.{" "}
+                    <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">Entendido</button>
+                  </p>
+                ) : confirmCancel ? (
+                  <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
+                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
+                    {r.serie_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
+                    <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
+                  </p>
+                ) : (
+                  <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>Cancelar turno</button>
+                )}
+              </>
+            )}
+            {dueno && r.jugador_id && bloqueado !== null && (
+              <div className="border-t border-teal-900 pt-3">
+                {bloqueado ? (
+                  <p className="text-amber-300">Este jugador está bloqueado: no puede pedirte turnos online.{" "}
+                    <button type="button" disabled={busy} onClick={cambiarBloqueo} className="text-teal-300 underline">Desbloquear</button>
+                  </p>
+                ) : confirmBloqueo ? (
+                  <p className="text-red-300">¿Bloquear a {r.nombre}? No va a poder pedirte más turnos online.{" "}
+                    <button type="button" disabled={busy} onClick={cambiarBloqueo} className="font-semibold text-red-400">Sí, bloquear</button>{" "}
+                    <button type="button" onClick={() => setConfirmBloqueo(false)} className="text-teal-400 ml-2">No</button>
+                  </p>
+                ) : (
+                  <button type="button" onClick={() => setConfirmBloqueo(true)} className="text-xs text-teal-500 underline">Bloquear a este jugador</button>
+                )}
+              </div>
+            )}
+          </>
+        )}
+        {error && <p className="text-red-400">{error}</p>}
+      </div>
+    </Modal>
   );
 }
 
@@ -7776,7 +10968,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
   const categoriesById = Object.fromEntries(tournament.categories.map((c) => [c.id, c]));
   const pending = inscripciones.filter((i) => i.estado === "pendiente").sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
   const history = inscripciones.filter((i) => i.estado !== "pendiente");
-  const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const when = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "America/Argentina/Buenos_Aires" });
   const names = (i) => (i.jugador2_nombre ? `${i.jugador1_nombre} / ${i.jugador2_nombre}` : i.jugador1_nombre);
 
   // Aceptadas o rechazadas recién ({ ...inscripcion, estado }), para ofrecer el aviso por WhatsApp
@@ -8035,9 +11227,8 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
 
 /* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
    pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
-function CategoryAdminView({ category, format, playDates, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
-  const [ownTab, setTab] = useState("parejas");
-  const tab = section || ownTab;
+function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
+  const tab = section || "parejas"; // la sección la elige el menú del torneo
   const [pairName, setPairName] = useState("");
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
@@ -8137,7 +11328,13 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   };
 
   // "En curso" (o null para sacarlo): lo marca el organizador a mano al mandar el partido a la cancha
+  const [liveAsk, setLiveAsk] = useState(null); // clave del partido a poner "en curso" (ver LiveCourtModal)
   const setGroupLiveStatus = (groupId, matchId, liveStatus) => {
+    if (liveStatus === "en_curso") {
+      const all = collectScheduleableMatches(tournament);
+      const sm = all.find((x) => x.categoryId === category.id && x.matchId === matchId);
+      if (sm && liveConflict(all, sm, format)) { setLiveAsk(sm.key); return; }
+    }
     onUpdateCategory({
       ...category,
       groups: category.groups.map((g) => (g.id !== groupId ? g : { ...g, matches: g.matches.map((m) => (m.id === matchId ? { ...m, liveStatus } : m)) })),
@@ -8251,7 +11448,7 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
 
   const applySwap = () => {
     if (!swapA || !swapB || swapA === swapB) return;
-    onUpdateCategory({ ...category, bracket: swapBracketPairs(category.bracket, swapA, swapB) });
+    onUpdateCategory({ ...category, bracket: swapBracketPairs(category.bracket, swapA, swapB, format) });
     setSwapA(""); setSwapB("");
   };
 
@@ -8270,12 +11467,17 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
     onUpdateCategory({ ...category, bracket: propagateBracket(rounds, format) });
   };
 
-  const categoryTabs = super8
-    ? [["parejas", individual ? "1. Jugadores" : "1. Parejas"], ["super8", "2. Partidos y posiciones"]]
-    : [["parejas", "1. Parejas"], ["grupos", "2. Grupos"], ["llave", "3. Llave final"]];
+  const liveAskMatch = liveAsk ? collectScheduleableMatches(tournament).find((x) => x.key === liveAsk) : null;
 
   return (
     <div>
+      {liveAskMatch && (
+        <LiveCourtModal
+          m={liveAskMatch} tournament={tournament} matches={collectScheduleableMatches(tournament)}
+          pairsById={Object.assign({}, ...tournament.categories.map((c) => categoryEntitiesById(c)))}
+          update={onUpdateTournament} onClose={() => setLiveAsk(null)}
+        />
+      )}
       {super8 && (
         <p className="text-xs text-teal-400 mb-4" style={F.body}>
           Formato <span className="text-lime-400 font-semibold">{CATEGORY_FORMAT_LABEL[category.format]}</span>: {individual
@@ -8283,14 +11485,6 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
             : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.
         </p>
       )}
-      {!section && <div className="flex gap-2 mb-6 border-b border-teal-800">
-        {categoryTabs.map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)} className={`px-4 py-2 text-sm ${tab === key ? "border-b-2 border-lime-400 text-lime-400" : "text-teal-400"}`} style={F.body}>
-            {label}
-          </button>
-        ))}
-      </div>}
-
       {tab === "parejas" && (
         <div>
           <div className="flex gap-2 mb-1">
@@ -8675,16 +11869,18 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         {m.walkover ? (
                           <p className="text-amber-400 font-semibold text-xs">WO</p>
                         ) : (() => {
-                          const { a: setsA, b: setsB } = setsWon({ sets: countedSets(m, format) }); // con RET, sets completados; sin sets de más
+                          // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
+                          const jugados = matchIsPlayed(m, format) ? countedSets(m, format) : [];
+                          const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
                           return (
                             <>
                               <div className={`flex justify-between items-center gap-2 ${w && w === m.pairA ? "font-semibold" : ""}`} style={w && w === m.pairA ? { color } : undefined}>
                                 <span className="flex items-center gap-1 min-w-0">{w && w === m.pairA && <WinnerCheck />}<PairName id={m.pairA} pairsById={pairsById} bye={walked.byes[ri][mi].pairA} placeholder={m.placeholderA} origin={ri === 0 ? origins[m.pairA] : null} /></span>
-                                {editable && <span>{matchIsPlayed(m, format) ? setsA : ""}</span>}
+                                {editable && games("a")}
                               </div>
                               <div className={`flex justify-between items-center gap-2 ${w && w === m.pairB ? "font-semibold" : ""}`} style={w && w === m.pairB ? { color } : undefined}>
                                 <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
-                                {editable && <span>{matchIsPlayed(m, format) ? setsB : ""}</span>}
+                                {editable && games("b")}
                               </div>
                               {m.retired && <p className="text-red-400 font-semibold text-xs">RET · se retiró {pairsById[m.retired]?.name || "—"}</p>}
                             </>
@@ -8693,8 +11889,8 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
                         {/* El resultado se carga en la misma ventanita que en Horarios y En cancha */}
                         {editable && (
                           <button type="button" onClick={() => setResultMatch({ ...m, number: nums.get(m.id), categoryName: category.name, label: roundStageLabel(total, ri) })} className="text-xs underline text-teal-300 hover:text-lime-400">
-                            {matchHasScore(m)
-                              ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
+                            {matchIsPlayed(m, format) ? "Editar resultado ✎"
+                              : matchHasScore(m) ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
                               : "+ Resultado"}
                           </button>
                         )}
@@ -8723,98 +11919,27 @@ function CategoryAdminView({ category, format, playDates, tournament, onUpdateCa
   );
 }
 
-/* Botones de categoría. Sin onAdd / onRename / onDelete sirven solo para elegir una (en
-   Inscripciones, Grupos y Llaves); las categorías se crean y editan en Configuración. */
-function CategoryTabs({ categories, activeId, onSelect, onAdd, onRename, onDelete }) {
-  const editable = !!(onRename && onDelete);
-  const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [editingId, setEditingId] = useState(null);
-  const submitNew = () => {
-    if (!newName.trim()) return;
-    onAdd(newName.trim());
-    setNewName(""); setAdding(false);
-  };
-  const [editName, setEditName] = useState("");
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
-
+/* Botones para elegir la categoría (en Inscripciones, Grupos y Llaves); las categorías se crean y
+   editan en Configuración. */
+function CategoryTabs({ categories, activeId, onSelect }) {
   return (
     <div className="mb-6">
       <div className="flex gap-2 items-center overflow-x-auto pb-1 sm:flex-wrap">
         {categories.map((c, ci) => {
           const color = GROUP_COLORS[ci % GROUP_COLORS.length];
           return (
-          <div key={c.id} className="flex items-center shrink-0">
-            {editingId === c.id ? (
-              <span className="flex items-center gap-1">
-                <input
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className="px-2 py-1 rounded border text-sm w-32" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-                />
-                <button type="button" onClick={() => { if (editName.trim()) { onRename(c.id, editName.trim()); setEditingId(null); } }} className="text-xs text-lime-400">✓</button>
-                <button type="button" onClick={() => setEditingId(null)} className="text-xs text-teal-400">✕</button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onSelect(c.id)}
-                onDoubleClick={editable ? () => { setEditingId(c.id); setEditName(c.name); } : undefined}
-                className="whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
-                style={
-                  c.id === activeId
-                    ? { backgroundColor: color, color: "#14181f", borderColor: color }
-                    : { backgroundColor: color + "14", color, borderColor: color + "40" }
-                }
-              >
-                {c.name}
-              </button>
-            )}
-            {editable && c.id === activeId && editingId !== c.id && (
-              confirmingDeleteId === c.id ? (
-                <span className="ml-1 text-xs">
-                  <button type="button" onClick={() => { onDelete(c.id); setConfirmingDeleteId(null); }} className="text-red-400 font-semibold mr-1">Confirmar</button>
-                  <button type="button" onClick={() => setConfirmingDeleteId(null)} className="text-teal-400">✕</button>
-                </span>
-              ) : (
-                <span className="ml-1 flex gap-1">
-                  <button type="button" onClick={() => { setEditingId(c.id); setEditName(c.name); }} className="text-xs text-teal-400 hover:text-lime-400" title="Renombrar">✎</button>
-                  <button type="button" onClick={() => setConfirmingDeleteId(c.id)} className="text-xs text-red-400" title="Eliminar categoría">🗑</button>
-                </span>
-              )
-            )}
-          </div>
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => onSelect(c.id)}
+              className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border transition font-medium"
+              style={c.id === activeId ? { backgroundColor: color, color: "#14181f", borderColor: color } : { backgroundColor: color + "14", color, borderColor: color + "40" }}
+            >
+              {c.name}
+            </button>
           );
         })}
-
-        {!onAdd ? null : adding ? (
-          <span className="flex items-center gap-1 shrink-0">
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitNew(); }}
-              placeholder="Ej: 4ta Caballeros"
-              autoFocus
-              className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-            <button
-              type="button"
-              onClick={submitNew}
-              className="px-3 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}
-            >
-              Agregar
-            </button>
-            <button type="button" onClick={() => { setAdding(false); setNewName(""); }} className="text-sm text-teal-400" style={F.body}>Cancelar</button>
-          </span>
-        ) : (
-          <button type="button" onClick={() => setAdding(true)} className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm border border-dashed border-teal-700 text-teal-400 hover:border-lime-400 hover:text-lime-400" style={F.body}>
-            + Agregar categoría
-          </button>
-        )}
       </div>
-      {editable && categories.length > 0 && (
-        <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Tip: doble clic en una categoría para renombrarla.</p>
-      )}
     </div>
   );
 }
@@ -8858,8 +11983,9 @@ function ProgressMark({ state }) {
 
 /* Configuración: las categorías del torneo con su nombre y su cupo (vacío = sin límite; el Súper 8
    es siempre de 8), para agregar, renombrar y borrar en un solo lugar */
-function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
+function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onPrecioTorneo, onPrecioCategoria }) {
   const [newName, setNewName] = useState("");
+  const [precios, setPrecios] = useState({}); // precios en edición ("torneo" o id de categoría)
   const [names, setNames] = useState({}); // nombres en edición, se guardan al salir del campo
   const [cupos, setCupos] = useState({});
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
@@ -8869,6 +11995,19 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
     <div className="border border-teal-800 rounded-lg p-4 mb-6" style={F.body}>
       <p className="text-sm font-semibold mb-1">Categorías y cupos</p>
       <p className="text-[11px] text-teal-600 mb-3">Cada categoría tiene sus parejas, grupos y llave. El cupo cuenta todas las parejas anotadas (vacío = sin límite).</p>
+      {onPrecioTorneo && (
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          <label htmlFor="precio-torneo" className="text-sm text-teal-300">Inscripción por jugador</label>
+          <input
+            id="precio-torneo" inputMode="numeric"
+            value={precios.torneo ?? (tournament.precioJugador ?? "")}
+            onChange={(e) => setPrecios({ ...precios, torneo: e.target.value })}
+            onBlur={() => { if (precios.torneo !== undefined) { onPrecioTorneo(leerPrecio(precios.torneo)); setPrecios(({ torneo: _, ...rest }) => rest); } }}
+            placeholder="Ej: 15000" className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
+          />
+          <span className="text-[11px] text-teal-600">Para todas las categorías; si una tiene otro precio, ponelo al lado de su cupo.</span>
+        </div>
+      )}
       <div className="space-y-2">
         {tournament.categories.map((c, ci) => {
           const color = GROUP_COLORS[ci % GROUP_COLORS.length];
@@ -8892,6 +12031,16 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
                   onChange={(e) => setCupos({ ...cupos, [c.id]: e.target.value })}
                   onBlur={() => { if (cupos[c.id] !== undefined) { onCupo(c.id, parseCupo(cupos[c.id])); setCupos(({ [c.id]: _, ...rest }) => rest); } }}
                   placeholder="Sin límite" aria-label={`Cupo de ${c.name}`}
+                  className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
+                />
+              )}
+              {onPrecioCategoria && (
+                <input
+                  inputMode="numeric"
+                  value={precios[c.id] ?? (c.precioJugador ?? "")}
+                  onChange={(e) => setPrecios({ ...precios, [c.id]: e.target.value })}
+                  onBlur={() => { if (precios[c.id] !== undefined) { onPrecioCategoria(c.id, leerPrecio(precios[c.id])); setPrecios(({ [c.id]: _, ...rest }) => rest); } }}
+                  placeholder={tournament.precioJugador != null ? `$ ${tournament.precioJugador}` : "$ por jugador"} aria-label={`Precio por jugador de ${c.name}`}
                   className="w-28 px-2 py-1.5 rounded border text-sm" style={input}
                 />
               )}
@@ -8919,26 +12068,4225 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo }) {
   );
 }
 
-function AdminTournament({ tournament, update: save, onBack, inscripciones = [], onResolveInscripcion }) {
+/* ---------- Cobro de inscripciones (ver 20261018_cobros_inscripciones.sql) ---------- */
+
+const MEDIOS_COBRO = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"]];
+// Cuentas e inscripciones también aceptan débito (ver 20261029_cargar_a_turno.sql)
+const MEDIOS_CUENTA = [...MEDIOS_COBRO, ["debito", "Débito"]];
+const medioCobroLabel = (m) => MEDIOS_VENTA.find(([k]) => k === m)?.[1] || m;
+
+/* Precio por jugador de una categoría: el suyo o, si no tiene, el del torneo (null = sin precio) */
+function precioJugador(tournament, category) {
+  const p = category?.precioJugador ?? tournament?.precioJugador;
+  return p == null || p === "" ? null : Number(p);
+}
+
+/* Jugadores de una pareja para cobrar: 2 (o 1 en el Súper 8 individual), con su nombre */
+function jugadoresDePareja(category, pair) {
+  const cuantos = category.format === "super8_individual" ? 1 : 2;
+  const nombres = cuantos === 1 ? [pair.name] : splitPair(pair.name);
+  return Array.from({ length: cuantos }, (_, i) => ({ jugador: i + 1, nombre: nombres[i] || `Jugador ${i + 1}` }));
+}
+
+/* Pestaña "Cobros" de un torneo: quién pagó la inscripción y quién debe, por jugador. La usan el
+   organizador y sus colaboradores con acceso a torneos; anular un pago es solo del organizador. */
+function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId, esDueno, complejoIds = [] }) {
+  const [pagos, setPagos] = useState(null);
+  const [error, setError] = useState("");
+  const [filtro, setFiltro] = useState("todos"); // todos | deben | pagaron
+  const [cobrando, setCobrando] = useState(null); // clave del jugador con el formulario abierto
+  const [form, setForm] = useState({ monto: "", medio: "efectivo" });
+  const [busy, setBusy] = useState(false);
+  const [anulando, setAnulando] = useState(null);
+  const [verHistorial, setVerHistorial] = useState(null);
+  // Cuentas de consumos del complejo y qué jugador está vinculado a cuál (null = no hay o no tiene permiso)
+  const [links, setLinks] = useState(null);
+  const [cuentas, setCuentas] = useState(null);
+  const [productosCx, setProductosCx] = useState([]);
+  const [consumiendo, setConsumiendo] = useState(null); // clave del jugador anotando consumos
+  const [avisoFila, setAvisoFila] = useState(null); // { k, texto } después de anotar o cobrar
+  const [vinculando, setVinculando] = useState(null); // clave del jugador con el selector de cuenta abierto
+  const [cobrandoTodo, setCobrandoTodo] = useState(null); // clave del jugador cobrando inscripción + consumos
+  const [confirmandoCuenta, setConfirmandoCuenta] = useState(null); // clave del jugador: ¿es la misma persona que una cuenta con su nombre?
+  const complejosKey = complejoIds.join(",");
+
+  const load = useCallback(async () => {
+    try {
+      setPagos(await supabaseTable(`pagos_inscripcion?torneo_id=eq.${encodeURIComponent(tournament.id)}&order=created_at.asc`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los cobros. Revisá la conexión."); }
+    if (!complejosKey) return;
+    const ids = complejosKey.split(",");
+    const inIds = ids.map(encodeURIComponent).join(",");
+    const [ls, ps, ...cs] = await Promise.all([
+      supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}`, { accessToken }).catch(() => null),
+      supabaseTable(`productos?complejo_id=in.(${inIds})&activo=is.true&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }).catch(() => []),
+      ...ids.map((cid) => supabaseRpc("cuentas_con_saldo", { p_complejo: cid }, accessToken).then((r) => (r || []).map((c) => ({ ...c, complejo_id: cid }))).catch(() => null)),
+    ]);
+    if (ls && cs.every(Boolean)) { setLinks(ls); setCuentas(cs.flat()); setProductosCx(ps || []); } else { setLinks(null); setCuentas(null); }
+  }, [tournament.id, accessToken, complejosKey]);
+  useEffect(() => { load(); }, [load]);
+
+  const clave = (catId, pairId, jugador) => `${catId}|${pairId}|${jugador}`;
+  const pagosDe = (k) => (pagos || []).filter((p) => clave(p.categoria_id, p.pareja_id, p.jugador) === k);
+
+  // Una fila por jugador, con lo que pagó y lo que debe
+  const filas = tournament.categories.flatMap((c) => c.pairs.flatMap((pair) => jugadoresDePareja(c, pair).map(({ jugador, nombre }) => {
+    const k = clave(c.id, pair.id, jugador);
+    const pagado = pagosDe(k).reduce((s, p) => s + Number(p.monto), 0);
+    const precio = precioJugador(tournament, c);
+    const debe = precio == null ? null : Math.max(0, precio - pagado);
+    const telefono = inscripciones.find((i) => i.id === pair.inscripcionId)?.telefono || null;
+    return { k, c, pair, jugador, nombre, pagado, precio, debe, telefono };
+  })));
+  const conPrecio = filas.filter((f) => f.precio != null);
+  const esperado = conPrecio.reduce((s, f) => s + f.precio, 0);
+  const cobrado = (pagos || []).reduce((s, p) => s + Number(p.monto), 0);
+  const falta = conPrecio.reduce((s, f) => s + f.debe, 0);
+  const porMedio = MEDIOS_CUENTA.map(([m, l]) => [l, (pagos || []).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, v]) => v > 0);
+  const sinPrecio = tournament.categories.some((c) => c.pairs.length > 0 && precioJugador(tournament, c) == null);
+
+  const visibles = filas.filter((f) => filtro === "todos" || (filtro === "deben" ? f.debe == null ? f.pagado === 0 : f.debe > 0 : f.debe === 0 || (f.debe == null && f.pagado > 0)));
+
+  const abrir = (f) => { setCobrando(f.k); setForm({ monto: f.debe ? String(f.debe) : f.precio == null ? "" : "", medio: "efectivo" }); setError(""); };
+  const cobrar = async (f) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("pagos_inscripcion", {
+        method: "POST", accessToken, prefer: "return=minimal",
+        body: { torneo_id: tournament.id, organizador_id: organizerId, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, monto, medio: form.medio },
+      });
+      setCobrando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const vincular = async (f, cuentaId) => {
+    setBusy(true); setError("");
+    try {
+      const cuenta = cuentas.find((c) => c.id === cuentaId);
+      await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: cuenta.id, complejo_id: cuenta.complejo_id }, accessToken, prefer: "return=minimal" });
+      setVinculando(null);
+      await load();
+      return true;
+    } catch (e) { setError(reservaErrorText(e)); return false; }
+    finally { setBusy(false); }
+  };
+  // Cuentas que ya existen con el mismo nombre del jugador: antes de crearle una nueva se pregunta
+  const mismoNombre = (f) => (cuentas || []).filter((x) => nameMatch(f.nombre, x.nombre) === "igual");
+  const abrirConsumo = (f) => {
+    setAvisoFila(null); setError("");
+    if (!cuentaDe(f) && mismoNombre(f).length > 0) setConfirmandoCuenta(f.k);
+    else setConsumiendo(f.k);
+  };
+  // La cuenta del jugador: la vinculada o, si no tiene, una nueva con su nombre (se crea sola)
+  const cuentaDe = (f) => {
+    const link = (links || []).find((l) => l.categoria_id === f.c.id && l.pareja_id === f.pair.id && l.jugador === f.jugador);
+    return link ? (cuentas || []).find((x) => x.id === link.cuenta_id) || null : null;
+  };
+  const asegurarCuenta = async (f) => {
+    const ya = cuentaDe(f);
+    if (ya) return ya;
+    const [nueva] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoIds[0], nombre: f.nombre }, accessToken, prefer: "return=representation" });
+    await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: tournament.id, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, cuenta_id: nueva.id, complejo_id: nueva.complejo_id }, accessToken, prefer: "return=minimal" });
+    return nueva;
+  };
+  const anotarA = async (f, items, otro, total) => {
+    setBusy(true); setError("");
+    try {
+      const cuenta = await asegurarCuenta(f);
+      await guardarConsumos(accessToken, cuenta, items, otro);
+      await load();
+      setAvisoFila({ k: f.k, texto: `Anotado ${formatoPrecio(total)} a ${f.nombre}` });
+      setConsumiendo(null);
+      return true;
+    } catch (e) { setError(reservaErrorText(e)); return false; }
+    finally { setBusy(false); }
+  };
+  const desvincular = async (f) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(tournament.id)}&categoria_id=eq.${encodeURIComponent(f.c.id)}&pareja_id=eq.${encodeURIComponent(f.pair.id)}&jugador=eq.${f.jugador}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  // Inscripción + consumos de la cuenta en un solo pago (primero la inscripción)
+  const cobrarTodo = async (cuenta) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
+      setCobrandoTodo(null);
+      setAvisoFila(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const anular = async (p) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`pagos_inscripcion?id=eq.${p.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setAnulando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+  const filtroBtn = (key, label) => (
+    <button type="button" onClick={() => setFiltro(key)} className={`px-3 py-1 rounded-full text-sm border ${filtro === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  if (tournament.categories.every((c) => c.pairs.length === 0)) {
+    return <p className="text-sm opacity-60" style={F.body}>Todavía no hay parejas anotadas.</p>;
+  }
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {pagos !== null && <div className="grid grid-cols-3 gap-2">
+        {[["Cobrado", cobrado, BRAND.lime], ["Falta", falta, "#fbbf24"], ["Total", esperado, BRAND.cyan]].map(([l, v, color]) => (
+          <div key={l} className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+            <p className="text-[11px] uppercase text-teal-400">{l}</p>
+            <p className="text-base font-semibold" style={{ color }}>{formatoPrecio(v) || "$0"}</p>
+          </div>
+        ))}
+      </div>}
+      {porMedio.length > 0 && <p className="text-xs text-teal-400">{porMedio.map(([l, v]) => `${l}: ${formatoPrecio(v)}`).join(" · ")}</p>}
+      {sinPrecio && <p className="text-xs text-amber-300">Hay categorías sin precio por jugador: se carga en Configuración → Categorías. Mientras tanto se pueden registrar pagos poniendo el monto.</p>}
+
+      <div className="flex flex-wrap gap-2">
+        {filtroBtn("todos", "Todos")}
+        {filtroBtn("deben", "Deben")}
+        {filtroBtn("pagaron", "Pagaron")}
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {pagos === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : (
+        tournament.categories.filter((c) => visibles.some((f) => f.c.id === c.id)).map((c) => (
+          <div key={c.id}>
+            <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">{c.name}{precioJugador(tournament, c) != null && ` · ${formatoPrecio(precioJugador(tournament, c))} por jugador`}</p>
+            <ul className="space-y-2">
+              {/* Una tarjeta por pareja, con sus dos jugadores adentro */}
+              {c.pairs.filter((pair) => visibles.some((f) => f.c.id === c.id && f.pair.id === pair.id)).map((pair) => (
+              <li key={pair.id} className="rounded-lg border border-teal-900 overflow-hidden">
+                {c.format !== "super8_individual" && <p className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-teal-400 border-b border-teal-900" style={{ backgroundColor: "rgba(20,60,70,0.25)" }}>{pair.name}</p>}
+                <div className="divide-y divide-teal-900">
+              {visibles.filter((f) => f.c.id === c.id && f.pair.id === pair.id).map((f) => {
+                const estado = f.debe === 0 ? ["Pagó", BRAND.lime] : f.pagado > 0 ? [f.debe == null ? `Pagó ${formatoPrecio(f.pagado)}` : `Debe ${formatoPrecio(f.debe)}`, "#fbbf24"] : [f.debe == null ? "Sin pagos" : `Debe ${formatoPrecio(f.debe)}`, "#f87171"];
+                const historial = pagosDe(f.k);
+                return (
+                  <div key={f.k} className="p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex-1 min-w-[10rem]">
+                        {c.format !== "super8_individual" && <p className="text-[11px] text-teal-500">Jugador {f.jugador}</p>}
+                        <p className="text-teal-100 font-semibold">{f.nombre}</p>
+                      </div>
+                      <span className="text-xs font-semibold" style={{ color: estado[1] }}>● {estado[0]}</span>
+                      {(() => {
+                        const cuenta = cuentaDe(f);
+                        const todo = cuenta ? totalDe(cuenta) : 0;
+                        const conConsumos = cuenta && Math.max(0, saldoDe(cuenta)) > 0;
+                        if (cobrando === f.k || cobrandoTodo === f.k || (f.debe === 0 && !conConsumos)) return null;
+                        return (
+                          <button type="button" onClick={() => { if (conConsumos) { setCobrandoTodo(f.k); setCobrando(null); setForm({ monto: String(todo), medio: "efectivo" }); setError(""); } else abrir(f); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+                            {conConsumos ? `Cobrar ${formatoPrecio(todo)}` : "Cobrar"}
+                          </button>
+                        );
+                      })()}
+                    </div>
+                    {f.debe > 0 && f.telefono && cobrando !== f.k && (
+                      <a href={waLink(f.telefono, `Hola, te recordamos el pago de la inscripción de ${tournament.name} (${c.name}): ${formatoPrecio(f.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
+                    )}
+                    {cuentas && links && (() => {
+                      const cuenta = cuentaDe(f);
+                      const consumos = cuenta ? Math.max(0, saldoDe(cuenta)) : 0;
+                      return (
+                        <div className="mt-2 text-xs space-y-2">
+                          {avisoFila?.k === f.k && <p className="text-lime-400">{avisoFila.texto}</p>}
+                          {cuenta && consumos > 0 && (
+                            <p className="text-teal-300">🧾 Consumos <span className="text-amber-300">{formatoPrecio(consumos)}</span>{cuenta.nombre !== f.nombre && <> · cuenta "{cuenta.nombre}"</>}</p>
+                          )}
+                          {consumiendo === f.k ? (
+                            <div className="space-y-1">
+                              <AnotarConsumo compacto productos={productosCx.filter((x) => x.complejo_id === (cuenta?.complejo_id || complejoIds[0]))} esDueno={esDueno} busy={busy} onAnotar={(items, otro, total) => anotarA(f, items, otro, total)} />
+                              <button type="button" onClick={() => setConsumiendo(null)} className="text-teal-400">Cerrar</button>
+                            </div>
+                          ) : confirmandoCuenta === f.k ? (
+                            <div className="rounded-lg border p-2 space-y-2" style={{ borderColor: "#fbbf2466" }}>
+                              <p className="text-amber-300">{mismoNombre(f).length === 1 ? "Ya hay una cuenta" : `Ya hay ${mismoNombre(f).length} cuentas`} a nombre de {f.nombre}. ¿Es la misma persona?</p>
+                              <div className="flex flex-wrap gap-2">
+                                {mismoNombre(f).map((x) => {
+                                  const debe = Math.max(0, saldoDe(x));
+                                  return (
+                                    <button key={x.id} type="button" disabled={busy} onClick={async () => { if (await vincular(f, x.id)) { setConfirmandoCuenta(null); setConsumiendo(f.k); } }} className="px-2 py-1 rounded border border-lime-400 text-lime-400 text-left">
+                                      Sí, usar "{x.nombre}"{x.telefono && ` · WhatsApp …${x.telefono.slice(-4)}`}{debe > 0 ? ` · debe ${formatoPrecio(debe)}` : " · al día"}{x.ultimo && ` · último movimiento ${new Date(x.ultimo).toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" })}`}
+                                    </button>
+                                  );
+                                })}
+                                <button type="button" disabled={busy} onClick={() => { setConfirmandoCuenta(null); setConsumiendo(f.k); }} className="px-2 py-1 rounded border border-teal-700 text-teal-200">No, es otra persona: cuenta nueva</button>
+                              </div>
+                              <button type="button" onClick={() => setConfirmandoCuenta(null)} className="text-teal-400">Cancelar</button>
+                            </div>
+                          ) : cobrando !== f.k && cobrandoTodo !== f.k && vinculando !== f.k && (
+                            <div className="flex flex-wrap items-center gap-3">
+                              {complejoIds.length > 0 && <button type="button" onClick={() => abrirConsumo(f)} className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-100 text-sm">+ Consumo</button>}
+                              {cuenta
+                                ? <button type="button" disabled={busy} onClick={() => desvincular(f)} className="text-teal-500 underline">usar otra cuenta</button>
+                                : cuentas.length > 0 && <button type="button" onClick={() => setVinculando(f.k)} className="text-teal-500 underline">usar una cuenta que ya existe</button>}
+                            </div>
+                          )}
+                          {vinculando === f.k && !cuenta && (() => {
+                            // Sugerencias: las cuentas cuyo nombre se parece al del jugador
+                            const sugeridas = cuentas.map((x) => ({ x, m: nameMatch(f.nombre, x.nombre) })).filter((o) => o.m).sort((a, b) => (a.m === "igual" ? -1 : 0) - (b.m === "igual" ? -1 : 0)).map((o) => o.x);
+                            return (
+                              <div className="rounded-lg border border-teal-800 p-2 space-y-2">
+                                <p className="text-teal-400">¿Cuál es la cuenta de {f.nombre}?</p>
+                                <div className="flex flex-wrap gap-2">
+                                  {sugeridas.map((x) => <button key={x.id} type="button" disabled={busy} onClick={() => vincular(f, x.id)} className="px-2 py-1 rounded border border-lime-400 text-lime-400">{x.nombre}</button>)}
+                                </div>
+                                {cuentas.length > sugeridas.length && (
+                                  <select defaultValue="" onChange={(e) => e.target.value && vincular(f, e.target.value)} className="px-2 py-1 rounded border text-sm" style={adminInput} aria-label="Otra cuenta">
+                                    <option value="">Otra cuenta…</option>
+                                    {cuentas.filter((x) => !sugeridas.includes(x)).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")).map((x) => <option key={x.id} value={x.id}>{x.nombre}</option>)}
+                                  </select>
+                                )}
+                                <button type="button" onClick={() => setVinculando(null)} className="block text-teal-400">Cancelar</button>
+                              </div>
+                            );
+                          })()}
+                          {cobrandoTodo === f.k && cuenta && (
+                            <div className="space-y-2">
+                              <p className="text-teal-400">Inscripción {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
+                              <div className="flex flex-wrap gap-2 items-center">
+                                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                                {MEDIOS_CUENTA.map(([m, l]) => (
+                                  <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                                ))}
+                              </div>
+                              <div className="flex gap-3 items-center">
+                                <button type="button" disabled={busy} onClick={() => cobrarTodo(cuenta)} className="px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
+                                <button type="button" onClick={() => setCobrandoTodo(null)} className="text-teal-400 text-sm">Cancelar</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {cobrando === f.k && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                          {MEDIOS_CUENTA.map(([m, l]) => (
+                            <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                          ))}
+                        </div>
+                        <div className="flex gap-3 items-center">
+                          <button type="button" disabled={busy} onClick={() => cobrar(f)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
+                          <button type="button" onClick={() => setCobrando(null)} className="text-teal-400">Cancelar</button>
+                        </div>
+                      </div>
+                    )}
+                    {historial.length > 0 && (
+                      <button type="button" onClick={() => setVerHistorial(verHistorial === f.k ? null : f.k)} className="mt-1 text-xs text-teal-500 underline">
+                        {verHistorial === f.k ? "Ocultar pagos" : `${historial.length === 1 ? "1 pago" : `${historial.length} pagos`}`}
+                      </button>
+                    )}
+                    {verHistorial === f.k && (
+                      <ul className="mt-2 space-y-1 text-xs text-teal-300">
+                        {historial.map((p) => (
+                          <li key={p.id} className="flex flex-wrap gap-x-2 items-center">
+                            <span className="text-teal-100">{formatoPrecio(p.monto)}</span>
+                            <span>· {medioCobroLabel(p.medio)} · {cuando(p.created_at)}</span>
+                            <span className="text-teal-500 break-all">· {p.cobrado_por === organizerId ? "el organizador" : p.cobrado_por_email}</span>
+                            {esDueno && (anulando === p.id ? (
+                              <span className="text-red-300">¿Anular? <button type="button" disabled={busy} onClick={() => anular(p)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setAnulando(null)} className="text-teal-400 ml-1">No</button></span>
+                            ) : (
+                              <button type="button" onClick={() => setAnulando(p.id)} className="text-red-400">Anular</button>
+                            ))}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+                </div>
+              </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/* ---------- Caja del organizador (ver 20261019_caja.sql): solo el dueño ---------- */
+
+const ORIGEN_CAJA = { inscripcion: "Inscripciones", turno: "Turnos", clases: "Clases", mostrador: "Mostrador", consumo: "Cuentas (fiado)", caja_dia: "Caja del día", compras: "Compras", profes: "Pagos a profes", fijo: "Gastos fijos", manual: "Otros" };
+// $45.000 o −$45.000 (formatoPrecio no lleva signo)
+const conSigno = (n) => (n < 0 ? "−" : "") + (formatoPrecio(Math.abs(n)) || "$0");
+
+/* "Octubre 2026", "Semana del 12/10 al 18/10", "Miércoles 14/10" o "Del 01/10 al 15/10" */
+function etiquetaPeriodo(tipo, { desde, hasta }) {
+  if (tipo === "hoy") return etiquetaFecha(desde);
+  if (tipo === "mes") {
+    const mes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][Number(desde.slice(5, 7)) - 1];
+    return `${mes} ${desde.slice(0, 4)}`;
+  }
+  const dm = (f) => `${f.slice(8, 10)}/${f.slice(5, 7)}`;
+  return `${tipo === "semana" ? "Semana del" : "Del"} ${dm(desde)} al ${dm(hasta)}`;
+}
+
+/* Corre el período para atrás o para adelante (n = -1 o 1) */
+function moverPeriodo(tipo, rango, n) {
+  if (tipo === "hoy") return rangoPeriodo("hoy", sumarDias(rango.desde, n));
+  if (tipo === "semana") return rangoPeriodo("semana", sumarDias(rango.desde, 7 * n));
+  const d = new Date(`${rango.desde}T12:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + n);
+  return rangoPeriodo("mes", d.toISOString().slice(0, 10));
+}
+
+/* Nombre del jugador de un pago de inscripción, buscándolo en el torneo (si está entero) */
+function conceptoInscripcion(p, tournaments) {
+  const t = tournaments.find((x) => x.id === p.torneo_id);
+  const c = t?.categories?.find((x) => x.id === p.categoria_id);
+  const pair = c?.pairs?.find((x) => x.id === p.pareja_id);
+  const jugador = c && pair ? jugadoresDePareja(c, pair).find((j) => j.jugador === p.jugador)?.nombre : null;
+  return ["Inscripción", t?.name || "torneo borrado", c?.name, jugador].filter(Boolean).join(" · ");
+}
+
+function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
+  const hoy = hoyArgentina();
+  const [tipo, setTipo] = useState("mes"); // hoy | semana | mes | rango
+  const [rango, setRango] = useState(() => rangoPeriodo("mes", hoy));
+  const [datos, setDatos] = useState(null); // { pagos, turnos, manuales, canchas }
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(null); // "gasto" | "ingreso": formulario abierto
+  const [form, setForm] = useState({ fecha: hoy, concepto: "", monto: "", medio: "efectivo", torneoId: "" });
+  const [busy, setBusy] = useState(false);
+  const [borrando, setBorrando] = useState(null);
+  const [buscar, setBuscar] = useState("");
+  const [filtroOrigen, setFiltroOrigen] = useState("");
+  const accessToken = organizer.accessToken;
+  const complejoIds = complejos.map((c) => c.id).join(",");
+
+  const load = useCallback(async () => {
+    const { desde, hasta } = rango;
+    if (!desde || !hasta || hasta < desde) { setDatos(null); setError("Revisá las fechas: \"hasta\" tiene que ser el mismo día o después de \"desde\"."); return; }
+    try {
+      const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+      const inList = complejoIds.split(",").map(encodeURIComponent).join(",");
+      const [pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes] = await Promise.all([
+        traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&order=created_at.desc,id.asc`, accessToken),
+        supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc`, { accessToken }),
+        complejoIds ? traerTodo(`reservas?complejo_id=in.(${inList})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,inicio.desc,id.asc`, accessToken) : [],
+        complejoIds ? supabaseTable(`canchas?complejo_id=in.(${inList})&select=id,nombre`) : [],
+        // Pagos de las cuentas de consumos (si la base todavía no tiene la tabla, nada)
+        complejoIds ? traerTodo(`cuenta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,cuentas(nombre)&order=id.asc`, accessToken).catch(() => []) : [],
+        // Mostrador: pagos de las ventas no anuladas y lo vendido con su costo (para la ganancia)
+        complejoIds ? traerTodo(`venta_pagos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,ventas!inner(numero,anulada)&ventas.anulada=is.false&order=id.asc`, accessToken).catch(() => []) : [],
+        complejoIds ? traerTodo(`venta_items?complejo_id=in.(${inList})&select=cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(desde)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken).catch(() => []) : [],
+        // Gastos y otros ingresos cargados en las cajas del día (los retiros no son gasto: es plata que pasa al dueño)
+        complejoIds ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${inList})&tipo=in.(gasto,ingreso)&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,tipo,concepto,monto,created_at,hecho_por_email`, { accessToken }).catch(() => []) : [],
+        // Compras a proveedores, el día que se pagaron
+        complejoIds ? supabaseTable(`compras?complejo_id=in.(${inList})&anulada=is.false&pagada_at=gte.${desde}&pagada_at=lte.${hasta}&select=id,total,medio,pagada_at,proveedores(nombre)`, { accessToken }).catch(() => []) : [],
+        // Clases: cuotas de alumnos (ingreso) y pagos a los profes (gasto)
+        complejoIds ? traerTodo(`cuotas_alumnos?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,alumnos(nombre)&order=id.asc`, accessToken).catch(() => []) : [],
+        complejoIds ? supabaseTable(`pagos_profes?complejo_id=in.(${inList})&created_at=gte.${enAr(desde)}&created_at=lt.${enAr(sumarDias(hasta, 1))}&select=id,monto,medio,created_at,periodo,profes_complejo(nombre)`, { accessToken }).catch(() => []) : [],
+      ]);
+      setDatos({ pagos, manuales, turnos, canchas, consumos, ventas, vendidos, movTurnos, compras, cuotas, pagosProfes });
+      setError("");
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [rango, organizer.id, accessToken, complejoIds]);
+  useEffect(() => { setDatos(null); load(); }, [load]);
+
+  const elegirTipo = (t) => { setTipo(t); if (t !== "rango") setRango(rangoPeriodo(t, hoy)); };
+
+  // Todos los movimientos del período en una sola lista
+  const movimientos = datos ? [
+    ...datos.pagos.map((p) => ({ key: `p${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "inscripcion", concepto: conceptoInscripcion(p, tournaments), monto: Number(p.monto), medio: p.medio })),
+    ...datos.turnos.filter((r) => r.precio != null).map((r) => ({
+      key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: r.tipo === "clase" ? "clases" : "turno", monto: Number(r.precio), medio: r.medio_pago,
+      concepto: [r.tipo === "clase" ? "Clase" : "Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
+    })),
+    ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
+    ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
+    ...datos.movTurnos.map((m) => ({ key: `d${m.id}`, fecha: fechaArgentina(m.created_at), tipo: m.tipo === "gasto" ? "gasto" : "ingreso", origen: "caja_dia", concepto: `${m.concepto}${m.hecho_por_email ? ` · ${m.hecho_por_email}` : ""}`, monto: Number(m.monto), medio: "efectivo" })),
+    ...datos.cuotas.map((x) => ({ key: `q${x.id}`, fecha: fechaArgentina(x.created_at), tipo: "ingreso", origen: "clases", concepto: `Cuota ${etiquetaMes(x.periodo).split(" ")[0].toLowerCase()} · ${x.alumnos?.nombre || "alumno"}`, monto: Number(x.monto), medio: x.medio })),
+    ...datos.pagosProfes.map((x) => ({ key: `pp${x.id}`, fecha: fechaArgentina(x.created_at), tipo: "gasto", origen: "profes", concepto: `Pago a ${x.profes_complejo?.nombre || "profe"} · ${etiquetaMes(x.periodo).split(" ")[0].toLowerCase()}`, monto: Number(x.monto), medio: x.medio })),
+    ...datos.compras.map((x) => ({ key: `k${x.id}`, fecha: x.pagada_at, tipo: "gasto", origen: "compras", concepto: `Compra${x.proveedores?.nombre ? ` a ${x.proveedores.nombre}` : ""}`, monto: Number(x.total), medio: x.medio })),
+    ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: m.gasto_fijo_id ? "fijo" : "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
+  ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
+  const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
+  const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
+  const gastos = movimientos.filter((m) => m.tipo === "gasto");
+  const resultado = suma(ingresos) - suma(gastos);
+  const textoBuscar = buscar.trim().toLowerCase();
+  const visibles = movimientos.filter((m) => (!filtroOrigen || m.origen === filtroOrigen) && (!textoBuscar || m.concepto.toLowerCase().includes(textoBuscar)));
+  // Ganancia de lo vendido en el mostrador (solo los productos con costo cargado)
+  const conCosto = (datos?.vendidos || []).map((i) => ({ ...i, costo: [].concat(i.venta_items_costo || [])[0]?.costo_unitario })).filter((i) => i.costo != null);
+  const ganancia = conCosto.reduce((g, i) => g + i.cantidad * (Number(i.precio_unitario) - Number(i.costo)), 0);
+
+  const guardar = async () => {
+    const monto = leerPrecio(form.monto);
+    if (!form.concepto.trim()) { setError("Poné el concepto."); return; }
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("caja_movimientos", {
+        method: "POST", accessToken, prefer: "return=minimal",
+        body: { organizador_id: organizer.id, fecha: form.fecha || hoy, tipo: cargando, concepto: form.concepto.trim(), monto, medio: form.medio, torneo_id: form.torneoId || null },
+      });
+      setCargando(null);
+      setForm({ fecha: hoy, concepto: "", monto: "", medio: "efectivo", torneoId: "" });
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const borrar = async (id) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseTable(`caja_movimientos?id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setBorrando(null);
+      await load();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  // Planilla para abrir en Excel o Google Sheets (separada por punto y coma, como la usa Excel en castellano)
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Origen", "Concepto", "Medio", "Monto"], ...movimientos.map((m) => [
+      m.fecha, m.tipo === "gasto" ? "Gasto" : "Ingreso", ORIGEN_CAJA[m.origen], m.concepto, medioCobroLabel(m.medio), String(m.tipo === "gasto" ? -m.monto : m.monto).replace(".", ","),
+    ])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-${rango.desde}-al-${rango.hasta}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const chip = (key, label) => (
+    <button key={key} type="button" onClick={() => elegirTipo(key)} className={`px-3 py-1.5 rounded-full text-sm border ${tipo === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap gap-2">{[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["rango", "Elegir fechas"]].map(([k, l]) => chip(k, l))}</div>
+      {tipo === "rango" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" value={rango.desde} onChange={(e) => setRango({ ...rango, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+          <span className="text-teal-400">al</span>
+          <input type="date" value={rango.hasta} onChange={(e) => setRango({ ...rango, hasta: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Hasta" />
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período anterior">‹</button>
+          <span className="font-semibold text-teal-100">{etiquetaPeriodo(tipo, rango)}</span>
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período siguiente">›</button>
+        </div>
+      )}
+
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={conSigno(suma(ingresos))} detalle={`${ingresos.length} movimiento${ingresos.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Gastos" tono="rojo" valor={conSigno(suma(gastos))} detalle={`${gastos.length} movimiento${gastos.length === 1 ? "" : "s"}`} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Resultado" tono={resultado < 0 ? "rojo" : "cyan"} valor={conSigno(resultado)} detalle="Ingresos − gastos" /></div>
+          </div>
+
+          {ingresos.length + gastos.length > 0 && <div className="rounded-lg border border-teal-900 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-teal-500 text-left">
+                  <th className="px-3 py-2 font-normal"></th>
+                  <th className="px-3 py-2 font-normal text-right">Ingresos</th>
+                  <th className="px-3 py-2 font-normal text-right">Gastos</th>
+                  <th className="px-3 py-2 font-normal text-right">Neto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(ORIGEN_CAJA).map(([o, label]) => {
+                  const ing = suma(ingresos.filter((m) => m.origen === o));
+                  const gas = suma(gastos.filter((m) => m.origen === o));
+                  return (ing > 0 || gas > 0) && (
+                    <tr key={o} className="border-t border-teal-900/60">
+                      <td className="px-3 py-1.5 text-teal-200">{label}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{ing ? formatoPrecio(ing) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{gas ? formatoPrecio(gas) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{conSigno(ing - gas)}</td>
+                    </tr>
+                  );
+                })}
+                {MEDIOS_VENTA.map(([medio, label], i) => {
+                  const ing = suma(ingresos.filter((m) => m.medio === medio));
+                  const gas = suma(gastos.filter((m) => m.medio === medio));
+                  return (ing > 0 || gas > 0) && (
+                    <tr key={medio} className={`border-t ${i === 0 ? "border-teal-700" : "border-teal-900/60"}`}>
+                      <td className="px-3 py-1.5 text-teal-300">{label}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{ing ? formatoPrecio(ing) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right text-teal-100">{gas ? formatoPrecio(gas) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right font-semibold" style={{ color: ing - gas < 0 ? "#f87171" : BRAND.lime }}>{conSigno(ing - gas)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>}
+
+          <GastosFijos organizer={organizer} mes={rango.hasta.slice(0, 7)} onChanged={load} />
+
+          {conCosto.length > 0 && (
+            <p className="text-teal-300">Ganancia en productos vendidos: <span className="font-semibold" style={{ color: ganancia < 0 ? "#f87171" : BRAND.lime }}>{conSigno(ganancia)}</span> <span className="text-xs text-teal-500">(precio de lista menos costo, de los productos con costo cargado)</span></p>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => { setCargando("gasto"); setError(""); }} className="px-4 py-2 rounded-lg border border-red-400 text-red-300 font-semibold">+ Cargar gasto</button>
+            <button type="button" onClick={() => { setCargando("ingreso"); setError(""); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">+ Otro ingreso</button>
+            {movimientos.length > 0 && <button type="button" onClick={descargar} className="px-3 py-2 text-teal-300 underline">Descargar planilla</button>}
+          </div>
+
+          {cargando && (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{cargando === "gasto" ? "Nuevo gasto" : "Otro ingreso"}</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder={cargando === "gasto" ? "Ej: pelotas, premios, árbitro" : "Ej: sponsor, buffet"} aria-label="Concepto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <select value={form.torneoId} onChange={(e) => setForm({ ...form, torneoId: e.target.value })} aria-label="Torneo" className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                  <option value="">Sin torneo</option>
+                  {tournaments.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {MEDIOS_COBRO.map(([m, l]) => (
+                  <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                ))}
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+                <button type="button" onClick={() => setCargando(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <p className="text-xs uppercase tracking-wide text-teal-500 mr-auto">Movimientos ({visibles.length})</p>
+              <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar concepto" aria-label="Buscar concepto" className="w-full sm:w-48 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+              <select value={filtroOrigen} onChange={(e) => setFiltroOrigen(e.target.value)} aria-label="Origen" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todos los orígenes</option>
+                {Object.entries(ORIGEN_CAJA).filter(([o]) => movimientos.some((m) => m.origen === o)).map(([o, l]) => <option key={o} value={o}>{l}</option>)}
+              </select>
+            </div>
+            {visibles.length === 0 ? (
+              <p className="text-teal-400">{movimientos.length === 0 ? "No hay movimientos en este período." : "No hay movimientos con ese filtro."}</p>
+            ) : (
+              <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Fecha</th>
+                      <th className="px-3 py-2.5 font-semibold">Origen</th>
+                      <th className="px-3 py-2.5 font-semibold">Concepto</th>
+                      <th className="px-3 py-2.5 font-semibold">Medio</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Importe</th>
+                      <th className="px-2 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibles.map((m) => (
+                      <tr key={m.key} className="border-t border-teal-900/70 hover:bg-white/5">
+                        <td className="px-3 py-2 text-teal-300 whitespace-nowrap">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</td>
+                        <td className="px-3 py-2"><span className="text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: m.tipo === "gasto" ? "#fca5a5" : BRAND.lime, backgroundColor: m.tipo === "gasto" ? "#f8717120" : "#9fe0221a" }}>{m.tipo === "gasto" ? "↑ " : "↓ "}{ORIGEN_CAJA[m.origen]}</span></td>
+                        <td className="px-3 py-2 text-slate-100">{m.concepto}</td>
+                        <td className="px-3 py-2 text-teal-300 whitespace-nowrap">{medioCobroLabel(m.medio)}</td>
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums whitespace-nowrap" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</td>
+                        <td className="px-2 py-2 text-right whitespace-nowrap">
+                          {(m.origen === "manual" || m.origen === "fijo") && (borrando === m.id ? (
+                            <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                          ) : (
+                            <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                          ))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                {visibles.map((m) => (
+                  <li key={m.key} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                    <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{ORIGEN_CAJA[m.origen]} · {medioCobroLabel(m.medio)}</span></span>
+                    <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
+                    {(m.origen === "manual" || m.origen === "fijo") && (borrando === m.id ? (
+                      <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => borrar(m.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                    ) : (
+                      <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+              </>
+            )}
+            <p className="text-[11px] text-teal-600 mt-2">Las inscripciones se cuentan por el día en que se cobraron; los turnos, por el día del turno (los confirmados con medio de pago registrado).</p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Caja de la plataforma (ver 20261020_caja_plataforma.sql): solo el creador ---------- */
+
+const TIPOS_CLIENTE = [["publicidad", "Publicidad"], ["organizador", "Organizador"], ["profe", "Profe"], ["complejo", "Complejo"], ["otro", "Otro"]];
+const tipoClienteLabel = (t) => TIPOS_CLIENTE.find(([k]) => k === t)?.[1] || t;
+
+/* ---------- Planes (ver 20261033_planes.sql y src/planes.js): solo el creador ---------- */
+
+const PARA_PLAN = [["organizador", "Organizador"], ["complejo", "Complejo"], ["publicidad", "Publicidad"]];
+const MODOS_PLAN = [["prueba", "Prueba"], ["bonificado", "Bonificado"], ["pago", "Pago"], ["por_torneo", "Por torneo"]];
+const fechaCorta = (f) => (f ? `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(2, 4)}` : "");
+
+function EstadoPlanBadge({ cliente, hoy }) {
+  const { estado, fin, dias } = estadoCliente(cliente, hoy);
+  const { label, color } = ESTADOS_PLAN[estado];
+  const detalle = estado === "bonificado" && !fin ? "sin vencimiento"
+    : fin && dias >= 0 ? `hasta ${fechaCorta(fin)}`
+    : fin ? `venció el ${fechaCorta(fin)}` : "";
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap" style={{ color, borderColor: `${color}80`, backgroundColor: `${color}14` }}>
+      ● {label}{detalle && <span className="opacity-80">· {detalle}</span>}
+    </span>
+  );
+}
+
+/* Alta y edición de un plan: nombre, para quién, precio y qué incluye */
+function PlanForm({ inicial, onGuardar, onCancelar }) {
+  const [f, setF] = useState(() => ({
+    nombre: inicial?.nombre || "", para: inicial?.para || "complejo", precio: inicial?.precio != null ? String(Math.round(inicial.precio)) : "",
+    modulo_torneos: !!inicial?.modulo_torneos, modulo_reservas: !!inicial?.modulo_reservas, modulo_cantina: !!inicial?.modulo_cantina, reportes: !!inicial?.reportes,
+    empleados: inicial?.empleados != null ? String(inicial.empleados) : "", activo: inicial ? inicial.activo : true,
+    tipo_cobro: inicial?.tipo_cobro || "mensual",
+  }));
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const campo = "w-full px-3 py-2 rounded border text-sm";
+  const guardar = async () => {
+    if (!f.nombre.trim()) { setError("Poné el nombre del plan."); return; }
+    const emp = f.empleados.trim() === "" ? null : Number.parseInt(f.empleados, 10);
+    if (emp != null && (!Number.isFinite(emp) || emp < 0 || emp > 100)) { setError("Empleados: un número de 0 a 100 (vacío = sin tope)."); return; }
+    setBusy(true); setError("");
+    try {
+      await onGuardar({
+        nombre: f.nombre.trim(), para: f.para, precio: leerPrecio(f.precio),
+        modulo_torneos: f.modulo_torneos, modulo_reservas: f.modulo_reservas, modulo_cantina: f.modulo_cantina, reportes: f.reportes,
+        empleados: emp, activo: f.activo, tipo_cobro: f.para === "organizador" ? f.tipo_cobro : "mensual",
+      });
+    } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
+  };
+  const tilde = (k, label) => (
+    <label className="flex items-center gap-2 text-sm text-teal-200"><input type="checkbox" checked={f[k]} onChange={(e) => set(k, e.target.checked)} /> {label}</label>
+  );
+  return (
+    <div className="border border-teal-700 rounded-lg p-3 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={f.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} placeholder="Ej: Full" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Para</label>
+          <select value={f.para} onChange={(e) => set("para", e.target.value)} className={campo} style={adminInput}>
+            {PARA_PLAN.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">{f.tipo_cobro === "mensual" ? "Precio por mes" : "Precio por torneo"}</label>
+          <input inputMode="numeric" value={f.precio} onChange={(e) => set("precio", e.target.value)} placeholder="Ej: 100000" className={campo} style={adminInput} />
+        </div>
+      </div>
+      {f.para === "organizador" && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-teal-300">Se cobra</span>
+          {[["mensual", "Por mes"], ["por_torneo", "Por torneo (cualquiera)"], ["por_torneo_corto", "Por torneo corto (Americano / Súper 8)"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => set("tipo_cobro", k)} className={`px-3 py-1.5 rounded-lg border text-sm ${f.tipo_cobro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      )}
+      {f.para !== "publicidad" && (
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {tilde("modulo_torneos", "Torneos")}{tilde("modulo_reservas", "Reservas")}{tilde("modulo_cantina", "Cantina")}{tilde("reportes", "Reportes")}
+          <label className="flex items-center gap-2 text-sm text-teal-200">Empleados <input inputMode="numeric" value={f.empleados} onChange={(e) => set("empleados", e.target.value)} placeholder="sin tope" className="w-20 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+        </div>
+      )}
+      <label className="flex items-center gap-2 text-sm text-teal-200"><input type="checkbox" checked={f.activo} onChange={(e) => set("activo", e.target.checked)} /> Se ofrece (si lo apagás, los que ya lo tienen lo siguen teniendo)</label>
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : inicial ? "Guardar plan" : "Agregar plan"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* Los planes: el creador cambia precios y lo que incluye cada uno cuando quiere */
+function PlanesEditor({ planes, clientes, accessToken, onChanged }) {
+  const [editando, setEditando] = useState(null); // "nuevo" | plan
+  const [error, setError] = useState("");
+  const guardar = async (body) => {
+    if (editando === "nuevo") await supabaseTable("plataforma_planes", { method: "POST", body: { ...body, orden: planes.length + 1 }, accessToken, prefer: "return=minimal" });
+    else await supabaseTable(`plataforma_planes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+    setEditando(null);
+    await onChanged();
+  };
+  const usan = (p) => clientes.filter((c) => c.plan_id === p.id && c.activo).length;
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-teal-400">Los precios y lo que incluye cada plan los cambiás cuando quieras. Al elegir un plan para un cliente se completa su cuota con este precio (después se la podés cambiar a él solo).</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {editando ? <PlanForm inicial={editando === "nuevo" ? null : editando} onGuardar={guardar} onCancelar={() => { setEditando(null); setError(""); }} /> : (
+        <button type="button" onClick={() => setEditando("nuevo")} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Nuevo plan</button>
+      )}
+      {planes.length === 0 ? <p className="text-teal-400">Todavía no hay planes.</p> : (
+        <ul className="space-y-2">
+          {planes.map((p) => (
+            <li key={p.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-3 ${p.activo ? "" : "opacity-60"}`}>
+              <div className="flex-1 min-w-[12rem]">
+                <p className="text-teal-100 font-semibold">{p.nombre} <span className="text-xs font-normal text-teal-500">· {PARA_PLAN.find(([k]) => k === p.para)?.[1]}</span>{!p.activo && <span className="text-xs font-normal text-slate-400"> · no se ofrece</span>}</p>
+                <p className="text-xs text-teal-400">{incluyePlan(p)} · {usan(p)} cliente{usan(p) === 1 ? "" : "s"}</p>
+              </div>
+              <span className="text-base font-semibold text-lime-400 tabular-nums">{p.precio != null ? `${formatoPrecio(p.precio)}${(p.tipo_cobro || "mensual") === "mensual" ? "/mes" : " por torneo"}` : "sin precio"}</span>
+              <button type="button" onClick={() => setEditando(p)} className="text-xs text-lime-400">Editar</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* Alta y edición de un cliente: se vincula con una publicidad, organizador, profe o complejo de la app,
+   con su plan, su modo (prueba, bonificado o pago) y hasta cuándo */
+function ClienteForm({ inicial, opciones, clientes, planes = [], onGuardar, onCancelar }) {
+  const [form, setForm] = useState(() => ({
+    tipo: inicial?.tipo || "publicidad", refId: inicial?.ref_id || "", nombre: inicial?.nombre || "",
+    telefono: inicial?.telefono ? formatArPhone(inicial.telefono) : "", cuota: inicial?.cuota_mensual != null ? String(Math.round(inicial.cuota_mensual)) : "",
+    desde: inicial?.desde || hoyArgentina().slice(0, 7), nota: inicial?.nota || "",
+    planId: inicial?.plan_id || "", modo: inicial?.modo || "prueba", vence: inicial?.vence || sumarDias(hoyArgentina(), 30),
+    gracia: String(inicial?.dias_gracia ?? 7), suspendido: !!inicial?.suspendido,
+  }));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Lo que ya es cliente no se ofrece de nuevo (salvo el que se está editando)
+  const usados = new Set(clientes.filter((c) => c.id !== inicial?.id && c.ref_id).map((c) => `${c.tipo}|${c.ref_id}`));
+  const lista = (opciones[form.tipo] || []).filter((o) => !usados.has(`${form.tipo}|${o.id}`));
+
+  const vincular = (refId) => {
+    const o = lista.find((x) => x.id === refId);
+    setForm((f) => ({ ...f, refId, nombre: o?.nombre || f.nombre, telefono: o?.telefono ? formatArPhone(o.telefono) : f.telefono }));
+  };
+  const guardar = async () => {
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!form.nombre.trim()) { setError("Poné el nombre."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    setBusy(true); setError("");
+    try {
+      const gracia = Number.parseInt(form.gracia, 10);
+      await onGuardar({
+        tipo: form.tipo, ref_id: form.tipo === "otro" ? null : form.refId || null, nombre: form.nombre.trim(), telefono, cuota_mensual: leerPrecio(form.cuota), desde: form.desde || hoyArgentina().slice(0, 7), nota: form.nota.trim() || null,
+        plan_id: form.planId || null, modo: form.modo, vence: form.modo === "pago" || form.modo === "por_torneo" ? null : form.vence || null,
+        dias_gracia: Number.isFinite(gracia) ? Math.min(60, Math.max(0, gracia)) : 7, suspendido: form.suspendido,
+      });
+    } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded border text-sm";
+
+  return (
+    <div className="border border-teal-700 rounded-lg p-3 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Tipo</label>
+          <select value={form.tipo} onChange={(e) => setForm((f) => ({ ...f, tipo: e.target.value, refId: "" }))} className={campo} style={adminInput}>
+            {TIPOS_CLIENTE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </div>
+        {form.tipo !== "otro" && (
+          <div>
+            <label className="block text-xs text-teal-400 mb-1">De la app</label>
+            <select value={form.refId} onChange={(e) => vincular(e.target.value)} className={campo} style={adminInput}>
+              <option value="">Elegir…</option>
+              {lista.map((o) => <option key={o.id} value={o.id}>{o.nombre}</option>)}
+            </select>
+          </div>
+        )}
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+          <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cuota mensual (vacío = sin cuota)</label>
+          <input inputMode="numeric" value={form.cuota} onChange={(e) => set("cuota", e.target.value)} placeholder="Ej: 20000" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Paga desde</label>
+          <input type="month" value={form.desde} onChange={(e) => set("desde", e.target.value)} className={campo} style={adminInput} />
+        </div>
+      </div>
+      {(() => {
+        const opcionesPlan = planes.filter((pl) => pl.para === form.tipo && (pl.tipo_cobro || "mensual") === "mensual" && (pl.activo || pl.id === form.planId));
+        const elegir = (id) => {
+          const pl = planes.find((x) => x.id === id);
+          setForm((f) => ({ ...f, planId: id, cuota: pl?.precio != null ? String(Math.round(pl.precio)) : f.cuota }));
+        };
+        const plazo = (dias) => set("vence", sumarDias(hoyArgentina(), dias));
+        return (
+          <div className="rounded-lg border border-teal-800 p-3 space-y-3">
+            <p className="text-xs uppercase tracking-wide text-teal-400">Plan</p>
+            {opcionesPlan.length > 0 && (
+              <div>
+                <select value={form.planId} onChange={(e) => elegir(e.target.value)} className={campo} style={adminInput}>
+                  <option value="">Sin plan</option>
+                  {opcionesPlan.map((pl) => <option key={pl.id} value={pl.id}>{pl.nombre}{pl.precio != null ? ` · ${formatoPrecio(pl.precio)}/mes` : ""}</option>)}
+                </select>
+                {form.planId && <p className="text-xs text-teal-500 mt-1">{incluyePlan(planes.find((x) => x.id === form.planId))}</p>}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Modo">
+              {MODOS_PLAN.filter(([k]) => k !== "por_torneo" || form.tipo === "organizador").map(([k, l]) => (
+                <button key={k} type="button" role="radio" aria-checked={form.modo === k} onClick={() => set("modo", k)} className={`px-3 py-1.5 rounded-lg border text-sm ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+              ))}
+            </div>
+            {form.modo === "prueba" && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-teal-300">Prueba hasta</span>
+                <input type="date" value={form.vence} onChange={(e) => set("vence", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                {[15, 30, 60].map((d) => <button key={d} type="button" onClick={() => plazo(d)} className="text-xs px-2 py-1 rounded border border-teal-800 text-teal-300">{d} días</button>)}
+              </div>
+            )}
+            {form.modo === "bonificado" && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-teal-300">Gratis hasta</span>
+                <input type="date" value={form.vence || ""} onChange={(e) => set("vence", e.target.value)} className="px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                <button type="button" onClick={() => set("vence", "")} className="text-xs px-2 py-1 rounded border border-teal-800 text-teal-300">Sin fecha</button>
+              </div>
+            )}
+            {form.modo === "pago" && <p className="text-xs text-teal-500">Queda cubierto hasta el último mes de cuota que le cobres en "Caja del mes".</p>}
+            {form.modo === "por_torneo" && <p className="text-xs text-teal-500">No paga cuota: cada torneo que publica usa un crédito. Los créditos se los cargás desde la lista de clientes.</p>}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+              <label className="flex items-center gap-2 text-teal-300">Días de gracia al vencer <input inputMode="numeric" value={form.gracia} onChange={(e) => set("gracia", e.target.value)} className="w-16 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+              <label className="flex items-center gap-2 text-teal-300"><input type="checkbox" checked={form.suspendido} onChange={(e) => set("suspendido", e.target.checked)} /> Suspendido</label>
+            </div>
+            {form.tipo === "complejo" && form.planId && <p className="text-[11px] text-teal-500">Al guardar, los módulos del complejo (Torneos, Reservas, Cantina) quedan como dice el plan.</p>}
+          </div>
+        );
+      })()}
+      <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} placeholder="Nota (opcional)" className={campo} style={adminInput} />
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : inicial ? "Guardar cambios" : "Agregar cliente"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+function CajaPlataforma({ accessToken, ads = [], organizers = [], coaches = [], venues = [] }) {
+  const mesHoy = hoyArgentina().slice(0, 7);
+  const [mes, setMes] = useState(mesHoy);
+  const [clientes, setClientes] = useState(null);
+  const [movs, setMovs] = useState(null);
+  const [error, setError] = useState("");
+  const [vista, setVista] = useState("mes"); // mes | clientes | planes
+  const [planes, setPlanes] = useState([]);
+  const [creditos, setCreditos] = useState([]);
+  const [cargandoCredito, setCargandoCredito] = useState(null); // { clienteId, tipo, monto, medio, cobrar }
+  const [editando, setEditando] = useState(null); // "nuevo" | cliente
+  const [cobrando, setCobrando] = useState(null); // id de cliente con el formulario de cuota abierto
+  const [cargando, setCargando] = useState(null); // "ingreso" | "gasto" (cobro suelto o gasto)
+  const [form, setForm] = useState({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" });
+  const [busy, setBusy] = useState(false);
+  const [borrando, setBorrando] = useState(null);
+
+  const opciones = {
+    publicidad: ads.map((a) => ({ id: a.id, nombre: a.name })),
+    organizador: organizers.filter((o) => o.role !== "creador").map((o) => ({ id: o.id, nombre: o.name })),
+    profe: coaches.map((c) => ({ id: c.id, nombre: c.brandName ? `${c.name} (${c.brandName})` : c.name, telefono: normalizeArPhone(c.whatsapp) })),
+    complejo: venues.map((v) => ({ id: v.id, nombre: v.name, telefono: normalizeArPhone(v.whatsapp) })),
+  };
+
+  const load = useCallback(async () => {
+    const desde = `${mes}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    try {
+      const [cl, mv] = await Promise.all([
+        supabaseTable("plataforma_clientes?order=nombre.asc", { accessToken }),
+        supabaseTable(`plataforma_movimientos?or=(and(fecha.gte.${desde},fecha.lte.${hasta}),periodo.eq.${mes})&order=fecha.desc,created_at.desc`, { accessToken }),
+      ]);
+      setClientes(cl); setMovs(mv); setError("");
+      setPlanes((await supabaseTable("plataforma_planes?order=orden.asc,created_at.asc", { accessToken }).catch(() => [])) || []);
+      setCreditos((await supabaseTable("plataforma_creditos?order=created_at.asc", { accessToken }).catch(() => [])) || []);
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [mes, accessToken]);
+  useEffect(() => { setMovs(null); load(); }, [load]);
+
+  const enMes = (m) => m.fecha.slice(0, 7) === mes;
+  const delMes = (movs || []).filter(enMes);
+  const suma = (l) => l.reduce((s, m) => s + Number(m.monto), 0);
+  // Cuotas del mes: clientes activos con cuota que ya empezaron a pagar
+  const cuotas = (clientes || []).filter((c) => c.activo && c.cuota_mensual != null && c.desde <= mes).map((c) => {
+    const pagado = suma((movs || []).filter((m) => m.tipo === "ingreso" && m.cliente_id === c.id && m.periodo === mes));
+    return { c, pagado, debe: Math.max(0, Number(c.cuota_mensual) - pagado) };
+  });
+  const ingresos = suma(delMes.filter((m) => m.tipo === "ingreso"));
+  const gastos = suma(delMes.filter((m) => m.tipo === "gasto"));
+  const porCobrar = cuotas.reduce((s, q) => s + q.debe, 0);
+
+  const guardarCliente = async (body) => {
+    if (editando === "nuevo") await supabaseTable("plataforma_clientes", { method: "POST", body, accessToken, prefer: "return=minimal" });
+    else await supabaseTable(`plataforma_clientes?id=eq.${editando.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+    // Un complejo con plan: sus módulos quedan como dice el plan
+    const plan = planes.find((pl) => pl.id === body.plan_id);
+    const modulos = plan && { modulo_torneos: plan.modulo_torneos, modulo_reservas: plan.modulo_reservas, modulo_cantina: plan.modulo_cantina };
+    if (body.tipo === "complejo" && body.ref_id && plan) {
+      await supabaseTable(`complejos?id=eq.${encodeURIComponent(body.ref_id)}`, { method: "PATCH", body: modulos, accessToken, prefer: "return=minimal" }).catch(() => {});
+    }
+    // Un organizador con plan: lo mismo en los complejos de los que es dueño, salvo los que tienen un plan propio
+    if (body.tipo === "organizador" && body.ref_id && plan) {
+      const conPlanPropio = (clientes || []).filter((c) => c.tipo === "complejo" && c.ref_id && c.plan_id && c.activo !== false).map((c) => c.ref_id);
+      const excluir = conPlanPropio.length ? `&id=not.in.(${conPlanPropio.map(encodeURIComponent).join(",")})` : "";
+      await supabaseTable(`complejos?dueno_id=eq.${encodeURIComponent(body.ref_id)}${excluir}`, { method: "PATCH", body: modulos, accessToken, prefer: "return=minimal" }).catch(() => {});
+    }
+    setEditando(null);
+    await load();
+  };
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const precioCredito = (tipo) => planes.find((pl) => pl.tipo_cobro === (tipo === "corto" ? "por_torneo_corto" : "por_torneo"))?.precio;
+  const abrirCredito = (c, tipo = "torneo") => setCargandoCredito({ clienteId: c.id, nombre: c.nombre, tipo, monto: precioCredito(tipo) != null ? String(Math.round(precioCredito(tipo))) : "", medio: "transferencia", cobrar: true });
+  const guardarCredito = () => {
+    const k = cargandoCredito;
+    const monto = leerPrecio(k.monto);
+    if (k.cobrar && !monto) { setError("Poné el monto (o destildá \"Registrar el cobro\")."); return; }
+    run(async () => {
+      let movimientoId = null;
+      if (k.cobrar) {
+        const [mov] = await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=representation", body: { tipo: "ingreso", cliente_id: k.clienteId, concepto: `${k.tipo === "corto" ? "Torneo corto" : "Torneo suelto"} · ${k.nombre}`.slice(0, 80), monto, medio: k.medio, fecha: hoyArgentina() } });
+        movimientoId = mov?.id || null;
+      }
+      await supabaseTable("plataforma_creditos", { method: "POST", accessToken, prefer: "return=minimal", body: { cliente_id: k.clienteId, tipo: k.tipo, movimiento_id: movimientoId } });
+      setCargandoCredito(null);
+    });
+  };
+  const sacarCredito = (credito) => run(() => supabaseTable(`plataforma_creditos?id=eq.${credito.id}&torneo_id=is.null`, { method: "DELETE", accessToken, prefer: "return=minimal" }));
+  const abrirCuota = (q) => { setCobrando(q.c.id); setCargando(null); setForm({ ...form, monto: String(q.debe), fecha: hoyArgentina(), medio: "transferencia" }); };
+  const cobrarCuota = (q) => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    run(async () => {
+      await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=minimal", body: { tipo: "ingreso", cliente_id: q.c.id, periodo: mes, concepto: `Cuota ${etiquetaMes(mes).toLowerCase()} · ${q.c.nombre}`, monto, medio: form.medio, fecha: form.fecha || hoyArgentina() } });
+      setCobrando(null);
+    });
+  };
+  const guardarSuelto = () => {
+    const monto = leerPrecio(form.monto);
+    const cliente = (clientes || []).find((c) => c.id === form.clienteId);
+    const concepto = [form.concepto.trim(), cliente?.nombre].filter(Boolean).join(" · ");
+    if (!concepto) { setError("Poné el concepto."); return; }
+    if (!monto) { setError("Poné el monto."); return; }
+    run(async () => {
+      await supabaseTable("plataforma_movimientos", { method: "POST", accessToken, prefer: "return=minimal", body: { tipo: cargando, cliente_id: cargando === "ingreso" ? form.clienteId || null : null, concepto, monto, medio: form.medio, fecha: form.fecha || hoyArgentina() } });
+      setCargando(null);
+    });
+  };
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Concepto", "Mes de cuota", "Medio", "Monto"], ...delMes.map((m) => [m.fecha, m.tipo === "gasto" ? "Gasto" : "Ingreso", m.concepto, m.periodo || "", medioCobroLabel(m.medio), String(m.tipo === "gasto" ? -m.monto : m.monto).replace(".", ",")])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-smash-point-${mes}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const medios = (
+    <div className="flex flex-wrap gap-2">
+      {MEDIOS_COBRO.map(([m, l]) => (
+        <button key={m} type="button" onClick={() => setForm((f) => ({ ...f, medio: m }))} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+      ))}
+    </div>
+  );
+  const tarjeta = (label, valor, color) => (
+    <div className="rounded-xl p-3 text-center" style={{ border: `1px solid ${color}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+      <p className="text-[11px] uppercase text-teal-400">{label}</p>
+      <p className="text-base font-semibold" style={{ color }}>{conSigno(valor)}</p>
+    </div>
+  );
+  const pill = (key, label) => (
+    <button type="button" onClick={() => setVista(key)} className={`px-3 py-1.5 rounded-full text-sm border ${vista === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap gap-2">{pill("mes", "Caja del mes")}{pill("clientes", `Clientes${clientes ? ` (${clientes.length})` : ""}`)}{pill("planes", "Planes")}</div>
+      {error && <p className="text-red-400">{error}</p>}
+
+      {vista === "planes" ? (
+        <PlanesEditor planes={planes} clientes={clientes || []} accessToken={accessToken} onChanged={load} />
+      ) : vista === "clientes" ? (
+        <div className="space-y-3">
+          {clientes && clientes.length > 0 && (() => {
+            const conteo = {};
+            clientes.forEach((c) => { const e = estadoCliente(c, hoyArgentina()).estado; conteo[e] = (conteo[e] || 0) + 1; });
+            return (
+              <div className="flex flex-wrap gap-2">
+                {["vencido", "en_gracia", "por_vencer", "prueba", "bonificado", "al_dia", "suspendido"].filter((e) => conteo[e]).map((e) => (
+                  <span key={e} className="text-xs px-2.5 py-1 rounded-full border" style={{ color: ESTADOS_PLAN[e].color, borderColor: `${ESTADOS_PLAN[e].color}66` }}>{ESTADOS_PLAN[e].label}: {conteo[e]}</span>
+                ))}
+              </div>
+            );
+          })()}
+          {cargandoCredito && (
+            <div className="border border-sky-700 rounded-lg p-3 space-y-3">
+              <p className="text-teal-100 font-semibold">Crédito para {cargandoCredito.nombre}</p>
+              <div className="flex flex-wrap gap-2">
+                {[["torneo", "Torneo (cualquiera)"], ["corto", "Corto (Americano / Súper 8)"]].map(([t, l]) => (
+                  <button key={t} type="button" onClick={() => setCargandoCredito({ ...cargandoCredito, tipo: t, monto: precioCredito(t) != null ? String(Math.round(precioCredito(t))) : cargandoCredito.monto })} className={`px-3 py-1.5 rounded-lg border ${cargandoCredito.tipo === t ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2 text-teal-300"><input type="checkbox" checked={cargandoCredito.cobrar} onChange={(e) => setCargandoCredito({ ...cargandoCredito, cobrar: e.target.checked })} /> Registrar el cobro en la caja (si no, es un crédito regalado)</label>
+              {cargandoCredito.cobrar && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <input inputMode="numeric" value={cargandoCredito.monto} onChange={(e) => setCargandoCredito({ ...cargandoCredito, monto: e.target.value })} placeholder="Monto" className="w-32 px-3 py-2 rounded border text-sm" style={adminInput} />
+                  {MEDIOS_COBRO.map(([m, l]) => <button key={m} type="button" onClick={() => setCargandoCredito({ ...cargandoCredito, medio: m })} className={`px-3 py-1.5 rounded-lg border text-xs ${cargandoCredito.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+                </div>
+              )}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardarCredito} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Sumar crédito"}</button>
+                <button type="button" onClick={() => setCargandoCredito(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
+          {editando ? (
+            <ClienteForm inicial={editando === "nuevo" ? null : editando} opciones={opciones} clientes={clientes || []} planes={planes} onGuardar={guardarCliente} onCancelar={() => setEditando(null)} />
+          ) : (
+            <button type="button" onClick={() => setEditando("nuevo")} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cliente</button>
+          )}
+          {clientes === null ? <p className="opacity-60">Cargando…</p> : clientes.length === 0 ? <p className="text-teal-400">Todavía no cargaste clientes.</p> : (
+            <ul className="space-y-2">
+              {clientes.map((c) => (
+                <li key={c.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-2 ${c.activo ? "" : "opacity-60"}`}>
+                  <div className="flex-1 min-w-[12rem]">
+                    <p className="text-teal-100 font-semibold">{c.nombre} <span className="text-xs font-normal text-teal-500">· {tipoClienteLabel(c.tipo)}{c.plan_id && planes.find((pl) => pl.id === c.plan_id) ? ` · ${planes.find((pl) => pl.id === c.plan_id).nombre}` : ""}</span></p>
+                    <div className="my-1 flex flex-wrap items-center gap-2">
+                      <EstadoPlanBadge cliente={c} hoy={hoyArgentina()} />
+                      {c.modo === "por_torneo" && (() => {
+                        const suyos = creditos.filter((k) => k.cliente_id === c.id);
+                        const libres = (t) => suyos.filter((k) => !k.torneo_id && k.tipo === t);
+                        return (
+                          <span className="text-[11px] text-sky-300">
+                            Créditos: {libres("torneo").length} torneo{libres("torneo").length === 1 ? "" : "s"} · {libres("corto").length} corto{libres("corto").length === 1 ? "" : "s"} · {suyos.filter((k) => k.torneo_id).length} usado{suyos.filter((k) => k.torneo_id).length === 1 ? "" : "s"}
+                            {" "}<button type="button" onClick={() => abrirCredito(c)} className="underline text-lime-400">+ Crédito</button>
+                            {suyos.some((k) => !k.torneo_id) && <> · <button type="button" disabled={busy} onClick={() => sacarCredito([...suyos].reverse().find((k) => !k.torneo_id))} className="underline text-teal-400">quitar uno</button></>}
+                          </span>
+                        );
+                      })()}
+                      {c.telefono && ["por_vencer", "en_gracia", "vencido"].includes(estadoCliente(c, hoyArgentina()).estado) && (
+                        <a href={waLink(c.telefono, `Hola! Te escribimos de Smash Point: tu plan ${estadoCliente(c, hoyArgentina()).estado === "por_vencer" ? "está por vencer" : "está vencido"}. Cuando quieras te pasamos los datos para renovarlo. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-[11px] underline text-lime-400">Recordarle por WhatsApp</a>
+                      )}
+                    </div>
+                    <p className="text-xs text-teal-400">{c.cuota_mensual != null ? `${formatoPrecio(c.cuota_mensual)} por mes desde ${etiquetaMes(c.desde).toLowerCase()}` : "Sin cuota (cobros sueltos)"}{!c.activo && " · dado de baja"}{c.nota && ` · ${c.nota}`}</p>
+                  </div>
+                  <button type="button" onClick={() => run(() => supabaseTable(`plataforma_clientes?id=eq.${c.id}`, { method: "PATCH", body: { activo: !c.activo }, accessToken, prefer: "return=minimal" }))} className="text-xs text-teal-300 underline">{c.activo ? "Dar de baja" : "Reactivar"}</button>
+                  <button type="button" onClick={() => setEditando(c)} className="text-xs text-lime-400">Editar</button>
+                  {borrando === c.id ? (
+                    <span className="text-xs text-red-300">¿Borrar? (lo cobrado queda) <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`plataforma_clientes?id=eq.${c.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); setBorrando(null); })} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                  ) : (
+                    <button type="button" onClick={() => setBorrando(c.id)} className="text-xs text-red-400" aria-label="Borrar cliente">🗑</button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+            <span className="font-semibold text-teal-100">{etiquetaMes(mes)}</span>
+            <button type="button" onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes siguiente">›</button>
+            {mes !== mesHoy && <button type="button" onClick={() => setMes(mesHoy)} className="text-xs text-lime-400">Este mes</button>}
+          </div>
+          {movs === null || clientes === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {tarjeta("Cobrado", ingresos, BRAND.lime)}
+                {tarjeta("Por cobrar", porCobrar, "#fbbf24")}
+                {tarjeta("Gastos", gastos, "#f87171")}
+                {tarjeta("Resultado", ingresos - gastos, ingresos - gastos < 0 ? "#f87171" : BRAND.cyan)}
+              </div>
+
+              <div>
+                <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Cuotas de {etiquetaMes(mes).toLowerCase()}</p>
+                {cuotas.length === 0 ? (
+                  <p className="text-teal-400">No hay clientes con cuota este mes. Cargalos en "Clientes".</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {cuotas.map((q) => (
+                      <li key={q.c.id} className="rounded-lg border border-teal-900 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex-1 min-w-[10rem]">
+                            <p className="text-teal-100 font-semibold">{q.c.nombre}</p>
+                            <p className="text-xs text-teal-500">{tipoClienteLabel(q.c.tipo)} · {formatoPrecio(q.c.cuota_mensual)}</p>
+                          </div>
+                          <span className="text-xs font-semibold" style={{ color: q.debe === 0 ? BRAND.lime : q.pagado > 0 ? "#fbbf24" : "#f87171" }}>● {q.debe === 0 ? "Pagó" : `Debe ${formatoPrecio(q.debe)}`}</span>
+                          {q.debe > 0 && cobrando !== q.c.id && <button type="button" onClick={() => abrirCuota(q)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar</button>}
+                        </div>
+                        {q.debe > 0 && q.c.telefono && cobrando !== q.c.id && (
+                          <a href={waLink(q.c.telefono, `Hola ${q.c.nombre}, te recordamos la cuota de Smash Point de ${etiquetaMes(mes).toLowerCase()}: ${formatoPrecio(q.debe)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="inline-block mt-1 text-xs text-lime-400 underline">Recordar por WhatsApp</a>
+                        )}
+                        {cobrando === q.c.id && (
+                          <div className="mt-3 space-y-2">
+                            <div className="flex flex-wrap gap-2">
+                              <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                              <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha de cobro" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                            </div>
+                            {medios}
+                            <div className="flex gap-3 items-center">
+                              <button type="button" disabled={busy} onClick={() => cobrarCuota(q)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar cobro</button>
+                              <button type="button" onClick={() => setCobrando(null)} className="text-teal-400">Cancelar</button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => { setCargando("ingreso"); setCobrando(null); setForm({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">+ Cobro suelto</button>
+                <button type="button" onClick={() => { setCargando("gasto"); setCobrando(null); setForm({ monto: "", medio: "transferencia", fecha: hoyArgentina(), concepto: "", clienteId: "" }); }} className="px-4 py-2 rounded-lg border border-red-400 text-red-300 font-semibold">+ Gasto</button>
+                {delMes.length > 0 && <button type="button" onClick={descargar} className="px-3 py-2 text-teal-300 underline">Descargar planilla</button>}
+              </div>
+              {cargando && (
+                <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+                  <p className="font-semibold text-teal-100">{cargando === "gasto" ? "Nuevo gasto" : "Cobro suelto"}</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder={cargando === "gasto" ? "Ej: dominio, hosting, mails" : "Ej: publicidad 3 meses, torneo especial"} aria-label="Concepto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    <input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} aria-label="Fecha" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                    {cargando === "ingreso" && (
+                      <select value={form.clienteId} onChange={(e) => setForm({ ...form, clienteId: e.target.value })} aria-label="Cliente" className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                        <option value="">Sin cliente</option>
+                        {(clientes || []).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                      </select>
+                    )}
+                  </div>
+                  {medios}
+                  <div className="flex gap-3 items-center">
+                    <button type="button" disabled={busy} onClick={guardarSuelto} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+                    <button type="button" onClick={() => setCargando(null)} className="text-teal-400">Cancelar</button>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Movimientos de {etiquetaMes(mes).toLowerCase()} ({delMes.length})</p>
+                {delMes.length === 0 ? <p className="text-teal-400">No hay movimientos este mes.</p> : (
+                  <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                    {delMes.map((m) => (
+                      <li key={m.id} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="text-xs text-teal-500 w-12">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                        <span className="flex-1 min-w-[8rem] text-teal-100">{m.concepto}<span className="block text-xs text-teal-500">{medioCobroLabel(m.medio)}{m.periodo && m.periodo !== mes && ` · cuota de ${etiquetaMes(m.periodo).toLowerCase()}`}</span></span>
+                        <span className="font-semibold" style={{ color: m.tipo === "gasto" ? "#f87171" : BRAND.lime }}>{m.tipo === "gasto" ? "−" : "+"}{formatoPrecio(m.monto)}</span>
+                        {borrando === m.id ? (
+                          <span className="text-xs text-red-300">¿Borrar? <button type="button" disabled={busy} onClick={() => run(async () => { await supabaseTable(`plataforma_movimientos?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); setBorrando(null); })} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setBorrando(null)} className="text-teal-400 ml-1">No</button></span>
+                        ) : (
+                          <button type="button" onClick={() => setBorrando(m.id)} className="text-xs text-red-400" aria-label="Borrar movimiento">🗑</button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-[11px] text-teal-600 mt-2">Lo cobrado y los gastos se cuentan por la fecha del movimiento. "Por cobrar" son las cuotas del mes que faltan, aunque se paguen otro mes.</p>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Consumos y cuentas del complejo (ver 20261021_consumos.sql) ---------- */
+
+const saldoDe = (c) => Number(c.consumido) - Number(c.pagado);
+// Lo que debe en total: consumos más las inscripciones de los jugadores vinculados a la cuenta
+const totalDe = (c) => Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0);
+const pocoStock = (p) => p.activo && p.stock != null && p.stock <= minimoStock(p);
+
+/* Sección "Consumos": cuentas de las personas (lo que consumen y pagan después) y productos con
+   stock. La usan el dueño y los colaboradores con permiso de consumos. */
+/* ---------- Clases con profes (ver 20261028_clases.sql) ----------
+   Modo "alquila": el profe alquila la cancha; cada clase es una reserva con el precio del alquiler
+   y lo que no se cobró es lo que debe. Modo "complejo": el complejo cobra la cuota a cada alumno y le
+   paga al profe por clase dictada. */
+
+const MODOS_PROFE = { alquila: "Alquila la cancha", complejo: "Cobra el complejo" };
+
+function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [datos, setDatos] = useState(null); // { profes, canchas, clases, alumnos, cuotas, pagos }
+  const [error, setError] = useState("");
+  const [abierto, setAbierto] = useState(null); // id del profe
+  const [form, setForm] = useState(null); // alta o edición de profe
+  const [version, setVersion] = useState(0);
+  const mes = hoy.slice(0, 7);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+  const recargar = useCallback(() => setVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    let vivo = true;
+    const c = encodeURIComponent(complejoId);
+    Promise.all([
+      supabaseTable(`profes_complejo?complejo_id=eq.${c}&order=activo.desc,nombre.asc`, { accessToken }),
+      supabaseTable(`canchas?complejo_id=eq.${c}&activa=eq.true&order=orden.asc,created_at.asc`),
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id&order=fecha.asc`, accessToken),
+      supabaseTable(`alumnos?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
+      supabaseTable(`cuotas_alumnos?complejo_id=eq.${c}&periodo=eq.${mes}&select=alumno_id,monto,medio`, { accessToken }),
+      esDueno ? supabaseTable(`pagos_profes?complejo_id=eq.${c}&periodo=eq.${mes}&select=profe_id,monto`, { accessToken }) : Promise.resolve([]),
+    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos }); setError(""); } })
+      .catch(() => { if (vivo) setError("No se pudieron cargar las clases. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [complejoId, accessToken, esDueno, hoy, mes, version]);
+
+  const [guardandoProfe, setGuardandoProfe] = useState(false);
+  const guardarProfe = async () => {
+    if (guardandoProfe) return;
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!form.nombre.trim()) { setError("Poné el nombre del profe."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    const body = { nombre: form.nombre.trim(), telefono, modo: form.modo, precio_hora: form.modo === "alquila" ? leerPrecio(form.precio) : null, pago_clase: form.modo === "complejo" ? leerPrecio(form.precio) : null, activo: form.activo };
+    setGuardandoProfe(true);
+    try {
+      if (form.id) await supabaseTable(`profes_complejo?id=eq.${form.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("profes_complejo", { method: "POST", body: { ...body, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
+      setForm(null); setError(""); recargar();
+    } catch (e) { setError(reservaErrorText(e)); }
+    finally { setGuardandoProfe(false); }
+  };
+  const editar = (p) => setForm(p
+    ? { id: p.id, nombre: p.nombre, telefono: p.telefono ? formatArPhone(p.telefono) : "", modo: p.modo, precio: (p.modo === "alquila" ? p.precio_hora : p.pago_clase) != null ? String(Math.round(p.modo === "alquila" ? p.precio_hora : p.pago_clase)) : "", activo: p.activo }
+    : { nombre: "", telefono: "", modo: "alquila", precio: "", activo: true });
+
+  const ahora = Date.now(); // una clase de hoy que todavía no empezó no está dictada ni se debe
+  const resumen = (p) => {
+    const clases = datos.clases.filter((r) => r.profe_id === p.id);
+    if (p.modo === "alquila") {
+      const sinCobrar = clases.filter((r) => yaEmpezo(r, hoy, ahora) && !r.medio_pago && r.precio != null);
+      return { debe: sinCobrar.reduce((s, r) => s + Number(r.precio), 0), sinCobrar, proximas: clases.filter((r) => !yaEmpezo(r, hoy, ahora)).length };
+    }
+    const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id && a.activo);
+    const pagaron = alumnos.filter((a) => datos.cuotas.some((q) => q.alumno_id === a.id)).length;
+    const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && yaEmpezo(r, hoy, ahora)).length;
+    const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
+    return { alumnos: alumnos.length, pagaron, dictadas, aPagar: Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado), proximas: clases.filter((r) => !yaEmpezo(r, hoy, ahora)).length };
+  };
+  const profe = datos?.profes.find((p) => p.id === abierto);
+
+  if (profe) return <ProfeDetalle profe={profe} datos={datos} complejoId={complejoId} venueName={nombreComplejo(complejoId)} accessToken={accessToken} esDueno={esDueno} hoy={hoy} mes={mes} onBack={() => setAbierto(null)} onChanged={recargar} onEditar={() => { editar(profe); setAbierto(null); }} />;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          {form ? (
+            <section className="rounded-xl border border-teal-700 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">{form.id ? "Editar profe" : "Nuevo profe"}</h2>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp del profe" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="grid sm:grid-cols-2 gap-2">
+                {Object.entries(MODOS_PROFE).map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => setForm({ ...form, modo: k })} className={`px-3 py-2 rounded-lg border text-left ${form.modo === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>
+                    <span className="block font-semibold">{l}</span>
+                    <span className="block text-xs opacity-80">{k === "alquila" ? "Te paga la cancha; los alumnos le pagan a él" : "Vos cobrás las cuotas y le pagás por clase"}</span>
+                  </button>
+                ))}
+              </div>
+              <label className="block text-xs text-teal-400">{form.modo === "alquila" ? "Lo que paga por hora de cancha" : "Lo que le pagás por clase dictada"}
+                <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="$" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </label>
+              {form.id && <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={form.activo} onChange={(e) => setForm({ ...form, activo: e.target.checked })} /> Activo</label>}
+              <div className="flex gap-3 items-center">
+                <button type="button" onClick={guardarProfe} disabled={guardandoProfe} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </section>
+          ) : esDueno && <button type="button" onClick={() => editar(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar profe</button>}
+
+          {datos.profes.length === 0 ? <p className="text-teal-400">{esDueno ? "Cargá los profes que dan clases en el complejo." : "Todavía no hay profes cargados."}</p> : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {datos.profes.map((p) => {
+                const r = resumen(p);
+                return (
+                  <button key={p.id} type="button" onClick={() => setAbierto(p.id)} className={`text-left rounded-xl border border-teal-800 p-4 hover:bg-white/5 ${p.activo ? "" : "opacity-50"}`} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                    <span className="flex items-start justify-between gap-2">
+                      <span className="font-semibold text-slate-100">{p.nombre}</span>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full shrink-0" style={{ color: p.modo === "alquila" ? BRAND.cyan : BRAND.lime, backgroundColor: p.modo === "alquila" ? "#22d3ee1f" : "#9fe0221a" }}>{MODOS_PROFE[p.modo]}</span>
+                    </span>
+                    <span className="block text-xs text-teal-400 mt-1">{r.proximas} clase{r.proximas === 1 ? "" : "s"} próxima{r.proximas === 1 ? "" : "s"}{p.modo === "complejo" ? ` · ${r.alumnos} alumno${r.alumnos === 1 ? "" : "s"}, pagaron ${r.pagaron}` : ""}</span>
+                    {p.modo === "alquila"
+                      ? <span className={`block mt-2 font-semibold ${r.debe > 0 ? "text-amber-300" : "text-teal-500"}`}>{r.debe > 0 ? `Debe ${formatoPrecio(r.debe)}` : "Al día"}</span>
+                      : esDueno && <span className={`block mt-2 font-semibold ${r.aPagar > 0 ? "text-amber-300" : "text-teal-500"}`}>{r.aPagar > 0 ? `Le debés ${formatoPrecio(r.aPagar)}` : "Pago del mes al día"}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esDueno, hoy, mes, onBack, onChanged, onEditar }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [cargar, setCargar] = useState(null); // { canchaId, fecha, desde, duracion, semanas }
+  const [cobrando, setCobrando] = useState(null); // alumno id o "profe" o "deuda"
+  const [alumnoForm, setAlumnoForm] = useState(null);
+  const nombreCancha = (id) => datos.canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const ahora = Date.now();
+  const clases = datos.clases.filter((r) => r.profe_id === p.id);
+  const proximas = clases.filter((r) => !yaEmpezo(r, hoy, ahora)).slice(0, 10);
+  const sinCobrar = clases.filter((r) => yaEmpezo(r, hoy, ahora) && !r.medio_pago && r.precio != null);
+  const debe = sinCobrar.reduce((s, r) => s + Number(r.precio), 0);
+  const alumnos = datos.alumnos.filter((a) => a.profe_id === p.id);
+  const cuotaDe = (a) => datos.cuotas.find((q) => q.alumno_id === a.id);
+  const dictadas = clases.filter((r) => r.fecha.slice(0, 7) === mes && yaEmpezo(r, hoy, ahora)).length;
+  const pagado = datos.pagos.filter((x) => x.profe_id === p.id).reduce((s, x) => s + Number(x.monto), 0);
+  const aPagar = Math.max(0, dictadas * Number(p.pago_clase || 0) - pagado);
+  const horario = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id)}`;
+
+  const run = async (fn, ok) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); if (ok) setAviso(ok); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Esa cuota ya está cobrada este mes." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cancha = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const inicios = cancha ? iniciosPosibles(cancha, Number(cargar.duracion)) : [];
+  const cargarClases = async () => {
+    if (!cancha || cargar.desde === "" || !cargar.fecha) { setError("Elegí cancha, día y horario."); return; }
+    const desde = Number(cargar.desde);
+    const dur = Number(cargar.duracion);
+    const semanas = Number(cargar.semanas) || 1;
+    const serieId = semanas > 1 ? nuevoUuid() : null;
+    const precio = p.modo === "alquila" && p.precio_hora != null ? Math.round((Number(p.precio_hora) * dur) / 60) : null;
+    setBusy(true); setError(""); setAviso("");
+    const fallidas = [];
+    for (const f of fechasSemanales(cargar.fecha, semanas)) {
+      try {
+        await supabaseTable("reservas", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { complejo_id: complejoId, cancha_id: cancha.id, tipo: "clase", fecha: f, inicio: instante(f, desde), fin: instante(f, desde + dur), estado: "confirmada", origen: "manual", nombre: `Clase · ${p.nombre}`.slice(0, 80), telefono: p.telefono, precio, profe_id: p.id, ...(serieId ? { serie_id: serieId } : {}) },
+        });
+      } catch (e) { fallidas.push(`${etiquetaFecha(f)}: ${reservaErrorText(e)}`); }
+    }
+    setBusy(false);
+    if (fallidas.length) setError(`No se pudieron cargar estos días:\n${fallidas.join("\n")}`);
+    else { setAviso(`Listo: ${semanas === 1 ? "clase cargada" : `${semanas} clases cargadas`} en la agenda.`); setCargar(null); }
+    onChanged();
+  };
+  const cobrarDeuda = (medio) => run(() => supabaseTable(`reservas?id=in.(${sinCobrar.map((r) => r.id).join(",")})`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" }), `Cobrado ${formatoPrecio(debe)} a ${p.nombre}.`).then(() => setCobrando(null));
+  const cobrarCuota = (a, medio) => !(Number(a.cuota) > 0) ? setError(`Cargale la cuota a ${a.nombre} antes de cobrarla.`) : run(() => supabaseTable("cuotas_alumnos", { method: "POST", body: { complejo_id: complejoId, alumno_id: a.id, periodo: mes, monto: Number(a.cuota), medio }, accessToken, prefer: "return=minimal" }), `Cuota de ${a.nombre} cobrada.`).then(() => setCobrando(null));
+  const pagarProfe = (medio) => run(() => supabaseTable("pagos_profes", { method: "POST", body: { complejo_id: complejoId, profe_id: p.id, periodo: mes, monto: aPagar, medio, nota: `${dictadas} clases` }, accessToken, prefer: "return=minimal" }), `Le pagaste ${formatoPrecio(aPagar)} a ${p.nombre}.`).then(() => setCobrando(null));
+  const guardarAlumno = () => {
+    const telefono = alumnoForm.telefono.trim() ? normalizeArPhone(alumnoForm.telefono) : null;
+    if (!alumnoForm.nombre.trim() || leerPrecio(alumnoForm.cuota) == null) { setError("Poné el nombre y la cuota."); return; }
+    if (alumnoForm.telefono.trim() && !telefono) { setError("Revisá el WhatsApp."); return; }
+    run(async () => {
+      const body = { nombre: alumnoForm.nombre.trim(), telefono, cuota: leerPrecio(alumnoForm.cuota) };
+      if (alumnoForm.id) await supabaseTable(`alumnos?id=eq.${alumnoForm.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("alumnos", { method: "POST", body: { ...body, complejo_id: complejoId, profe_id: p.id }, accessToken, prefer: "return=minimal" });
+      setAlumnoForm(null);
+    });
+  };
+  const alternarAlumno = (a) => run(() => supabaseTable(`alumnos?id=eq.${a.id}`, { method: "PATCH", body: { activo: !a.activo }, accessToken, prefer: "return=minimal" }));
+  const medios = (onElegir, lista = MEDIOS_COBRO) => (
+    <span className="flex flex-wrap items-center gap-1">
+      {lista.map(([m, l]) => <button key={m} type="button" disabled={busy} onClick={() => onElegir(m)} className="px-2.5 py-1 rounded-lg border border-lime-400/70 text-lime-400 text-xs disabled:opacity-50">{l}</button>)}
+      <button type="button" onClick={() => setCobrando(null)} className="text-teal-400 text-xs ml-1">✕</button>
+    </span>
+  );
+  const seccion = "rounded-xl border border-teal-800 p-4 space-y-3 min-w-0";
+  const fondo = { backgroundColor: "rgba(8,18,24,0.6)" };
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Clases</button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl text-slate-100" style={F.display}>{p.nombre.toUpperCase()}</h2>
+          <p className="text-teal-300">{MODOS_PROFE[p.modo]} · {p.modo === "alquila" ? `${formatoPrecio(p.precio_hora) || "sin precio"} la hora` : `${formatoPrecio(p.pago_clase) || "sin precio"} por clase`}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {p.telefono && <a href={waLink(p.telefono, `Hola ${p.nombre.split(" ")[0]}! `)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">WhatsApp</a>}
+          {esDueno && <button type="button" onClick={onEditar} className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">Editar</button>}
+        </div>
+      </div>
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className={seccion} style={fondo}>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm uppercase tracking-wide text-teal-400">Próximas clases</h3>
+            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">+ Cargar clases</button>}
+          </div>
+          {cargar && (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <div className="grid gap-2 grid-cols-2">
+                <select value={cargar.canchaId} onChange={(e) => setCargar({ ...cargar, canchaId: e.target.value, desde: "" })} aria-label="Cancha" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  {datos.canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select>
+                <input type="date" value={cargar.fecha} min={hoy} onChange={(e) => setCargar({ ...cargar, fecha: e.target.value })} aria-label="Primer día" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+                <select value={cargar.desde} onChange={(e) => setCargar({ ...cargar, desde: e.target.value })} aria-label="Horario" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  <option value="">Horario…</option>
+                  {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+                </select>
+                <select value={cargar.duracion} onChange={(e) => setCargar({ ...cargar, duracion: e.target.value, desde: "" })} aria-label="Duración" className="px-2 py-2 rounded-lg border text-base min-w-0" style={adminInput}>
+                  {[60, 90, 120].map((d) => <option key={d} value={d}>{d} min</option>)}
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-teal-200">Repetir
+                <select value={cargar.semanas} onChange={(e) => setCargar({ ...cargar, semanas: e.target.value })} className="px-2 py-1 rounded border" style={adminInput}>
+                  {[1, 4, 8, 12, 16, 24].map((n) => <option key={n} value={n}>{n === 1 ? "solo ese día" : `${n} semanas`}</option>)}
+                </select>
+              </label>
+              {p.modo === "alquila" && p.precio_hora != null && <p className="text-xs text-teal-400">Cada clase: {formatoPrecio(Math.round((Number(p.precio_hora) * Number(cargar.duracion)) / 60))} de alquiler.</p>}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={cargarClases} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cargando…" : "Cargar en la agenda"}</button>
+                <button type="button" onClick={() => setCargar(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
+          {proximas.length === 0 ? <p className="text-teal-400">No tiene clases cargadas.</p> : (
+            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
+          )}
+          <p className="text-xs text-teal-500">Para cancelar una clase, tocála en la Agenda.</p>
+        </section>
+
+        {p.modo === "alquila" ? (
+          <section className={seccion} style={fondo}>
+            <h3 className="text-sm uppercase tracking-wide text-teal-400">Alquiler de cancha</h3>
+            <TarjetaResumen titulo="Debe" tono={debe > 0 ? "ambar" : "lime"} valor={formatoPrecio(debe) || "$0"} detalle={`${sinCobrar.length} clase${sinCobrar.length === 1 ? "" : "s"} sin cobrar`} />
+            {sinCobrar.length > 0 && (
+              <>
+                <ul className="text-xs text-teal-300 space-y-0.5">{sinCobrar.slice(-8).map((r) => <li key={r.id}>{horario(r)} · {formatoPrecio(r.precio)}</li>)}</ul>
+                {cobrando === "deuda" ? medios(cobrarDeuda, MEDIOS_PAGO.filter(([k]) => k)) : <button type="button" onClick={() => setCobrando("deuda")} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar {formatoPrecio(debe)}</button>}
+              </>
+            )}
+          </section>
+        ) : (
+          <section className={seccion} style={fondo}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm uppercase tracking-wide text-teal-400">Alumnos · cuotas de {etiquetaMes(mes).split(" ")[0].toLowerCase()}</h3>
+              {!alumnoForm && <button type="button" onClick={() => setAlumnoForm({ nombre: "", telefono: "", cuota: "" })} className="text-xs text-lime-400 font-semibold">+ Alumno</button>}
+            </div>
+            {alumnoForm && (
+              <div className="flex flex-wrap gap-2">
+                <input value={alumnoForm.nombre} onChange={(e) => setAlumnoForm({ ...alumnoForm, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del alumno" className="flex-1 min-w-[8rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={alumnoForm.telefono} onChange={(e) => setAlumnoForm({ ...alumnoForm, telefono: e.target.value })} placeholder="WhatsApp" aria-label="WhatsApp del alumno" className="w-36 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <input inputMode="numeric" value={alumnoForm.cuota} onChange={(e) => setAlumnoForm({ ...alumnoForm, cuota: e.target.value })} placeholder="Cuota $" aria-label="Cuota mensual" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <button type="button" disabled={busy} onClick={guardarAlumno} className="px-3 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setAlumnoForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            )}
+            {alumnos.length === 0 ? <p className="text-teal-400">Todavía no tiene alumnos.</p> : (
+              <ul className="divide-y divide-teal-900/70">
+                {alumnos.map((a) => {
+                  const q = cuotaDe(a);
+                  return (
+                    <li key={a.id} className={`py-2 flex flex-wrap items-center gap-x-3 gap-y-1 ${a.activo ? "" : "opacity-50"}`}>
+                      <span className="flex-1 min-w-[8rem] text-slate-100">{a.nombre}<span className="block text-xs text-teal-500">{formatoPrecio(a.cuota)} por mes</span></span>
+                      {q ? <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagó · {medioCobroLabel(q.medio)}</span>
+                        : !a.activo ? <span className="text-xs text-teal-500">Pausado</span>
+                        : cobrando === a.id ? medios((m) => cobrarCuota(a, m))
+                        : <button type="button" onClick={() => setCobrando(a.id)} className="px-3 py-1 rounded-lg text-xs font-semibold border border-amber-400 text-amber-300">Cobrar cuota</button>}
+                      {!q && a.telefono && a.activo && <a href={waLink(a.telefono, `Hola ${a.nombre.split(" ")[0]}! Te recordamos la cuota de ${etiquetaMes(mes).split(" ")[0].toLowerCase()} de las clases con ${p.nombre} en ${venueName}: ${formatoPrecio(a.cuota)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-xs text-teal-300 underline">Recordar</a>}
+                      <button type="button" onClick={() => setAlumnoForm({ id: a.id, nombre: a.nombre, telefono: a.telefono ? formatArPhone(a.telefono) : "", cuota: String(Math.round(a.cuota)) })} className="text-xs text-teal-400 underline">Editar</button>
+                      <button type="button" disabled={busy} onClick={() => alternarAlumno(a)} className="text-xs text-teal-500 underline">{a.activo ? "Pausar" : "Reactivar"}</button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {esDueno && (
+              <div className="border-t border-teal-800 pt-3 space-y-2">
+                <p className="text-teal-200">Pago al profe: {dictadas} clase{dictadas === 1 ? "" : "s"} dictada{dictadas === 1 ? "" : "s"} este mes × {formatoPrecio(p.pago_clase) || "$0"}{pagado > 0 ? ` − ${formatoPrecio(pagado)} ya pagado` : ""}</p>
+                {aPagar > 0 ? (cobrando === "profe" ? medios(pagarProfe) : <button type="button" onClick={() => setCobrando("profe")} className="px-4 py-2 rounded-lg font-semibold border border-amber-400 text-amber-300">Pagarle {formatoPrecio(aPagar)}</button>) : <p className="text-xs text-teal-500">No le debés nada este mes.</p>}
+              </div>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Clientes: ficha de cada persona (turnos, cuenta, torneos) ---------- */
+
+/* Todas las filas de una consulta (la base devuelve de a 1000) */
+async function traerTodo(path, accessToken) {
+  const filas = [];
+  for (let offset = 0; offset < 20000; offset += 1000) {
+    const parte = await supabaseTable(`${path}&limit=1000&offset=${offset}`, { accessToken });
+    filas.push(...parte);
+    if (parte.length < 1000) break;
+  }
+  return filas;
+}
+
+const FILTROS_CLIENTES = [["todos", "Todos"], ["frecuentes", "Vienen seguido"], ["ausentes", "No vienen hace 30+ días"], ["deben", "Deben"]];
+
+function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripciones = [] }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas }
+  const [error, setError] = useState("");
+  const [filtro, setFiltro] = useState("todos");
+  const [buscar, setBuscar] = useState("");
+  const [abierto, setAbierto] = useState(null); // clave del cliente
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "el complejo";
+
+  useEffect(() => {
+    let vivo = true;
+    setDatos(null);
+    const c = encodeURIComponent(complejoId);
+    Promise.all([
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
+      verCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
+      supabaseTable(`canchas?complejo_id=eq.${c}&select=id,nombre`),
+    ]).then(([reservas, cuentas, canchas]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas }); setError(""); } })
+      .catch(() => { if (vivo) setError("No se pudieron cargar los clientes. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [complejoId, accessToken, verCuentas, hoy]);
+
+  const clientes = useMemo(() => (datos ? armarClientes({ reservas: datos.reservas, cuentas: datos.cuentas, inscripciones, hoy, ahora: Date.now() }) : []), [datos, inscripciones, hoy]);
+  const frecuente = (c) => c.historial.filter((r) => r.fecha <= hoy && r.fecha >= sumarDias(hoy, -60) && !r.no_vino).length >= 4;
+  const texto = claveNombre(buscar);
+  const visibles = clientes
+    .filter((c) => filtro === "todos" || (filtro === "frecuentes" && frecuente(c)) || (filtro === "ausentes" && noVienenHace(c)) || (filtro === "deben" && c.deuda > 0))
+    .filter((c) => !texto || claveNombre(c.nombre).includes(texto) || (c.telefono || "").includes(buscar.replace(/\D/g, "") || "~"))
+    .sort((a, b) => (filtro === "deben" ? b.deuda - a.deuda : filtro === "ausentes" ? b.diasSinVenir - a.diasSinVenir : (b.ultimaVisita || "").localeCompare(a.ultimaVisita || "")));
+  const activos = clientes.filter((c) => c.diasSinVenir != null && c.diasSinVenir <= 30).length;
+  const ausentes = clientes.filter((c) => noVienenHace(c)).length;
+  const deben = clientes.filter((c) => c.deuda > 0).length;
+  const ultima = (c) => (c.ultimaVisita ? (c.diasSinVenir === 0 ? "hoy" : `hace ${c.diasSinVenir} día${c.diasSinVenir === 1 ? "" : "s"}`) : "—");
+  const cliente = clientes.find((c) => c.clave === abierto);
+
+  if (cliente) return <FichaCliente cliente={cliente} canchas={datos.canchas} venueName={nombreComplejo(complejoId)} hoy={hoy} onBack={() => setAbierto(null)} />;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className={`grid grid-cols-2 ${verCuentas ? "lg:grid-cols-4" : "lg:grid-cols-3"} gap-3`}>
+            <TarjetaResumen titulo="Clientes" tono="cyan" valor={String(clientes.length)} detalle="Últimos 6 meses" onClick={() => setFiltro("todos")} />
+            <TarjetaResumen titulo="Vienen seguido" tono="lime" valor={String(clientes.filter(frecuente).length)} detalle={`4 o más turnos en 60 días · ${activos} vinieron en 30`} onClick={() => setFiltro("frecuentes")} />
+            <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
+            {/* Sin acceso a las cuentas no hay deudas para mostrar */}
+            {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="Cantina o inscripciones" onClick={() => setFiltro("deben")} />}
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || verCuentas).map(([k, l]) => (
+              <button key={k} type="button" onClick={() => setFiltro(k)} className={`px-3 py-1.5 rounded-full border ${filtro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+            ))}
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cliente" className="flex-1 min-w-[15rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
+          </div>
+          {filtro === "ausentes" && visibles.length > 0 && <p className="text-xs text-teal-400">Tocá un cliente para mandarle un WhatsApp invitándolo a volver.</p>}
+          {visibles.length === 0 ? <p className="text-teal-400">{clientes.length === 0 ? "Todavía no hay turnos cargados en los últimos 6 meses." : "No hay clientes con ese filtro."}</p> : (
+            <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Cliente</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Turnos</th>
+                      <th className="px-3 py-2.5 font-semibold">Última vez</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Gastó en turnos</th>
+                      {verCuentas && <th className="px-3 py-2.5 font-semibold text-right">Debe</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibles.slice(0, 300).map((c) => (
+                      <tr key={c.clave} onClick={() => setAbierto(c.clave)} className="border-t border-teal-900/70 hover:bg-white/5 cursor-pointer">
+                        <td className="px-3 py-2.5"><span className="text-slate-100">{c.nombre}</span>{c.telefono && <span className="block text-xs text-teal-500">{formatArPhone(c.telefono)}</span>}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{c.turnos}{c.proximos > 0 && <span className="text-xs text-lime-400"> +{c.proximos}</span>}</td>
+                        <td className={`px-3 py-2.5 ${noVienenHace(c) ? "text-amber-300" : "text-teal-300"}`}>{ultima(c)}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.gastado) || "$0"}</td>
+                        {verCuentas && <td className="px-3 py-2.5 text-right tabular-nums">{c.deuda > 0 ? <span className="text-red-300 font-semibold">{formatoPrecio(c.deuda)}</span> : <span className="text-teal-600">—</span>}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+                {visibles.slice(0, 300).map((c) => (
+                  <li key={c.clave}>
+                    <button type="button" onClick={() => setAbierto(c.clave)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left">
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-slate-100 truncate">{c.nombre}</span>
+                        <span className={`block text-xs ${noVienenHace(c) ? "text-amber-300" : "text-teal-500"}`}>{c.turnos} turno{c.turnos === 1 ? "" : "s"} · {ultima(c)}{c.proximos > 0 ? ` · ${c.proximos} próximo${c.proximos === 1 ? "" : "s"}` : ""}</span>
+                      </span>
+                      {c.deuda > 0 && <span className="text-xs font-semibold text-red-300 shrink-0">Debe {formatoPrecio(c.deuda)}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {visibles.length > 300 && <p className="text-xs text-teal-500">Se muestran 300 de {visibles.length}. Usá el buscador.</p>}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
+  const nombreCancha = (id) => canchas.find((x) => x.id === id)?.nombre || "Cancha";
+  const ahora = Date.now();
+  const pasados = c.historial.filter((r) => yaEmpezo(r, hoy, ahora)).slice(0, 12);
+  const proximos = c.historial.filter((r) => !yaEmpezo(r, hoy, ahora)).sort((a, b) => (a.inicio < b.inicio ? -1 : 1));
+  const primerNombre = c.nombre.split(" ")[0];
+  const mensajeVolver = `Hola ${primerNombre}! ¿Cómo andás? Hace rato no te vemos por ${venueName} 🎾 ¿Armamos un partido esta semana? Avisanos qué día te queda bien y te reservamos la cancha.`;
+  const mensajeDeuda = `Hola ${primerNombre}! Te escribimos de ${venueName}: te quedó un saldo de ${formatoPrecio(c.deuda)} con nosotros. Cuando puedas pasá a regularizarlo. ¡Gracias!`;
+  const horario = (r) => `${etiquetaFecha(r.fecha)} · ${etiquetaHora(minutoEnGrilla(r.fecha, r.inicio))} · ${nombreCancha(r.cancha_id)}`;
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Clientes</button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl text-slate-100" style={F.display}>{c.nombre.toUpperCase()}</h2>
+          {c.telefono && <p className="text-teal-300">{formatArPhone(c.telefono)}</p>}
+        </div>
+        {c.telefono && (
+          <div className="flex flex-wrap gap-2">
+            {noVienenHace(c) && <a href={waLink(c.telefono, mensajeVolver)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Invitarlo a volver</a>}
+            {c.deuda > 0 && <a href={waLink(c.telefono, mensajeDeuda)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-red-400 text-red-300">Recordarle la deuda</a>}
+            <a href={waLink(c.telefono, `Hola ${primerNombre}! `)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">WhatsApp</a>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <TarjetaResumen titulo="Turnos jugados" tono="cyan" valor={String(c.turnos)} detalle={c.noVino ? `${c.noVino} vez${c.noVino === 1 ? "" : "es"} no vino` : "Últimos 6 meses"} />
+        <TarjetaResumen titulo="Última vez" tono={noVienenHace(c) ? "ambar" : "lime"} valor={c.ultimaVisita ? (c.diasSinVenir === 0 ? "Hoy" : `${c.diasSinVenir} días`) : "—"} detalle={c.ultimaVisita ? etiquetaFecha(c.ultimaVisita) : "Todavía no jugó"} />
+        <TarjetaResumen titulo="Gastó en turnos" tono="lime" valor={formatoPrecio(c.gastado) || "$0"} detalle={c.torneos ? `Jugó ${c.torneos} torneo${c.torneos === 1 ? "" : "s"}` : "Cobrados"} />
+        <TarjetaResumen titulo="Debe" tono={c.deuda > 0 ? "rojo" : "gris"} valor={formatoPrecio(c.deuda) || "$0"} detalle={c.cuentaId ? "Cantina e inscripciones" : "Sin cuenta"} />
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+          <h3 className="text-sm uppercase tracking-wide text-teal-400 mb-2">Próximos turnos</h3>
+          {proximos.length === 0 ? <p className="text-teal-400">No tiene turnos reservados.</p> : (
+            <ul className="space-y-1">{proximos.slice(0, 8).map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fijo</span>}</li>)}</ul>
+          )}
+        </section>
+        <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+          <h3 className="text-sm uppercase tracking-wide text-teal-400 mb-2">Últimos turnos</h3>
+          {pasados.length === 0 ? <p className="text-teal-400">Sin turnos en los últimos 6 meses.</p> : (
+            <ul className="space-y-1">{pasados.map((r) => (
+              <li key={r.id} className="flex justify-between gap-2">
+                <span className="text-teal-200 min-w-0">{horario(r)}</span>
+                <span className={`text-xs shrink-0 ${r.no_vino ? "text-red-300" : r.medio_pago ? "text-lime-400" : "text-amber-300"}`}>{r.no_vino ? "No vino" : r.medio_pago ? "Pagó" : "Sin cobrar"}</span>
+              </li>
+            ))}</ul>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Reportes (solo el dueño): ocupación, ingresos y gastos mes a mes, productos ---------- */
+
+const DIAS_CORTOS = [[1, "Lun"], [2, "Mar"], [3, "Mié"], [4, "Jue"], [5, "Vie"], [6, "Sáb"], [0, "Dom"]];
+
+function ReportesPanel({ organizer, complejos, complejosReservas, complejosCantina }) {
+  const accessToken = organizer.accessToken;
+  const hoy = hoyArgentina();
+  const [mes, setMes] = useState(hoy.slice(0, 7));
+  const [datos, setDatos] = useState(null);
+  const [error, setError] = useState("");
+  const lista = (cs) => cs.map((c) => encodeURIComponent(c.id)).join(",");
+  const idsTodos = lista(complejos);
+  const idsReservas = lista(complejosReservas);
+  const idsCantina = lista(complejosCantina);
+
+  useEffect(() => {
+    let vivo = true;
+    setDatos(null);
+    const desde6 = `${sumarMeses(mes, -5)}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    const creado = `created_at=gte.${enAr(desde6)}&created_at=lt.${enAr(sumarDias(hasta, 1))}`;
+    const nada = Promise.resolve([]);
+    const suave = (pr) => pr.catch(() => []);
+    Promise.all([
+      idsReservas ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&activa=eq.true&order=orden.asc`) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&fecha=gte.${mes}-01&fecha=lte.${hasta}&estado=eq.confirmada&select=tipo,estado,cancha_id,fecha,inicio,fin&order=fecha.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio&order=fecha.asc`, accessToken)) : nada,
+      idsCantina ? suave(traerTodo(`venta_pagos?complejo_id=in.(${idsCantina})&${creado}&select=monto,created_at,ventas!inner(anulada)&ventas.anulada=is.false&order=created_at.asc`, accessToken)) : nada,
+      idsTodos ? suave(traerTodo(`cuenta_pagos?complejo_id=in.(${idsTodos})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      suave(traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)),
+      suave(traerTodo(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,tipo,monto&order=fecha.asc`, accessToken)),
+      idsTodos ? suave(traerTodo(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=gte.${desde6}&pagada_at=lte.${hasta}&select=pagada_at,total&order=pagada_at.asc`, accessToken)) : nada,
+      idsTodos ? suave(traerTodo(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${creado}&select=tipo,monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=producto_id,talle,descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`cuotas_alumnos?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`pagos_profes?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+    ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos, cuotas, pagosProfes]) => {
+      if (!vivo) return;
+      const f = (iso) => fechaArgentina(iso);
+      const ing = {
+        Turnos: sumarPorMes(turnosCobrados.map((r) => ({ fecha: r.fecha, monto: r.precio }))),
+        Mostrador: sumarPorMes(ventas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Cuentas: sumarPorMes(cuentas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Inscripciones: sumarPorMes(inscripciones.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Clases: sumarPorMes(cuotas.map((v) => ({ fecha: f(v.created_at), monto: v.monto }))),
+        Otros: sumarPorMes([...manuales.filter((m) => m.tipo === "ingreso"), ...movTurnos.filter((m) => m.tipo === "ingreso").map((m) => ({ fecha: f(m.created_at), monto: m.monto }))]),
+      };
+      const gas = sumarPorMes([
+        ...manuales.filter((m) => m.tipo === "gasto"),
+        ...compras.map((c) => ({ fecha: c.pagada_at, monto: c.total })),
+        ...movTurnos.filter((m) => m.tipo === "gasto").map((m) => ({ fecha: f(m.created_at), monto: m.monto })),
+        ...pagosProfes.map((m) => ({ fecha: f(m.created_at), monto: m.monto })),
+      ]);
+      setDatos({
+        ocupacion: canchas.length ? ocupacionMes({ canchas, reservas: reservasMes, mes }) : null,
+        ing, gas,
+        productos: rankingProductos(vendidos.map((i) => ({ ...i, costo_unitario: [].concat(i.venta_items_costo || [])[0]?.costo_unitario }))),
+      });
+      setError("");
+    }).catch(() => { if (vivo) setError("No se pudieron cargar los reportes. Revisá la conexión."); });
+    return () => { vivo = false; };
+  }, [mes, organizer.id, accessToken, idsTodos, idsReservas, idsCantina]);
+
+  const meses = Array.from({ length: 6 }, (_, i) => sumarMeses(mes, i - 5));
+  const ingresoDe = (m) => (datos ? Object.values(datos.ing).reduce((s, x) => s + (x[m] || 0), 0) : 0);
+  const gastoDe = (m) => (datos ? datos.gas[m] || 0 : 0);
+  const maximo = Math.max(1, ...meses.map((m) => Math.max(ingresoDe(m), gastoDe(m))));
+  const anterior = ingresoDe(sumarMeses(mes, -1));
+  const variacion = anterior ? Math.round(((ingresoDe(mes) - anterior) / anterior) * 100) : null;
+  const corto = (m) => etiquetaMes(m).slice(0, 3);
+  const colorPct = (p) => (p == null ? "transparent" : `rgba(159, 224, 34, ${0.08 + (p / 100) * 0.8})`);
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+        <span className="font-semibold text-teal-100">{etiquetaMes(mes)}</span>
+        <button type="button" disabled={mes >= hoy.slice(0, 7)} onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300 disabled:opacity-30" aria-label="Mes siguiente">›</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {datos.ocupacion && <TarjetaResumen titulo="Ocupación" tono="lime" valor={`${datos.ocupacion.pctTotal}%`} detalle="De las horas abiertas" />}
+            {datos.ocupacion && <TarjetaResumen titulo="Horas reservadas" tono="cyan" valor={String(Math.round(datos.ocupacion.horasOcupadas))} detalle="Turnos confirmados" />}
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={formatoPrecio(ingresoDe(mes)) || "$0"} detalle={variacion == null ? "Sin mes anterior" : `${variacion >= 0 ? "▲" : "▼"} ${Math.abs(variacion)}% vs ${corto(sumarMeses(mes, -1)).toLowerCase()}`} />
+            <TarjetaResumen titulo="Resultado" tono={ingresoDe(mes) - gastoDe(mes) < 0 ? "rojo" : "cyan"} valor={conSigno(ingresoDe(mes) - gastoDe(mes))} detalle={`Gastos ${formatoPrecio(gastoDe(mes)) || "$0"}`} />
+          </div>
+
+          {datos.ocupacion && (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+              <section className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <h2 className="text-sm uppercase tracking-wide text-teal-400">Ocupación por cancha</h2>
+                {datos.ocupacion.porCancha.map((c) => (
+                  <div key={c.id}>
+                    <div className="flex justify-between text-teal-200"><span>{c.nombre}</span><span className="tabular-nums">{c.pct}% · {Math.round(c.horasOcupadas)} h</span></div>
+                    <div className="h-2.5 rounded-full mt-1" style={{ backgroundColor: "#134e4a" }}><div className="h-2.5 rounded-full" style={{ width: `${Math.min(100, c.pct)}%`, backgroundColor: BRAND.lime }} /></div>
+                  </div>
+                ))}
+              </section>
+              <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                <h2 className="text-sm uppercase tracking-wide text-teal-400 mb-1">Qué horarios se llenan</h2>
+                <p className="text-xs text-teal-500 mb-3">% ocupado por día y hora en el mes. Los claros son los horarios para promocionar.</p>
+                <div className="overflow-x-auto">
+                  <table className="text-[11px] border-separate" style={{ borderSpacing: 2 }}>
+                    <thead><tr><th></th>{DIAS_CORTOS.map(([, l]) => <th key={l} className="px-1 text-teal-400 font-normal">{l}</th>)}</tr></thead>
+                    <tbody>
+                      {datos.ocupacion.horas.map((h) => (
+                        <tr key={h}>
+                          <td className="pr-1 text-teal-500 tabular-nums text-right">{String(h % 24).padStart(2, "0")}h</td>
+                          {DIAS_CORTOS.map(([d]) => {
+                            const p = datos.ocupacion.pct(d, h);
+                            return <td key={d} title={p == null ? "Cerrado" : `${p}%`} className="w-10 h-6 rounded text-center tabular-nums" style={{ backgroundColor: colorPct(p), color: p != null && p >= 55 ? "#14181f" : "#cbd5e1" }}>{p == null ? "" : p}</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Últimos 6 meses</h2>
+              <span className="flex gap-3 text-xs"><span className="text-lime-400">■ Ingresos</span><span className="text-red-300">■ Gastos</span></span>
+            </div>
+            <div className="flex items-end gap-2 sm:gap-4 h-40">
+              {meses.map((m) => (
+                <div key={m} className="flex-1 min-w-0 flex flex-col items-center h-full">
+                  <div className="flex-1 w-full flex items-end justify-center gap-0.5 sm:gap-1">
+                    <div title={formatoPrecio(ingresoDe(m))} className="w-1/2 max-w-[1.5rem] rounded-t" style={{ height: `${(ingresoDe(m) / maximo) * 100}%`, backgroundColor: BRAND.lime, opacity: m === mes ? 1 : 0.6 }} />
+                    <div title={formatoPrecio(gastoDe(m))} className="w-1/2 max-w-[1.5rem] rounded-t" style={{ height: `${(gastoDe(m) / maximo) * 100}%`, backgroundColor: "#f87171", opacity: m === mes ? 1 : 0.6 }} />
+                  </div>
+                  <span className={`text-[11px] mt-1 ${m === mes ? "text-slate-100 font-semibold" : "text-teal-500"}`}>{corto(m)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead><tr className="text-teal-500 text-left"><th className="py-1 pr-2 font-normal"></th>{meses.map((m) => <th key={m} className="py-1 px-1 font-normal text-right">{corto(m)}</th>)}</tr></thead>
+                <tbody>
+                  {Object.entries(datos.ing).filter(([, x]) => meses.some((m) => x[m])).map(([k, x]) => (
+                    <tr key={k} className="border-t border-teal-900/60"><td className="py-1 pr-2 text-teal-200">{k}</td>{meses.map((m) => <td key={m} className="py-1 px-1 text-right tabular-nums">{x[m] ? formatoPrecio(x[m]) : "—"}</td>)}</tr>
+                  ))}
+                  <tr className="border-t border-teal-700"><td className="py-1 pr-2 text-red-300">Gastos</td>{meses.map((m) => <td key={m} className="py-1 px-1 text-right tabular-nums text-red-300">{gastoDe(m) ? formatoPrecio(gastoDe(m)) : "—"}</td>)}</tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {datos.productos.length > 0 && (
+            <section className="rounded-xl border border-teal-800 p-4 space-y-2" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+              <ul className="divide-y divide-teal-900/70">
+                {datos.productos.slice(0, 12).map((x, i) => (
+                  <li key={x.descripcion} className="py-1.5 flex items-center gap-3">
+                    <span className="w-5 text-teal-500 tabular-nums">{i + 1}</span>
+                    <span className="flex-1 min-w-0 truncate text-slate-100">{x.descripcion}</span>
+                    <span className="text-teal-400 tabular-nums shrink-0">{x.cantidad} u.</span>
+                    <span className="w-24 text-right tabular-nums shrink-0">{formatoPrecio(x.facturado)}</span>
+                    <span className={`w-24 text-right tabular-nums shrink-0 hidden sm:inline ${x.conCosto ? "text-lime-400" : "text-teal-600"}`}>{x.conCosto ? `+${formatoPrecio(x.ganancia)}` : "sin costo"}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Compras a proveedores (ver 20261026_compras_gastos_fijos.sql): solo el dueño ---------- */
+
+const COMPRA_ERRORES = {
+  no_autorizado: "Solo el dueño carga compras.",
+  proveedor_invalido: "Ese proveedor no es de este complejo.",
+  producto_invalido: "Un producto ya no existe: recargá la pantalla.",
+  compra_ya_pagada: "Esa compra ya estaba pagada.",
+  datos_invalidos: "Revisá cantidades y costos.",
+  elegir_talle: "Esa prenda tiene talles: cargá la cantidad de cada talle.",
+  talle_invalido: "Un talle ya no existe: recargá la pantalla.",
+};
+const compraErrorText = (e) => COMPRA_ERRORES[e?.code] || reservaErrorText(e);
+
+function ComprasPanel({ complejos, venues, accessToken }) {
+  const hoy = hoyArgentina();
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [mes, setMes] = useState(hoy.slice(0, 7));
+  const [datos, setDatos] = useState(null); // { compras, proveedores, productos, costos, deudas }
+  const [error, setError] = useState("");
+  const [nueva, setNueva] = useState(false);
+  const [pagando, setPagando] = useState(null); // { id, medio }
+  const [anulando, setAnulando] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [provForm, setProvForm] = useState(null); // { id?, nombre, telefono }
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+  const c = encodeURIComponent(complejoId);
+
+  const load = useCallback(async () => {
+    const desde = `${mes}-01`;
+    const hasta = sumarDias(`${sumarMeses(mes, 1)}-01`, -1);
+    try {
+      const [compras, proveedores, productos, costos, deudas] = await Promise.all([
+        supabaseTable(`compras?complejo_id=eq.${c}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,created_at.desc&select=*,compra_items(descripcion,cantidad,costo_unitario),proveedores(nombre)`, { accessToken }),
+        supabaseTable(`proveedores?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
+        supabaseTable(`productos?complejo_id=eq.${c}&order=rubro.asc.nullslast,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
+        supabaseTable(`producto_costos?complejo_id=eq.${c}&select=producto_id,costo`, { accessToken }),
+        // Lo que se le debe a cada proveedor (todas las compras sin pagar, de cualquier mes)
+        supabaseTable(`compras?complejo_id=eq.${c}&anulada=is.false&pagada_at=is.null&order=fecha.asc&select=id,fecha,total,proveedor_id,proveedores(nombre)`, { accessToken }),
+      ]);
+      setDatos({ compras, proveedores, productos, costos: Object.fromEntries(costos.map((x) => [x.producto_id, Number(x.costo)])), deudas });
+      setError("");
+    } catch { setError("No se pudieron cargar las compras. Revisá la conexión."); }
+  }, [c, mes, accessToken]);
+  useEffect(() => { setDatos(null); load(); }, [load]);
+
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); } catch (e) { setError(compraErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const pagar = () => run(async () => { await supabaseRpc("pagar_compra", { p_compra: pagando.id, p_medio: pagando.medio, p_fecha: hoy }, accessToken); setPagando(null); });
+  const anular = (id) => run(async () => { await supabaseRpc("anular_compra", { p_compra: id }, accessToken); setAnulando(null); });
+  const guardarProveedor = () => {
+    const telefono = provForm.telefono.trim() ? normalizeArPhone(provForm.telefono) : null;
+    if (!provForm.nombre.trim()) { setError("Poné el nombre del proveedor."); return; }
+    if (provForm.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    run(async () => {
+      const body = { nombre: provForm.nombre.trim(), telefono };
+      if (provForm.id) await supabaseTable(`proveedores?id=eq.${provForm.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("proveedores", { method: "POST", body: { ...body, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
+      setProvForm(null);
+    });
+  };
+
+  const validas = (datos?.compras || []).filter((x) => !x.anulada);
+  const totalMes = validas.reduce((s, x) => s + Number(x.total), 0);
+  const totalDeuda = (datos?.deudas || []).reduce((s, x) => s + Number(x.total), 0);
+  const deudaDe = (provId) => (datos?.deudas || []).filter((x) => x.proveedor_id === provId).reduce((s, x) => s + Number(x.total), 0);
+  const estado = (x) => x.anulada ? <span className="text-xs text-teal-500">Anulada</span>
+    : x.pagada_at ? <span className="text-xs px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagada · {medioCobroLabel(x.medio)}</span>
+    : <span className="text-xs px-2 py-0.5 rounded-full whitespace-nowrap" style={{ color: "#fbbf24", backgroundColor: "#f59e0b26" }}>A pagar</span>;
+  const acciones = (x) => !x.anulada && (
+    <span className="flex flex-wrap gap-x-3 gap-y-1 justify-end text-xs">
+      {!x.pagada_at && (pagando?.id === x.id ? (
+        <span className="flex flex-wrap items-center gap-1">
+          {MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" onClick={() => setPagando({ ...pagando, medio: m })} className={`px-2 py-1 rounded border ${pagando.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+          <button type="button" disabled={busy} onClick={pagar} className="px-2 py-1 rounded font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Pagar</button>
+          <button type="button" onClick={() => setPagando(null)} className="text-teal-400">✕</button>
+        </span>
+      ) : <button type="button" onClick={() => setPagando({ id: x.id, medio: "transferencia" })} className="text-lime-400 font-semibold">Marcar pagada</button>)}
+      {anulando === x.id ? (
+        <span className="text-red-300">¿Anular? Vuelve el stock. <button type="button" disabled={busy} onClick={() => anular(x.id)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setAnulando(null)} className="text-teal-400">No</button></span>
+      ) : <button type="button" onClick={() => setAnulando(x.id)} className="text-teal-500 hover:text-red-300">Anular</button>}
+    </span>
+  );
+  const renglones = (x) => x.compra_items.map((i) => `${i.cantidad} ${i.descripcion}`).join(", ");
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : nueva ? (
+        <NuevaCompra complejoId={complejoId} proveedores={datos.proveedores} productos={datos.productos} costos={datos.costos} accessToken={accessToken}
+          onCancel={() => setNueva(false)} onDone={() => { setNueva(false); load(); }} onProveedorNuevo={load} />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo={`Compras de ${etiquetaMes(mes).split(" ")[0].toLowerCase()}`} tono="cyan" valor={formatoPrecio(totalMes) || "$0"} detalle={`${validas.length} compra${validas.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="A pagar" tono={totalDeuda > 0 ? "ambar" : "lime"} valor={formatoPrecio(totalDeuda) || "$0"} detalle="A proveedores" />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Proveedores" tono="gris" valor={String(datos.proveedores.length)} /></div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" onClick={() => setNueva(true)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar compra</button>
+            <span className="flex items-center gap-2 ml-auto">
+              <button type="button" onClick={() => setMes(sumarMeses(mes, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes anterior">‹</button>
+              <span className="font-semibold text-teal-100 capitalize">{etiquetaMes(mes)}</span>
+              <button type="button" onClick={() => setMes(sumarMeses(mes, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Mes siguiente">›</button>
+            </span>
+          </div>
+
+          {datos.compras.length === 0 ? <p className="text-teal-400">No hay compras cargadas este mes.</p> : (
+            <>
+              <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                      <th className="px-3 py-2.5 font-semibold">Fecha</th>
+                      <th className="px-3 py-2.5 font-semibold">Proveedor</th>
+                      <th className="px-3 py-2.5 font-semibold">Qué se compró</th>
+                      <th className="px-3 py-2.5 font-semibold text-right">Total</th>
+                      <th className="px-3 py-2.5 font-semibold">Estado</th>
+                      <th className="px-3 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {datos.compras.map((x) => (
+                      <tr key={x.id} className={`border-t border-teal-900/70 align-top ${x.anulada ? "opacity-50" : ""}`}>
+                        <td className="px-3 py-2.5 text-teal-300 whitespace-nowrap">{x.fecha.slice(8, 10)}/{x.fecha.slice(5, 7)}</td>
+                        <td className="px-3 py-2.5 text-slate-100">{x.proveedores?.nombre || "—"}</td>
+                        <td className="px-3 py-2.5 text-teal-200">{renglones(x)}{x.nota && <span className="block text-xs text-teal-500 italic">{x.nota}</span>}</td>
+                        <td className="px-3 py-2.5 text-right font-semibold tabular-nums whitespace-nowrap">{formatoPrecio(x.total)}</td>
+                        <td className="px-3 py-2.5">{estado(x)}</td>
+                        <td className="px-3 py-2.5 text-right">{acciones(x)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="sm:hidden space-y-2">
+                {datos.compras.map((x) => (
+                  <li key={x.id} className={`rounded-xl border border-teal-800 px-4 py-3 space-y-1 ${x.anulada ? "opacity-50" : ""}`}>
+                    <div className="flex justify-between gap-2"><span className="text-slate-100">{x.proveedores?.nombre || "Sin proveedor"}</span><span className="font-semibold tabular-nums">{formatoPrecio(x.total)}</span></div>
+                    <p className="text-xs text-teal-400">{x.fecha.slice(8, 10)}/{x.fecha.slice(5, 7)} · {renglones(x)}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">{estado(x)}{acciones(x)}</div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Proveedores</h2>
+              {!provForm && <button type="button" onClick={() => setProvForm({ nombre: "", telefono: "" })} className="text-xs text-lime-400">+ Agregar</button>}
+            </div>
+            {provForm && (
+              <div className="flex flex-wrap gap-2">
+                <input value={provForm.nombre} onChange={(e) => setProvForm({ ...provForm, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre del proveedor" className="flex-1 min-w-[10rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={provForm.telefono} onChange={(e) => setProvForm({ ...provForm, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp del proveedor" className="w-44 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                <button type="button" disabled={busy} onClick={guardarProveedor} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setProvForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            )}
+            {datos.proveedores.length === 0 ? <p className="text-teal-400">Todavía no cargaste proveedores.</p> : (
+              <ul className="divide-y divide-teal-900/70">
+                {datos.proveedores.map((pv) => {
+                  const debe = deudaDe(pv.id);
+                  return (
+                    <li key={pv.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="flex-1 min-w-[8rem] text-slate-100">{pv.nombre}{pv.telefono && <span className="block text-xs text-teal-500">{formatArPhone(pv.telefono)}</span>}</span>
+                      {debe > 0 ? <span className="text-xs font-semibold text-amber-300">Le debés {formatoPrecio(debe)}</span> : <span className="text-xs text-teal-500">Al día</span>}
+                      {pv.telefono && <a href={waLink(pv.telefono, "")} target="_blank" rel="noreferrer" className="text-xs text-teal-300 underline">WhatsApp</a>}
+                      <button type="button" onClick={() => setProvForm({ id: pv.id, nombre: pv.nombre, telefono: pv.telefono ? formatArPhone(pv.telefono) : "" })} className="text-xs text-teal-300 underline">Editar</button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Cargar una compra: renglones de productos (cantidad y costo por unidad) o algo suelto, y cómo se pagó */
+function NuevaCompra({ complejoId, proveedores, productos, costos, accessToken, onCancel, onDone, onProveedorNuevo }) {
+  const [proveedorId, setProveedorId] = useState(proveedores[0]?.id || "");
+  const [provNuevo, setProvNuevo] = useState(null);
+  const [fecha, setFecha] = useState(hoyArgentina());
+  const [items, setItems] = useState([{ productoId: "", descripcion: "", cantidad: "", costo: "", cantTalles: {} }]);
+  // Con talles, la cantidad se carga por talle (un renglón puede traer S, M y L)
+  const tallesDeItem = (x) => tallesDe(productos.find((p) => p.id === x.productoId));
+  const cantidadDe = (x) => (tallesDeItem(x).length > 0 ? Object.values(x.cantTalles || {}).reduce((s, n) => s + (Number(n) || 0), 0) : Number(x.cantidad) || 0);
+  const [medio, setMedio] = useState("efectivo"); // "" = queda debiendo
+  const [actualizarCosto, setActualizarCosto] = useState(true);
+  const [nota, setNota] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const setItem = (i, cambio) => setItems((l) => l.map((x, j) => (j === i ? { ...x, ...cambio } : x)));
+  const elegirProducto = (i, id) => setItem(i, { productoId: id, cantTalles: {}, costo: id && costos[id] != null ? String(Math.round(costos[id])) : items[i].costo });
+  const total = items.reduce((s, x) => s + cantidadDe(x) * (leerPrecio(x.costo) || 0), 0);
+
+  const guardar = async () => {
+    const renglones = items.filter((x) => x.productoId || x.descripcion.trim() || x.cantidad || x.costo);
+    if (renglones.length === 0) { setError("Cargá al menos un renglón."); return; }
+    for (const x of renglones) {
+      if (!x.productoId && !x.descripcion.trim()) { setError("Elegí el producto o escribí qué es."); return; }
+      if (!(cantidadDe(x) > 0) || leerPrecio(x.costo) == null) { setError("Revisá cantidad y costo de cada renglón."); return; }
+    }
+    setBusy(true); setError("");
+    try {
+      let prov = proveedorId || null;
+      if (provNuevo !== null) {
+        if (!provNuevo.trim()) { setError("Poné el nombre del proveedor."); setBusy(false); return; }
+        const [p] = await supabaseTable("proveedores", { method: "POST", body: { complejo_id: complejoId, nombre: provNuevo.trim() }, accessToken, prefer: "return=representation" });
+        prov = p.id;
+        onProveedorNuevo();
+      }
+      await supabaseRpc("registrar_compra", {
+        p_complejo: complejoId, p_proveedor: prov, p_fecha: fecha || hoyArgentina(),
+        p_items: renglones.flatMap((x) => tallesDeItem(x).length > 0
+          ? Object.entries(x.cantTalles).filter(([, n]) => Number(n) > 0).map(([talle, n]) => ({ producto_id: x.productoId, talle, cantidad: Number(n), costo: leerPrecio(x.costo) }))
+          : x.productoId && x.productoId !== "__suelto"
+            ? [{ producto_id: x.productoId, cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }]
+            : [{ descripcion: x.descripcion.trim().slice(0, 60), cantidad: Number(x.cantidad), costo: leerPrecio(x.costo) }]),
+        p_medio: medio || null, p_nota: nota.trim() || null, p_actualizar_costo: actualizarCosto,
+      }, accessToken);
+      onDone();
+    } catch (e) { setError(compraErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
+
+  return (
+    <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <h2 className="text-sm uppercase tracking-wide text-teal-400">Nueva compra</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-teal-400">Proveedor
+          {provNuevo === null ? (
+            <select value={proveedorId} onChange={(e) => (e.target.value === "__nuevo" ? setProvNuevo("") : setProveedorId(e.target.value))} className={`block w-full mt-1 ${campo}`} style={adminInput}>
+              <option value="">Sin proveedor</option>
+              {proveedores.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+              <option value="__nuevo">+ Proveedor nuevo…</option>
+            </select>
+          ) : (
+            <span className="flex gap-2 mt-1">
+              <input value={provNuevo} onChange={(e) => setProvNuevo(e.target.value)} maxLength={80} placeholder="Nombre del proveedor" className={`flex-1 ${campo}`} style={adminInput} autoFocus />
+              <button type="button" onClick={() => setProvNuevo(null)} className="text-teal-400 text-sm">Elegir</button>
+            </span>
+          )}
+        </label>
+        <label className="text-xs text-teal-400">Fecha
+          <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} className={`block w-full mt-1 ${campo}`} style={adminInput} />
+        </label>
+      </div>
+
+      <div className="space-y-2">
+        {items.map((x, i) => (
+          <div key={i} className="rounded-lg border border-teal-900 p-2 grid gap-2 grid-cols-2 sm:grid-cols-[minmax(0,1fr)_6rem_8rem_auto] items-center">
+            {x.productoId !== "__suelto" ? (
+              <select value={x.productoId} onChange={(e) => (e.target.value === "__suelto" ? setItem(i, { productoId: "__suelto" }) : elegirProducto(i, e.target.value))} aria-label="Producto" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput}>
+                <option value="">Elegí el producto…</option>
+                {productos.map((p) => <option key={p.id} value={p.id}>{p.rubro ? `${p.rubro} · ` : ""}{p.nombre}{tallesDe(p).length > 0 ? ` (talles ${tallesDe(p).map((t) => t.talle).join("·")})` : p.stock != null ? ` (hay ${p.stock})` : ""}</option>)}
+                <option value="__suelto">Otra cosa (no es un producto)…</option>
+              </select>
+            ) : (
+              <input value={x.descripcion} onChange={(e) => setItem(i, { descripcion: e.target.value })} maxLength={60} placeholder="Qué es (ej: bolsas, limpieza)" aria-label="Descripción" className={`col-span-2 sm:col-span-1 ${campo}`} style={adminInput} autoFocus />
+            )}
+            {tallesDeItem(x).length > 0
+              ? <span className="text-xs text-slate-400 self-center">{cantidadDe(x)} en total</span>
+              : <input inputMode="numeric" value={x.cantidad} onChange={(e) => setItem(i, { cantidad: e.target.value.replace(/\D/g, "") })} placeholder="Cant." aria-label="Cantidad" className={campo} style={adminInput} />}
+            <input inputMode="numeric" value={x.costo} onChange={(e) => setItem(i, { costo: e.target.value })} placeholder="$ c/u" aria-label="Costo por unidad" className={campo} style={adminInput} />
+            {items.length > 1 && <button type="button" onClick={() => setItems((l) => l.filter((_, j) => j !== i))} className="text-teal-500 hover:text-red-300 justify-self-end px-2" aria-label="Quitar renglón">✕</button>}
+            {tallesDeItem(x).length > 0 && (
+              <div className="col-span-full flex flex-wrap gap-2">
+                {tallesDeItem(x).map((t) => (
+                  <label key={t.talle} className="text-xs text-slate-400 flex items-center gap-1">{t.talle}
+                    <input inputMode="numeric" value={x.cantTalles?.[t.talle] || ""} onChange={(e) => setItem(i, { cantTalles: { ...x.cantTalles, [t.talle]: e.target.value.replace(/\D/g, "") } })} placeholder="0" aria-label={`Cantidad del talle ${t.talle}`} className="w-16 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        <button type="button" onClick={() => setItems((l) => [...l, { productoId: "", descripcion: "", cantidad: "", costo: "", cantTalles: {} }])} className="text-teal-300 hover:text-lime-400">+ Otro renglón</button>
+        {items.some((x) => x.productoId && x.productoId !== "__suelto") && (
+          <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={actualizarCosto} onChange={(e) => setActualizarCosto(e.target.checked)} /> Actualizar el costo de los productos con este precio</label>
+        )}
+      </div>
+
+      <div className="flex justify-between items-baseline border-t border-teal-800 pt-3">
+        <span className="text-teal-200">Total</span>
+        <span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(total) || "$0"}</span>
+      </div>
+      <div className="space-y-1">
+        <p className="text-xs text-teal-400">Cómo se pagó</p>
+        <div className="flex flex-wrap gap-1.5">
+          {[...MEDIOS_VENTA, ["", "Queda debiendo"]].map(([m, l]) => (
+            <button key={m || "debe"} type="button" onClick={() => setMedio(m)} className={`px-3 py-1.5 rounded-lg border text-xs ${medio === m ? (m ? "border-lime-400 text-lime-400" : "border-amber-400 text-amber-300") : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+      <input value={nota} onChange={(e) => setNota(e.target.value)} maxLength={200} placeholder="Nota (opcional, ej: número de factura)" aria-label="Nota" className={`w-full ${campo}`} style={adminInput} />
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar compra"}</button>
+        <button type="button" onClick={onCancel} className="text-teal-400">Cancelar</button>
+      </div>
+    </section>
+  );
+}
+
+/* Gastos fijos del mes en la Caja: se cargan una vez y cada mes se marcan pagados */
+function GastosFijos({ organizer, mes, onChanged }) {
+  const accessToken = organizer.accessToken;
+  const [lista, setLista] = useState(null);
+  const [pagados, setPagados] = useState(new Set()); // gastos fijos ya pagados ese mes
+  const [form, setForm] = useState(null); // { id?, concepto, monto, dia, medio }
+  const [administrar, setAdministrar] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const [gs, pagos] = await Promise.all([
+        supabaseTable(`gastos_fijos?organizador_id=eq.${organizer.id}&order=dia.asc,concepto.asc`, { accessToken }),
+        supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&periodo=eq.${mes}&gasto_fijo_id=not.is.null&select=gasto_fijo_id`, { accessToken }),
+      ]);
+      setLista(gs); setPagados(new Set(pagos.map((x) => x.gasto_fijo_id))); setError("");
+    } catch { setLista([]); }
+  }, [organizer.id, accessToken, mes]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await load(); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Ese gasto ya está pagado este mes." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const pagar = (g) => run(() => supabaseTable("caja_movimientos", {
+    method: "POST", accessToken, prefer: "return=minimal",
+    body: { organizador_id: organizer.id, fecha: `${mes}-${String(g.dia).padStart(2, "0")}` > hoyArgentina() ? hoyArgentina() : `${mes}-${String(g.dia).padStart(2, "0")}`, tipo: "gasto", concepto: g.concepto, monto: Number(g.monto), medio: g.medio, gasto_fijo_id: g.id, periodo: mes },
+  }));
+  const guardar = () => {
+    const monto = leerPrecio(form.monto);
+    const dia = Math.min(28, Math.max(1, Number(form.dia) || 1));
+    if (!form.concepto.trim() || !monto) { setError("Poné el concepto y el monto."); return; }
+    run(async () => {
+      const body = { concepto: form.concepto.trim(), monto, dia, medio: form.medio };
+      if (form.id) await supabaseTable(`gastos_fijos?id=eq.${form.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      else await supabaseTable("gastos_fijos", { method: "POST", body: { ...body, organizador_id: organizer.id }, accessToken, prefer: "return=minimal" });
+      setForm(null);
+    });
+  };
+  const alternar = (g) => run(() => supabaseTable(`gastos_fijos?id=eq.${g.id}`, { method: "PATCH", body: { activo: !g.activo }, accessToken, prefer: "return=minimal" }));
+
+  if (lista === null) return null;
+  const activos = lista.filter((g) => g.activo);
+  const pendientes = activos.filter((g) => !pagados.has(g.id));
+  const mesLabel = etiquetaMes(mes).split(" ")[0].toLowerCase();
+
+  return (
+    <section className="rounded-xl border p-4 space-y-3" style={{ borderColor: pendientes.length ? "#f59e0b66" : "#134e4a", backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">Gastos fijos de {mesLabel}</h2>
+        <button type="button" onClick={() => { setAdministrar(!administrar); setForm(null); }} className="text-xs text-teal-300 underline">{administrar ? "Listo" : lista.length ? "Administrar" : "+ Cargar gastos fijos"}</button>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {!administrar ? (
+        activos.length === 0 ? <p className="text-teal-400">Cargá la luz, el alquiler o los sueldos una vez y acá te aparecen todos los meses para marcarlos pagados.</p> : (
+          <ul className="divide-y divide-teal-900/70">
+            {activos.map((g) => (
+              <li key={g.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="flex-1 min-w-[8rem] text-slate-100">{g.concepto}<span className="block text-xs text-teal-500">vence el {g.dia} · {medioCobroLabel(g.medio)}</span></span>
+                <span className="tabular-nums font-semibold">{formatoPrecio(g.monto)}</span>
+                {pagados.has(g.id)
+                  ? <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagado ✓</span>
+                  : <button type="button" disabled={busy} onClick={() => pagar(g)} className="px-3 py-1 rounded-lg text-xs font-semibold border border-amber-400 text-amber-300">Marcar pagado</button>}
+              </li>
+            ))}
+          </ul>
+        )
+      ) : (
+        <div className="space-y-2">
+          {lista.map((g) => (
+            <div key={g.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${g.activo ? "" : "opacity-60"}`}>
+              <span className="flex-1 min-w-[8rem] text-slate-100">{g.concepto} · {formatoPrecio(g.monto)} · día {g.dia}</span>
+              <button type="button" onClick={() => setForm({ id: g.id, concepto: g.concepto, monto: String(Math.round(g.monto)), dia: String(g.dia), medio: g.medio })} className="text-xs text-teal-300 underline">Editar</button>
+              <button type="button" disabled={busy} onClick={() => alternar(g)} className="text-xs text-teal-400 underline">{g.activo ? "Pausar" : "Reactivar"}</button>
+            </div>
+          ))}
+          {form ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
+                <input value={form.concepto} onChange={(e) => setForm({ ...form, concepto: e.target.value })} maxLength={80} placeholder="Ej: Luz, alquiler" aria-label="Concepto" className="col-span-2 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="px-3 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+                <input inputMode="numeric" value={form.dia} onChange={(e) => setForm({ ...form, dia: e.target.value.replace(/\D/g, "") })} placeholder="Día (1 a 28)" aria-label="Día del mes" className="px-3 py-2 rounded-lg border text-base min-w-0" style={adminInput} />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {MEDIOS_COBRO.map(([m, l]) => <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-xs ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>)}
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : <button type="button" onClick={() => setForm({ concepto: "", monto: "", dia: "10", medio: "transferencia" })} className="text-lime-400 text-sm">+ Agregar gasto fijo</button>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ---------- Caja del día: abrir y cerrar la caja de cada persona (ver 20261025_cierre_caja.sql) ---------- */
+
+const ORIGEN_TURNO_CAJA = { mostrador: "Mostrador", cuentas: "Cuentas", inscripciones: "Inscripciones", turnos: "Turnos", clases: "Clases" };
+const MOV_CAJA = { retiro: "Retiro de efectivo", gasto: "Gasto pagado con la caja", ingreso: "Otro ingreso en efectivo" };
+const CAJA_ERRORES = {
+  caja_ya_abierta: "Ya tenés una caja abierta.",
+  caja_cerrada: "Esa caja ya está cerrada.",
+  no_autorizado: "No tenés permiso para manejar esta caja.",
+  datos_invalidos: "Revisá los montos.",
+};
+const cajaErrorText = (e) => CAJA_ERRORES[e?.code] || reservaErrorText(e);
+/* id de quien está logueado (el "sub" del token); el empleado entra con su propia cuenta */
+function uidDeToken(token) {
+  try { return JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub || null; } catch { return null; }
+}
+const horaAr = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+const fechaHoraAr = (iso) => `${fechaArgentina(iso).slice(8, 10)}/${fechaArgentina(iso).slice(5, 7)} ${horaAr(iso)}`;
+
+function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [cajas, setCajas] = useState(null); // las del complejo que ve (las suyas; el dueño, todas)
+  const [error, setError] = useState("");
+  const [fondo, setFondo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [viendo, setViendo] = useState(null); // id de una caja de otro (solo el dueño)
+  const yo = uidDeToken(accessToken);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  const load = useCallback(async () => {
+    try {
+      setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&or=(cerrada_at.is.null,abierta_at.gte.${encodeURIComponent(new Date(Date.now() - 60 * 86400000).toISOString())})&order=abierta_at.desc&limit=200`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setCajas(null); setViendo(null); load(); }, [load]);
+
+  const mia = (cajas || []).find((c) => c.usuario === yo && !c.cerrada_at);
+  const abiertasDeOtros = esDueno ? (cajas || []).filter((c) => c.usuario !== yo && !c.cerrada_at) : [];
+  const cerradas = (cajas || []).filter((c) => c.cerrada_at);
+  const abrir = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: leerPrecio(fondo) || 0 }, accessToken);
+      setFondo("");
+      await load();
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-5 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {cajas === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          {mia ? (
+            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia onChanged={load} />
+          ) : (
+            <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Tu caja está cerrada</h2>
+              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.</p>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="text-xs text-teal-400">Efectivo con el que arrancás (fondo)
+                  <input inputMode="numeric" value={fondo} onChange={(e) => setFondo(e.target.value)} placeholder="$0" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                </label>
+                <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
+              </div>
+            </section>
+          )}
+
+          {abiertasDeOtros.length > 0 && (
+            <section className="space-y-2">
+              <h2 className="text-sm uppercase tracking-wide text-teal-400">Cajas abiertas de tus empleados</h2>
+              {abiertasDeOtros.map((c) => viendo === c.id ? (
+                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
+              ) : (
+                <button key={c.id} type="button" onClick={() => setViendo(c.id)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-teal-800 px-4 py-3 text-left hover:bg-white/5">
+                  <span className="min-w-0"><span className="block truncate text-slate-100">{c.usuario_email}</span><span className="block text-xs text-teal-500">Abierta desde {fechaHoraAr(c.abierta_at)} · fondo {formatoPrecio(c.fondo) || "$0"}</span></span>
+                  <span className="text-xs text-teal-300 shrink-0">Ver →</span>
+                </button>
+              ))}
+            </section>
+          )}
+
+          {/* Las ventas del mostrador, una por una (el dueño puede anular) */}
+          {conVentas.includes(complejoId) && <VentasDelDia complejoId={complejoId} accessToken={accessToken} esDueno={esDueno} version={0} onChanged={load} />}
+
+          <section className="space-y-2">
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">{esDueno ? "Cierres" : "Tus cierres"}</h2>
+            {cerradas.length === 0 ? <p className="text-teal-400">Todavía no hay cajas cerradas.</p> : (
+              <>
+                {/* PC: tabla; celular: tarjetas */}
+                <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wider text-slate-200" style={{ background: "linear-gradient(90deg, #9fe02240, #22d3ee33)" }}>
+                        <th className="px-3 py-2.5 font-semibold">Cierre</th>
+                        {esDueno && <th className="px-3 py-2.5 font-semibold">Quién</th>}
+                        <th className="px-3 py-2.5 font-semibold text-right">Debía haber</th>
+                        <th className="px-3 py-2.5 font-semibold text-right">Contó</th>
+                        <th className="px-3 py-2.5 font-semibold text-right">Diferencia</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cerradas.map((c) => {
+                        const dif = Number(c.contado) - Number(c.esperado);
+                        return (
+                          <tr key={c.id} className="border-t border-teal-900/70 align-top">
+                            <td className="px-3 py-2.5 text-teal-200">{fechaHoraAr(c.cerrada_at)}<span className="block text-xs text-teal-500">desde {fechaHoraAr(c.abierta_at)}</span>{c.nota && <span className="block text-xs text-teal-400 italic">“{c.nota}”</span>}</td>
+                            {esDueno && <td className="px-3 py-2.5 text-teal-200 break-all">{c.usuario_email}</td>}
+                            <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.esperado) || "$0"}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.contado) || "$0"}</td>
+                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} /></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <ul className="sm:hidden space-y-2">
+                  {cerradas.map((c) => {
+                    const dif = Number(c.contado) - Number(c.esperado);
+                    return (
+                      <li key={c.id} className="rounded-xl border border-teal-800 px-4 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-teal-200">{fechaHoraAr(c.cerrada_at)}</span>
+                          <DiferenciaCaja dif={dif} />
+                        </div>
+                        {esDueno && <p className="text-xs text-teal-400 break-all">{c.usuario_email}</p>}
+                        <p className="text-xs text-teal-500">Debía haber {formatoPrecio(c.esperado) || "$0"} · contó {formatoPrecio(c.contado) || "$0"}</p>
+                        {c.nota && <p className="text-xs text-teal-400 italic">“{c.nota}”</p>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DiferenciaCaja({ dif }) {
+  const [texto, color, fondo] = dif === 0 ? ["Justo", BRAND.lime, "#9fe02222"] : dif > 0 ? [`Sobra ${formatoPrecio(dif)}`, "#22d3ee", "#22d3ee22"] : [`Falta ${formatoPrecio(-dif)}`, "#f87171", "#f8717122"];
+  return <span className="inline-block px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap" style={{ color, backgroundColor: fondo }}>{texto}</span>;
+}
+
+/* Una caja abierta: lo cobrado hasta ahora, movimientos y cierre */
+function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerrarVista }) {
+  const [resumen, setResumen] = useState(null);
+  const [movs, setMovs] = useState([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [mov, setMov] = useState(null); // { tipo, concepto, monto }
+  const [cierre, setCierre] = useState(null); // { contado, nota }
+  const [resultado, setResultado] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [r, m] = await Promise.all([
+        supabaseRpc("resumen_caja", { p_turno: caja.id }, accessToken),
+        supabaseTable(`caja_movimientos_turno?turno_id=eq.${caja.id}&order=created_at.asc`, { accessToken }),
+      ]);
+      setResumen(r); setMovs(m); setError("");
+    } catch (e) { setError(cajaErrorText(e)); }
+  }, [caja.id, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const mover = async () => {
+    const monto = leerPrecio(mov.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    if (!mov.concepto.trim()) { setError("Poné el concepto."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("mover_caja", { p_turno: caja.id, p_tipo: mov.tipo, p_monto: monto, p_concepto: mov.concepto.trim() }, accessToken);
+      setMov(null);
+      await load();
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const cerrar = async () => {
+    const contado = leerPrecio(cierre.contado);
+    if (contado == null) { setError("Poné cuánto efectivo contaste."); return; }
+    setBusy(true); setError("");
+    try {
+      setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+    } catch (e) { setError(cajaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  if (resultado) {
+    const dif = Number(resultado.diferencia);
+    return (
+      <section className="rounded-xl border p-4 space-y-3" style={{ borderColor: `${BRAND.lime}66`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <h2 className="text-sm uppercase tracking-wide" style={{ color: BRAND.lime }}>Caja cerrada ✓</h2>
+        <p className="text-teal-200">Debía haber {formatoPrecio(resultado.efectivo_esperado) || "$0"} en efectivo y se contaron {formatoPrecio(resultado.contado) || "$0"}.</p>
+        <DiferenciaCaja dif={dif} />
+        <div><button type="button" onClick={onChanged} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Listo</button></div>
+      </section>
+    );
+  }
+
+  const esperado = Number(resumen?.efectivo_esperado || 0);
+  const totalCobrado = Object.values(resumen?.por_medio || {}).reduce((s, n) => s + Number(n), 0);
+  const contadoNum = cierre ? leerPrecio(cierre.contado) : null;
+
+  return (
+    <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">{propia ? "Tu caja" : <span className="break-all normal-case">{caja.usuario_email}</span>}</h2>
+          <p className="text-xs text-teal-500">Abierta desde {fechaHoraAr(caja.abierta_at)} · fondo {formatoPrecio(caja.fondo) || "$0"}</p>
+        </div>
+        <div className="flex gap-3">
+          <button type="button" onClick={load} className="text-xs text-teal-300 hover:text-lime-400">Actualizar</button>
+          {onCerrarVista && <button type="button" onClick={onCerrarVista} className="text-xs text-teal-400">Ocultar</button>}
+        </div>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {!resumen ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <>
+          <div className="grid gap-3 grid-cols-2">
+            <TarjetaResumen titulo="Efectivo en caja" tono="lime" valor={formatoPrecio(esperado) || "$0"} detalle="Lo que debería haber" />
+            <TarjetaResumen titulo="Cobrado" tono="cyan" valor={formatoPrecio(totalCobrado) || "$0"} detalle="Todos los medios" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ul className="rounded-lg border border-teal-900 divide-y divide-teal-900/70">
+              <li className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-teal-500">Por medio</li>
+              {MEDIOS_VENTA.filter(([m]) => Number(resumen.por_medio?.[m]) > 0).map(([m, l]) => (
+                <li key={m} className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">{l}</span><span className="tabular-nums">{formatoPrecio(resumen.por_medio[m])}</span></li>
+              ))}
+              {totalCobrado === 0 && <li className="px-3 py-1.5 text-teal-400">Todavía no cobraste nada.</li>}
+            </ul>
+            <ul className="rounded-lg border border-teal-900 divide-y divide-teal-900/70">
+              <li className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-teal-500">Efectivo</li>
+              <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Fondo</span><span className="tabular-nums">{formatoPrecio(resumen.fondo) || "$0"}</span></li>
+              <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Cobrado en efectivo</span><span className="tabular-nums">+{formatoPrecio(resumen.efectivo_cobrado) || "$0"}</span></li>
+              {Number(resumen.ingresos) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Otros ingresos</span><span className="tabular-nums">+{formatoPrecio(resumen.ingresos)}</span></li>}
+              {Number(resumen.retiros) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Retiros</span><span className="tabular-nums text-red-300">−{formatoPrecio(resumen.retiros)}</span></li>}
+              {Number(resumen.gastos) > 0 && <li className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">Gastos</span><span className="tabular-nums text-red-300">−{formatoPrecio(resumen.gastos)}</span></li>}
+            </ul>
+          </div>
+          {Object.keys(resumen.por_origen || {}).length > 0 && (
+            <p className="text-xs text-teal-400">{Object.entries(resumen.por_origen).map(([o, n]) => `${ORIGEN_TURNO_CAJA[o] || o} ${formatoPrecio(n)}`).join(" · ")}</p>
+          )}
+
+          {movs.length > 0 && (
+            <ul className="text-xs space-y-1">
+              {movs.map((m) => (
+                <li key={m.id} className="flex justify-between gap-2"><span className="text-teal-300">{horaAr(m.created_at)} · {MOV_CAJA[m.tipo]}: {m.concepto}</span><span className={`tabular-nums shrink-0 ${m.tipo === "ingreso" ? "text-lime-400" : "text-red-300"}`}>{m.tipo === "ingreso" ? "+" : "−"}{formatoPrecio(m.monto)}</span></li>
+              ))}
+            </ul>
+          )}
+
+          {mov ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{MOV_CAJA[mov.tipo]}</p>
+              <div className="flex flex-wrap gap-2">
+                <input value={mov.concepto} onChange={(e) => setMov({ ...mov, concepto: e.target.value })} maxLength={80} placeholder={mov.tipo === "retiro" ? "Ej: se lo llevó el dueño" : mov.tipo === "gasto" ? "Ej: hielo, limpieza" : "Ej: cambio que trajo el dueño"} aria-label="Concepto" className="flex-1 min-w-[10rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input inputMode="numeric" value={mov.monto} onChange={(e) => setMov({ ...mov, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={mover} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setMov(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : !cierre && (
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setMov({ tipo: "retiro", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-teal-700 text-teal-200">− Retiro</button>
+              <button type="button" onClick={() => setMov({ tipo: "gasto", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-red-400/60 text-red-300">− Gasto</button>
+              <button type="button" onClick={() => setMov({ tipo: "ingreso", concepto: "", monto: "" })} className="px-3 py-2 rounded-lg border border-lime-400/60 text-lime-400">+ Ingreso</button>
+            </div>
+          )}
+
+          {cierre ? (
+            <div className="rounded-lg border p-3 space-y-3" style={{ borderColor: "#f59e0b88" }}>
+              <p className="font-semibold text-amber-300">Cerrar la caja</p>
+              <label className="block text-xs text-teal-400">Contá el efectivo que hay en la caja
+                <input inputMode="numeric" value={cierre.contado} onChange={(e) => setCierre({ ...cierre, contado: e.target.value })} placeholder="$" className="block mt-1 w-48 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+              </label>
+              {contadoNum != null && (
+                <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              )}
+              <input value={cierre.nota} onChange={(e) => setCierre({ ...cierre, nota: e.target.value })} maxLength={200} placeholder="Nota (opcional, ej: por qué falta)" aria-label="Nota" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy || contadoNum == null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
+                <button type="button" onClick={() => setCierre(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : !mov && (
+            <button type="button" onClick={() => { load(); setCierre({ contado: "", nota: "" }); }} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/* ---------- Mostrador: venta al contado de la cantina (ver 20261024_mostrador.sql) ---------- */
+
+const MEDIOS_VENTA = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"], ["debito", "Débito"], ["credito", "Crédito"]];
+const VENTA_ERRORES = {
+  falta_pagar: "Falta cobrar una parte: elegí a qué cuenta va el saldo.",
+  pago_de_mas: "Los pagos suman más que el total.",
+  ajuste_invalido: "El descuento no puede ser mayor que el total.",
+  cuenta_invalida: "Esa cuenta no es de este complejo.",
+  producto_invalido: "Un producto ya no existe: recargá la pantalla.",
+  no_autorizado: "No tenés permiso para vender en este complejo.",
+  elegir_talle: "Elegí el talle de la prenda.",
+  talle_invalido: "Ese talle ya no existe: recargá la pantalla.",
+  turno_invalido: "Ese turno ya no está confirmado: elegí otro.",
+};
+const ventaErrorText = (e) => VENTA_ERRORES[e?.code] || reservaErrorText(e);
+
+/* Ícono y color de cada categoría del mostrador (las que no están en la lista llevan una caja) */
+const RUBRO_ICONOS = {
+  bebidas: ["M10 2h4M10 2v4l-2 3v11a2 2 0 002 2h4a2 2 0 002-2V9l-2-3V2M8 13h8", "#38bdf8"],
+  comida: ["M4 11a8 8 0 0116 0zM3 15h18M5 15v2a2 2 0 002 2h10a2 2 0 002-2v-2", "#fb923c"],
+  indumentaria: ["M8 3L3 6l2 4 3-1v12h8V9l3 1 2-4-5-3a4 4 0 01-8 0z", "#c084fc"],
+  paletas: ["M10 2a7 7 0 017 7c0 3.5-2.5 6-5.5 6.8L10 17l-5 5-2-2 5-5 1.2-1.5C6.5 12.5 3 12 3 9a7 7 0 017-7zM10 6h.01M13 9h.01M8 10h.01", "#f472b6"],
+  pelotas: ["M12 21a9 9 0 100-18 9 9 0 000 18zM5.5 5.5c3 3 3 10 0 13M18.5 5.5c-3 3-3 10 0 13", "#facc15"],
+  accesorios: ["M3 12V4h8l10 10-8 8zM7.5 8.5h.01", "#2dd4bf"],
+};
+function RubroIcono({ rubro, icono, className = "w-6 h-6" }) {
+  const [d, color] = RUBRO_ICONOS[icono] || RUBRO_ICONOS[String(rubro || "").trim().toLowerCase()] || ["M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5", "#94a3b8"];
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>
+  );
+}
+
+/* "Cargar a" del ticket: a qué turno de hoy (Cancha) o a qué persona (Cliente) va el consumo.
+   destino: { tipo: "cancha", turno } | { tipo: "cliente", cuentaId?, nombre, telefono? } | null */
+function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
+  const [turnos, setTurnos] = useState(null);
+  const [cuentas, setCuentas] = useState(null);
+  const [agenda, setAgenda] = useState([]); // personas de la agenda (si se puede ver)
+  const [buscar, setBuscar] = useState("");
+  const [error, setError] = useState("");
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  useEffect(() => {
+    setError("");
+    if (tipo === "cancha") {
+      setTurnos(null);
+      supabaseRpc("turnos_para_cargar", { p_complejo: complejoId }, accessToken).then((r) => setTurnos(r || [])).catch(() => { setTurnos([]); setError("No se pudieron cargar los turnos de hoy."); });
+    } else {
+      setCuentas(null);
+      supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).then((r) => setCuentas(r || [])).catch(() => { setCuentas([]); setError("No se pudieron cargar las cuentas."); });
+      // Los clientes de la agenda (últimos 6 meses); si no tiene acceso a la agenda, solo las cuentas
+      supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&tipo=eq.turno&fecha=gte.${sumarDias(hoyArgentina(), -180)}&select=nombre,telefono&order=fecha.desc&limit=500`, { accessToken })
+        .then((rows) => setAgenda(rows || [])).catch(() => setAgenda([]));
+    }
+  }, [tipo, complejoId, accessToken]);
+
+  if (tipo === "cancha") {
+    if (error) return <p className="text-red-400">{error}</p>;
+    if (turnos === null) return <p className="text-slate-400">Cargando turnos de hoy…</p>;
+    if (turnos.length === 0) return <p className="text-slate-400">No hay turnos confirmados hoy.</p>;
+    return (
+      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1" style={{ colorScheme: "dark" }} role="radiogroup" aria-label="Turno">
+        {turnos.map((t) => {
+          const elegido = destino?.turno?.id === t.id;
+          return (
+            <button key={t.id} type="button" role="radio" aria-checked={elegido} onClick={() => onElegir({ tipo: "cancha", turno: t })}
+              className="w-full text-left px-3 py-2 rounded-lg border transition" style={elegido ? { borderColor: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44" }}>
+              <span className="block text-slate-100"><span className="font-semibold">{t.cancha} · {hora(t.inicio)}</span> · {t.nombre}</span>
+              <span className="block text-xs text-slate-400">{t.cobrado ? "Cancha pagada" : "Cancha sin cobrar"}{Number(t.pendiente) > 0 && <span className="text-amber-300"> · {formatoPrecio(t.pendiente)} de consumos sin cobrar</span>}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Cliente: cuentas y personas de la agenda, sin repetir (por WhatsApp o por nombre)
+  if (destino?.tipo === "cliente") {
+    return (
+      <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border" style={{ borderColor: BRAND.lime, backgroundColor: `${BRAND.lime}14` }}>
+        <span className="min-w-0">
+          <span className="block font-semibold text-slate-100 truncate">{destino.nombre}</span>
+          <span className="block text-xs text-slate-400">{destino.cuentaId ? `Cuenta${Number(destino.debe) > 0 ? ` · ya debe ${formatoPrecio(destino.debe)}` : " al día"}` : "Se le crea la cuenta"}</span>
+        </span>
+        <button type="button" onClick={() => onElegir(null)} className="text-xs text-slate-400 underline shrink-0">Cambiar</button>
+      </div>
+    );
+  }
+  const texto = claveNombre(buscar);
+  const opciones = [];
+  const vistos = new Set();
+  for (const c of cuentas || []) {
+    opciones.push({ cuentaId: c.id, nombre: c.nombre, telefono: c.telefono, debe: Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0) });
+    vistos.add(c.telefono ? `t${c.telefono}` : `n${claveNombre(c.nombre)}`);
+    vistos.add(`n${claveNombre(c.nombre)}`);
+  }
+  for (const r of agenda) {
+    if (!r.nombre) continue;
+    const k = r.telefono ? `t${r.telefono}` : `n${claveNombre(r.nombre)}`;
+    if (vistos.has(k) || vistos.has(`n${claveNombre(r.nombre)}`)) continue;
+    vistos.add(k); vistos.add(`n${claveNombre(r.nombre)}`);
+    opciones.push({ cuentaId: null, nombre: r.nombre, telefono: r.telefono || null, debe: 0 });
+  }
+  const coinciden = texto ? opciones.filter((o) => claveNombre(o.nombre).includes(texto) || (o.telefono || "").includes(buscar.replace(/\D/g, "") || "~")) : [];
+  const exacta = coinciden.some((o) => claveNombre(o.nombre) === texto);
+  return (
+    <div className="space-y-2">
+      <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar cliente por nombre o WhatsApp" aria-label="Buscar cliente" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+      {error && <p className="text-red-400">{error}</p>}
+      {cuentas === null ? <p className="text-slate-400">Cargando clientes…</p> : texto && (
+        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1" style={{ colorScheme: "dark" }}>
+          {coinciden.slice(0, 8).map((o) => (
+            <button key={o.cuentaId || `${o.nombre}|${o.telefono}`} type="button" onClick={() => onElegir({ tipo: "cliente", ...o })} className="w-full text-left px-3 py-2 rounded-lg border hover:bg-white/5" style={{ borderColor: "#1f3a44" }}>
+              <span className="block text-slate-100">{o.nombre}</span>
+              <span className="block text-xs text-slate-400">{o.telefono ? `WhatsApp …${o.telefono.slice(-4)} · ` : ""}{o.cuentaId ? (o.debe > 0 ? `debe ${formatoPrecio(o.debe)}` : "cuenta al día") : "de la agenda, sin cuenta"}</span>
+            </button>
+          ))}
+          {!exacta && buscar.trim().length >= 2 && (
+            <button type="button" onClick={() => onElegir({ tipo: "cliente", cuentaId: null, nombre: buscar.trim().slice(0, 80), telefono: null, debe: 0 })} className="w-full text-left px-3 py-2 rounded-lg border border-dashed text-cyan-300" style={{ borderColor: "#1f3a44" }}>
+              + Cuenta nueva: {buscar.trim()}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const MEDIOS_MOSTRADOR = [["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"]];
+const MAS_VENDIDOS = "__mas_vendidos";
+
+/* Mostrador: productos a la izquierda (buscador, categorías y tarjetas) y el ticket a la derecha.
+   "Cargar a": Mostrador (se cobra en el momento con un medio de pago; descuento, pago dividido,
+   crédito o seña van por "Descuento / dividir pago"), Cancha (queda en el turno de hoy y se cobra
+   desde la agenda; ver 20261029_cargar_a_turno.sql) o Cliente (queda en su cuenta).
+   Las ventas del día se ven en Caja del día. */
+function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const [productos, setProductos] = useState(null);
+  const [vendidos30, setVendidos30] = useState([]); // renglones vendidos en los últimos 30 días
+  const [hoy, setHoy] = useState(null); // { ventas, total }
+  const [error, setError] = useState("");
+  const [rubro, setRubro] = useState(MAS_VENDIDOS);
+  const [buscar, setBuscar] = useState("");
+  const [carrito, setCarrito] = useState({}); // productoId -> cantidad
+  const [sueltos, setSueltos] = useState([]); // [{ descripcion, precio, cantidad }]
+  const [suelto, setSuelto] = useState(null); // formulario de "algo que no está en la lista"
+  const [medio, setMedio] = useState("efectivo");
+  const [pagaCon, setPagaCon] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [dividiendo, setDividiendo] = useState(false);
+  const [aviso, setAviso] = useState(null); // { texto, tono: "ok" | "alerta" }
+  const [vacio, setVacio] = useState(false); // tocó Cobrar sin productos: se avisa abajo del botón
+  const [cargarA, setCargarA] = useState("mostrador"); // mostrador | cancha | cliente
+  const [destino, setDestino] = useState(null); // el turno o el cliente elegido
+  const [sinDestino, setSinDestino] = useState(false); // tocó "Cargar a la cuenta" sin elegir
+  const [rubrosTabla, setRubrosTabla] = useState([]); // categorías del complejo, con orden e ícono
+  const [eligiendoTalle, setEligiendoTalle] = useState(null); // producto con talles que se tocó
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  const load = useCallback(async () => {
+    try {
+      const desde = encodeURIComponent(`${sumarDias(hoyArgentina(), -30)}T00:00:00-03:00`);
+      const [ps, vs, rs] = await Promise.all([
+        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&activo=eq.true&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
+        traerTodo(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&anulada=is.false&created_at=gte.${desde}&select=total,created_at,venta_items(producto_id,cantidad)&order=created_at.asc,id.asc`, accessToken).catch(() => null),
+        supabaseTable(`rubros?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken }).catch(() => []),
+      ]);
+      setProductos(ps);
+      setRubrosTabla(rs || []);
+      if (vs) {
+        const inicioHoy = Date.parse(`${hoyArgentina()}T00:00:00-03:00`);
+        const deHoy = vs.filter((v) => Date.parse(v.created_at) >= inicioHoy);
+        setVendidos30(vs.flatMap((v) => v.venta_items));
+        setHoy({ ventas: deHoy.length, total: deHoy.reduce((s, v) => s + Number(v.total), 0) });
+      }
+      setError("");
+    } catch { setError("No se pudieron cargar los productos. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setProductos(null); setCarrito({}); setSueltos([]); load(); }, [load]);
+  // Los avisos se van solos a los pocos segundos
+  useEffect(() => {
+    if (!aviso) return;
+    const t = setTimeout(() => setAviso(null), aviso.tono === "ok" ? 6000 : 3500);
+    return () => clearTimeout(t);
+  }, [aviso]);
+
+  // Categorías: primero las del complejo en su orden (las que tienen productos), después las demás
+  const conProductos = productos ? rubrosDe(productos) : [];
+  const rubros = [...rubrosTabla.map((r) => r.nombre).filter((n) => conProductos.includes(n)), ...conProductos.filter((n) => !rubrosTabla.some((r) => r.nombre === n))];
+  const iconoDe = (rubroNombre) => rubrosTabla.find((r) => r.nombre === rubroNombre)?.icono;
+  const enTicket = (p) => Object.entries(carrito).reduce((s, [k, n]) => s + (deClave(k).productoId === p.id ? n : 0), 0);
+  const texto = buscar.trim().toLowerCase();
+  // Buscando se busca en todos; si no, la categoría elegida (Más vendidos: todos, los que más salen primero)
+  const visibles = !productos ? [] : texto
+    ? productos.filter((p) => p.nombre.toLowerCase().includes(texto))
+    : rubro === MAS_VENDIDOS ? masVendidos(productos, vendidos30) : productos.filter((p) => p.rubro === rubro);
+  const renglones = [
+    ...Object.entries(carrito).filter(([, n]) => n > 0).map(([k, n]) => ({ key: k, ...deClave(k), cantidad: n }))
+      .map((r) => ({ ...r, p: (productos || []).find((x) => x.id === r.productoId) })).filter((r) => r.p)
+      .map((r) => ({ ...r, descripcion: `${nombreLindo(r.p.nombre)}${r.talle ? ` ${r.talle}` : ""}`, precio: Number(r.p.precio) })),
+    ...sueltos.map((s, i) => ({ key: `s${i}`, suelto: i, descripcion: s.descripcion, precio: Number(s.precio), cantidad: s.cantidad })),
+  ];
+  const subtotal = subtotalDe(renglones);
+  const cantidadTotal = renglones.reduce((s, r) => s + r.cantidad, 0);
+  const vuelto = medio === "efectivo" ? vueltoDe(leerPrecio(pagaCon), subtotal) : null;
+
+  // Tocar un producto: lo suma al ticket; si tiene talles, primero se elige el talle
+  const tocar = (p, talle = null) => {
+    const talles = tallesDe(p);
+    if (talles.length > 0 && !talle) { setEligiendoTalle(p); return; }
+    const k = claveTicket(p.id, talle);
+    const n = carrito[k] || 0;
+    const t = talle ? talles.find((x) => x.talle === talle) : null;
+    const sinStock = t ? Number(t.stock) - n <= 0 : estadoStock(p, n).estado === "sin";
+    if (sinStock) {
+      const nombre = `${nombreLindo(p.nombre)}${talle ? ` talle ${talle}` : ""}`;
+      setAviso({ texto: n > 0 ? `No hay más stock de ${nombre}: ya están todos en el ticket.` : `${nombre} no tiene stock. Cargalo en Productos y stock o en Compras.`, tono: "alerta" });
+      return;
+    }
+    setCarrito((c) => ({ ...c, [k]: n + 1 }));
+    setVacio(false); setEligiendoTalle(null);
+  };
+  // Buscador: si se escribe o escanea un código exacto y se aprieta Enter, va directo al ticket
+  const alEnter = () => {
+    const hallado = buscarPorCodigo(productos || [], buscar);
+    if (hallado) { tocar(hallado.p, hallado.talle); setBuscar(""); return; }
+    if (visibles.length === 1) { tocar(visibles[0]); setBuscar(""); }
+  };
+  const cambiar = (r, d) => {
+    if (r.suelto != null) {
+      setSueltos((l) => l.map((s, i) => (i === r.suelto ? { ...s, cantidad: Math.max(1, s.cantidad + d) } : s)));
+      return;
+    }
+    if (d > 0) { tocar(r.p, r.talle); return; }
+    setCarrito((c) => ({ ...c, [r.key]: Math.max(0, (c[r.key] || 0) + d) }));
+  };
+  const quitar = (r) => (r.suelto != null ? setSueltos((l) => l.filter((_, i) => i !== r.suelto)) : setCarrito((c) => ({ ...c, [r.key]: 0 })));
+  const vaciar = () => { setCarrito({}); setSueltos([]); setPagaCon(""); };
+  const agregarSuelto = () => {
+    const precio = leerPrecio(suelto.precio);
+    if (!suelto.descripcion.trim() || precio == null) return;
+    setSueltos((l) => [...l, { descripcion: suelto.descripcion.trim().slice(0, 60), precio, cantidad: 1 }]);
+    setSuelto(null); setVacio(false);
+  };
+  const vendido = (r, conVuelto = null) => {
+    setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setSinDestino(false);
+    setAviso({ texto: `Venta #${r.numero} cobrada: ${formatoPrecio(r.total) || "$0"}${Number(r.a_cuenta) > 0 ? ` (${formatoPrecio(r.a_cuenta)} a cuenta)` : ""}${conVuelto ? ` · Vuelto ${formatoPrecio(conVuelto)}` : ""}.`, tono: "ok" });
+    load();
+  };
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+  // Cancha o Cliente: no se cobra ahora, queda en el turno o en la cuenta
+  const cargarALaCuenta = async () => {
+    if (!destino) { setSinDestino(true); return; }
+    setBusy(true);
+    try {
+      const items = itemsParaVender(carrito, sueltos);
+      if (destino.tipo === "cancha") {
+        const r = await supabaseRpc("vender", { p_complejo: complejoId, p_items: items, p_pagos: [], p_ajuste: 0, p_cuenta: null, p_reserva: destino.turno.id }, accessToken);
+        const t = destino.turno;
+        vendido(r);
+        setAviso({ texto: `Cargado al turno de ${t.nombre} (${t.cancha} · ${hora(t.inicio)}): ${formatoPrecio(r.total) || "$0"}. Se cobra desde la agenda.`, tono: "ok" });
+      } else {
+        let cuentaId = destino.cuentaId;
+        if (!cuentaId) {
+          try {
+            const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: destino.nombre, telefono: destino.telefono || null }, accessToken, prefer: "return=representation" });
+            cuentaId = c.id;
+          } catch (e) {
+            // Ya hay una cuenta con ese WhatsApp: se usa esa
+            if (e.pgCode !== "23505" || !destino.telefono) throw e;
+            const [c] = await supabaseTable(`cuentas?complejo_id=eq.${encodeURIComponent(complejoId)}&telefono=eq.${destino.telefono}&select=id`, { accessToken });
+            cuentaId = c.id;
+          }
+        }
+        const r = await supabaseRpc("vender", { p_complejo: complejoId, p_items: items, p_pagos: [], p_ajuste: 0, p_cuenta: cuentaId }, accessToken);
+        const nombre = destino.nombre;
+        vendido(r);
+        setAviso({ texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Cuentas.`, tono: "ok" });
+      }
+    } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
+    finally { setBusy(false); }
+  };
+  const cobrar = async () => {
+    if (renglones.length === 0) { setVacio(true); return; }
+    if (cargarA !== "mostrador") { await cargarALaCuenta(); return; }
+    setBusy(true);
+    try {
+      const r = await supabaseRpc("vender", {
+        p_complejo: complejoId, p_items: itemsParaVender(carrito, sueltos),
+        p_pagos: subtotal > 0 ? [{ medio, monto: subtotal }] : [], p_ajuste: 0, p_cuenta: null,
+      }, accessToken);
+      vendido(r, vuelto);
+    } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
+    finally { setBusy(false); }
+  };
+
+  const ticket = (
+    <div className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.75)" }}>
+      <div className="space-y-2">
+        <p className="text-sm text-slate-400">Cargar a</p>
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl border border-teal-900" role="radiogroup" aria-label="Cargar a">
+          {[["mostrador", "Mostrador"], ["cancha", "Cancha"], ["cliente", "Cliente"]].map(([k, l]) => (
+            <button key={k} type="button" role="radio" aria-checked={cargarA === k} onClick={() => { setCargarA(k); setDestino(null); setSinDestino(false); }}
+              className="py-2 rounded-lg text-sm transition" style={cargarA === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+        {cargarA !== "mostrador" && (
+          <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
+        )}
+      </div>
+      <div className="flex items-center justify-between border-t border-teal-900 pt-3">
+        <h2 className="text-sm text-slate-400">Ticket{cantidadTotal > 0 ? ` · ${cantidadTotal} producto${cantidadTotal === 1 ? "" : "s"}` : ""}</h2>
+        {renglones.length > 0 && <button type="button" onClick={vaciar} className="text-xs text-slate-400 hover:text-red-300">Vaciar</button>}
+      </div>
+      {renglones.length === 0 ? <p className="text-slate-400">Tocá los productos para sumarlos.</p> : (
+        <ul className="divide-y divide-teal-900">
+          {renglones.map((r) => (
+            <li key={r.key} className="py-2">
+              <div className="flex items-start gap-2">
+                <span className="flex-1 min-w-0 text-slate-100 leading-snug break-words">{r.descripcion}</span>
+                <span className="font-semibold tabular-nums shrink-0" style={{ color: BRAND.lime }}>{formatoPrecio(r.precio * r.cantidad) || "$0"}</span>
+              </div>
+              <div className="flex items-center gap-1 mt-1">
+                <button type="button" onClick={() => cambiar(r, -1)} disabled={r.cantidad <= 1} className="w-7 h-7 rounded-lg border border-teal-800 text-slate-200 disabled:opacity-30" aria-label={`Uno menos de ${r.descripcion}`}>−</button>
+                <span className="w-7 text-center tabular-nums text-slate-200">{r.cantidad}</span>
+                <button type="button" onClick={() => cambiar(r, 1)} className="w-7 h-7 rounded-lg border border-teal-800 text-slate-200" aria-label={`Uno más de ${r.descripcion}`}>+</button>
+                <span className="flex-1 text-xs text-slate-500 pl-2">{r.cantidad > 1 ? `${formatoPrecio(r.precio)} c/u` : ""}</span>
+                <button type="button" onClick={() => quitar(r)} className="text-xs text-slate-400 hover:text-red-300 px-1">Quitar</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {suelto ? (
+        <div className="flex flex-wrap gap-2">
+          <input value={suelto.descripcion} onChange={(e) => setSuelto({ ...suelto, descripcion: e.target.value })} maxLength={60} placeholder="Qué es (ej: Encordado)" aria-label="Descripción" className="flex-1 min-w-[9rem] px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+          <input inputMode="numeric" value={suelto.precio} onChange={(e) => setSuelto({ ...suelto, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} onKeyDown={(e) => { if (e.key === "Enter") agregarSuelto(); }} />
+          <button type="button" onClick={agregarSuelto} className="px-3 py-2 rounded-lg border border-teal-600 text-slate-100">Sumar</button>
+          <button type="button" onClick={() => setSuelto(null)} className="text-slate-400">Cancelar</button>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setSuelto({ descripcion: "", precio: "" })} className="text-sm text-cyan-300 hover:text-cyan-200">+ Algo que no está en la lista</button>
+      )}
+      <div className="flex items-baseline justify-between border-t border-teal-800 pt-3">
+        <span className="text-slate-300">Total</span>
+        <span className="text-3xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal) || "$0"}</span>
+      </div>
+      {cargarA === "mostrador" && <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Medio de pago">
+        {MEDIOS_MOSTRADOR.map(([m, l]) => (
+          <button key={m} type="button" role="radio" aria-checked={medio === m} onClick={() => setMedio(m)} className="py-2.5 rounded-xl border text-sm transition" style={medio === m ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
+        ))}
+      </div>}
+      {cargarA === "mostrador" && medio === "efectivo" && renglones.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-slate-400">
+          <span>Paga con</span>
+          <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$ (opcional)" aria-label="Paga con" className="w-32 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+          {vuelto != null && <span className="font-semibold text-slate-100">Vuelto {formatoPrecio(vuelto) || "$0"}</span>}
+        </div>
+      )}
+      <button type="button" disabled={busy} onClick={cobrar} className="w-full py-3.5 rounded-xl font-bold text-lg disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+        {busy ? "Guardando…" : cargarA !== "mostrador" ? `${cargarA === "cancha" ? "Cargar al turno" : "Cargar a la cuenta"}${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
+      </button>
+      {sinDestino && renglones.length > 0 && <p role="alert" className="text-center text-amber-300">{cargarA === "cancha" ? "Elegí a qué turno lo cargás." : "Elegí o escribí el cliente."}</p>}
+      {vacio && renglones.length === 0 && <p role="alert" className="text-center text-amber-300">Agregá al menos un producto.</p>}
+      {renglones.length > 0 && cargarA === "mostrador" && (
+        <button type="button" onClick={() => setDividiendo(true)} className="block mx-auto text-xs text-slate-400 hover:text-slate-200 underline">Descuento / dividir pago</button>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-4 text-sm pb-24 lg:pb-0" style={F.body}>
+      <div className="flex flex-wrap items-center gap-2">
+        {complejos.length > 1 && (
+          <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+            {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
+          </select>
+        )}
+        {hoy && (
+          <button type="button" onClick={onVerCaja || undefined} disabled={!onVerCaja} className="ml-auto px-4 py-2 rounded-full border border-teal-800 text-slate-300 hover:border-teal-600 disabled:hover:border-teal-800">
+            Hoy: {hoy.ventas} venta{hoy.ventas === 1 ? "" : "s"} · <span style={{ color: BRAND.lime }}>{formatoPrecio(hoy.total) || "$0"}</span> vendido{onVerCaja && " · Ver caja →"}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && (
+        <p role="status" className="rounded-lg px-3 py-2" style={aviso.tono === "ok" ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { backgroundColor: "#f59e0b1f", color: "#fbbf24" }}>
+          {aviso.tono === "ok" ? "✓ " : ""}{aviso.texto}
+        </p>
+      )}
+
+      {productos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_23rem] items-start">
+          <div className="space-y-3 min-w-0">
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); alEnter(); } }} placeholder="Buscar o escanear código" aria-label="Buscar producto o escanear código" className="w-full px-4 py-2.5 rounded-xl border text-base" style={adminInput} />
+            {!texto && productos.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {[[MAS_VENDIDOS, "Más vendidos"], ...rubros.map((r) => [r, r])].map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => setRubro(k)} className="px-4 py-1.5 rounded-full border transition" style={rubro === k ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
+                ))}
+              </div>
+            )}
+            {productos.length === 0 ? (
+              <p className="text-slate-400">Todavía no hay productos a la venta. {esDueno ? "Cargalos en Productos y stock." : "Pedile al dueño que los cargue."}</p>
+            ) : visibles.length === 0 ? <p className="text-slate-400">{texto ? "No hay productos con ese nombre." : "No hay productos en esta categoría."}</p> : (
+              <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(9.5rem, 1fr))" }}>
+                {visibles.map((p) => {
+                  const n = enTicket(p);
+                  const talles = tallesDe(p);
+                  const { estado, quedan } = estadoStock(p, n);
+                  const [textoStock, colorStock] = estado === "cocina" ? ["Cocina", "#94a3b8"] : estado === "sin" ? ["Sin stock", "#f87171"] : estado === "poco" ? [quedan === 1 ? "Queda 1" : `Quedan ${quedan}`, "#fbbf24"] : [`Stock ${quedan}`, "#94a3b8"];
+                  // Con talles: se ven los talles; los que no tienen stock, tachados
+                  const quedaDe = (t) => Number(t.stock) - (carrito[claveTicket(p.id, t.talle)] || 0);
+                  const agotado = estado === "sin" && n === 0;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => tocar(p)}
+                      aria-label={`${nombreLindo(p.nombre)}, ${formatoPrecio(p.precio)}, ${textoStock}${n > 0 ? `, ${n} en el ticket` : ""}`}
+                      className={`relative text-left rounded-2xl border p-3.5 min-h-[8.5rem] flex flex-col transition ${agotado ? "opacity-50" : "hover:brightness-125"}`}
+                      style={{ borderColor: n > 0 ? BRAND.lime : "#1f3a44", backgroundColor: n > 0 ? `${BRAND.lime}0d` : "rgba(15,30,38,0.7)" }}
+                    >
+                      <RubroIcono rubro={p.rubro} icono={iconoDe(p.rubro)} />
+                      {n > 0 && <span className="absolute top-3 right-3 min-w-[1.75rem] h-7 px-1.5 rounded-full text-sm font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{n}</span>}
+                      <span className="block mt-2 text-slate-100 font-semibold leading-snug line-clamp-2">{nombreLindo(p.nombre)}</span>
+                      <span className="block mt-auto pt-1 text-base font-semibold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio) || "$0"}</span>
+                      {talles.length > 0 && estado !== "sin" ? (
+                        <span className="block text-xs text-slate-400 truncate">
+                          {talles.map((t, i) => <span key={t.talle}>{i > 0 && " · "}<span className={quedaDe(t) <= 0 ? "line-through opacity-50" : ""}>{t.talle}</span></span>)}
+                        </span>
+                      ) : <span className="block text-xs" style={{ color: colorStock }}>{textoStock}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {/* En el celular el ticket queda abajo de los productos; en la PC, a la derecha */}
+          <div id="ticket-mostrador" className="min-w-0 lg:sticky lg:top-4">{ticket}</div>
+        </div>
+      )}
+
+      {/* Celular: barra fija con el total, para ir al ticket */}
+      {renglones.length > 0 && !dividiendo && (
+        <div className="lg:hidden fixed bottom-0 inset-x-0 z-30 px-4 py-3 border-t border-teal-800 flex items-center gap-3" style={{ backgroundColor: "#071319" }}>
+          <span className="flex-1 min-w-0">
+            <span className="block text-xs text-slate-400">{cantidadTotal} producto{cantidadTotal === 1 ? "" : "s"}</span>
+            <span className="block text-lg font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal) || "$0"}</span>
+          </span>
+          <button type="button" onClick={() => document.getElementById("ticket-mostrador")?.scrollIntoView({ behavior: "smooth" })} className="px-6 py-3 rounded-lg font-bold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver ticket</button>
+        </div>
+      )}
+
+      {eligiendoTalle && (
+        <Modal title={`Talle · ${nombreLindo(eligiendoTalle.nombre)}`} onClose={() => setEligiendoTalle(null)}>
+          <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 text-sm" style={F.body}>
+            {tallesDe(eligiendoTalle).map((t) => {
+              const queda = Number(t.stock) - (carrito[claveTicket(eligiendoTalle.id, t.talle)] || 0);
+              return (
+                <button key={t.talle} type="button" onClick={() => tocar(eligiendoTalle, t.talle)} className={`rounded-xl border py-3 transition ${queda <= 0 ? "opacity-50" : "hover:brightness-125"}`} style={{ borderColor: queda > 0 ? "#1f3a44" : "#7f1d1d", backgroundColor: "rgba(15,30,38,0.7)" }}>
+                  <span className="block text-lg font-bold text-slate-100">{t.talle}</span>
+                  <span className="block text-xs" style={{ color: queda <= 0 ? "#f87171" : queda <= minimoStock(eligiendoTalle) ? "#fbbf24" : "#94a3b8" }}>{queda <= 0 ? "Sin stock" : queda === 1 ? "Queda 1" : `Quedan ${queda}`}</span>
+                </button>
+              );
+            })}
+          </div>
+          {aviso?.tono === "alerta" && <p className="mt-3 text-amber-300 text-sm" style={F.body}>{aviso.texto}</p>}
+        </Modal>
+      )}
+
+      {dividiendo && (
+        <CobrarVenta
+          complejoId={complejoId} accessToken={accessToken} subtotal={subtotal}
+          items={itemsParaVender(carrito, sueltos)}
+          onClose={() => setDividiendo(false)} onVendido={(r) => vendido(r)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* Cobrar el ticket: descuento o recargo, uno o varios medios de pago, vuelto, y lo que falte a
+   cuenta de alguien (seña, cuotas) */
+function CobrarVenta({ complejoId, accessToken, subtotal, items, onClose, onVendido }) {
+  const [ajusteForm, setAjusteForm] = useState({ tipo: "descuento", modo: "%", valor: "" });
+  const ajuste = ajusteDe(subtotal, { ...ajusteForm, valor: ajusteForm.modo === "%" ? leerPorcentaje(ajusteForm.valor) : leerPrecio(ajusteForm.valor) || 0 });
+  const total = subtotal + ajuste;
+  const [pagos, setPagos] = useState([{ medio: "efectivo", monto: String(subtotal) }]);
+  const [tocoMonto, setTocoMonto] = useState(false); // si no tocó el monto, sigue al total (al poner un descuento)
+  const [pagaCon, setPagaCon] = useState("");
+  const [cuentas, setCuentas] = useState(null);
+  const [cuentaId, setCuentaId] = useState("");
+  const [buscarCuenta, setBuscarCuenta] = useState("");
+  const [nuevaCuenta, setNuevaCuenta] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => { if (!tocoMonto && pagos.length === 1) setPagos([{ ...pagos[0], monto: String(total) }]); }, [total]); // eslint-disable-line react-hooks/exhaustive-deps
+  const montos = pagos.map((p) => ({ ...p, monto: leerPrecio(p.monto) || 0 }));
+  const { pagado, falta, sobra } = resumenPagos(total, montos);
+  const efectivo = montos.find((p) => p.medio === "efectivo");
+  const vuelto = efectivo ? vueltoDe(leerPrecio(pagaCon), efectivo.monto) : null;
+  useEffect(() => {
+    if (falta > 0 && cuentas === null) {
+      supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).then((r) => setCuentas(r || [])).catch(() => setCuentas([]));
+    }
+  }, [falta, cuentas, complejoId, accessToken]);
+
+  const setPago = (i, cambio) => { setTocoMonto(true); setPagos((l) => l.map((p, j) => (j === i ? { ...p, ...cambio } : p))); };
+  const otroMedio = () => {
+    const usado = new Set(pagos.map((p) => p.medio));
+    const medio = MEDIOS_VENTA.map(([m]) => m).find((m) => !usado.has(m)) || "transferencia";
+    setTocoMonto(true);
+    setPagos((l) => [...l, { medio, monto: falta > 0 ? String(falta) : "" }]);
+  };
+  const texto = buscarCuenta.trim().toLowerCase();
+  const sugeridas = (cuentas || []).filter((c) => !texto || c.nombre.toLowerCase().includes(texto)).slice(0, 6);
+  const cuentaElegida = (cuentas || []).find((c) => c.id === cuentaId);
+  const puedeConfirmar = total >= 0 && sobra === 0 && (falta === 0 || cuentaId || (nuevaCuenta && buscarCuenta.trim()));
+
+  const confirmar = async () => {
+    setBusy(true); setError("");
+    try {
+      let cuenta = falta > 0 ? cuentaId || null : null;
+      if (falta > 0 && !cuenta) {
+        const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: buscarCuenta.trim().slice(0, 80) }, accessToken, prefer: "return=representation" });
+        cuenta = c.id;
+      }
+      const r = await supabaseRpc("vender", {
+        p_complejo: complejoId, p_items: items,
+        p_pagos: montos.filter((p) => p.monto > 0).map((p) => ({ medio: p.medio, monto: p.monto })),
+        p_ajuste: ajuste, p_cuenta: cuenta,
+      }, accessToken);
+      onVendido(r);
+    } catch (e) { setError(ventaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const chip = (activo) => `px-3 py-1.5 rounded-lg border ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`;
+
+  return (
+    <Modal title="Cobrar" onClose={onClose}>
+      <div className="space-y-4 text-sm" style={F.body}>
+        <div className="space-y-2">
+          <div className="flex justify-between text-teal-300"><span>Subtotal</span><span className="tabular-nums">{formatoPrecio(subtotal)}</span></div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className={chip(ajusteForm.tipo === "descuento")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "descuento" })}>Descuento</button>
+            <button type="button" className={chip(ajusteForm.tipo === "recargo")} onClick={() => setAjusteForm({ ...ajusteForm, tipo: "recargo" })}>Recargo</button>
+            <input inputMode={ajusteForm.modo === "%" ? "decimal" : "numeric"} value={ajusteForm.valor} onChange={(e) => setAjusteForm({ ...ajusteForm, valor: e.target.value })} placeholder="0" aria-label="Valor del ajuste" className="w-20 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+            <button type="button" className={chip(ajusteForm.modo === "%")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "%" })}>%</button>
+            <button type="button" className={chip(ajusteForm.modo === "$")} onClick={() => setAjusteForm({ ...ajusteForm, modo: "$" })}>$</button>
+          </div>
+          {ajuste !== 0 && <div className="flex justify-between text-teal-300"><span>{ajuste < 0 ? "Descuento" : "Recargo"}</span><span className="tabular-nums">{conSigno(ajuste)}</span></div>}
+          <div className="flex justify-between items-baseline border-t border-teal-800 pt-2">
+            <span className="text-teal-200">Total</span>
+            <span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(total) || "$0"}</span>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs uppercase tracking-wide text-teal-400">Cómo paga</p>
+          {pagos.map((p, i) => (
+            <div key={i} className="rounded-lg border border-teal-800 p-2 space-y-2">
+              <div className="flex flex-wrap gap-1.5">
+                {MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" className={`${chip(p.medio === m)} text-xs`} onClick={() => setPago(i, { medio: m })}>{l}</button>)}
+              </div>
+              <div className="flex items-center gap-2">
+                <input inputMode="numeric" value={p.monto} onChange={(e) => setPago(i, { monto: e.target.value })} aria-label="Monto" className="flex-1 min-w-0 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                {pagos.length > 1 && <button type="button" onClick={() => { setTocoMonto(true); setPagos((l) => l.filter((_, j) => j !== i)); }} className="text-teal-500 hover:text-red-300 px-2" aria-label="Quitar este pago">✕</button>}
+              </div>
+            </div>
+          ))}
+          <button type="button" onClick={otroMedio} className="text-teal-300 hover:text-lime-400">+ Pagar una parte con otro medio</button>
+          {efectivo && efectivo.monto > 0 && (
+            <div className="flex flex-wrap items-center gap-2 text-teal-300">
+              <span>Paga en efectivo con</span>
+              <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$" aria-label="Paga con" className="w-28 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+              {vuelto != null && <span className="font-semibold text-slate-100">Vuelto: {formatoPrecio(vuelto) || "$0"}</span>}
+            </div>
+          )}
+          {sobra > 0 && <p className="text-red-300">Los pagos suman {formatoPrecio(sobra)} de más.</p>}
+        </div>
+
+        {falta > 0 && (
+          <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b88" }}>
+            <p className="text-amber-300 font-semibold">Faltan {formatoPrecio(falta)}: quedan a cuenta de…</p>
+            <p className="text-xs text-teal-400">Sirve para una seña o para pagar en cuotas: el saldo se anota en su cuenta y se cobra desde Cuentas.</p>
+            {cuentaElegida ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-100">{cuentaElegida.nombre}</span>
+                <button type="button" onClick={() => setCuentaId("")} className="text-teal-400 text-xs underline">Cambiar</button>
+              </div>
+            ) : (
+              <>
+                <input value={buscarCuenta} onChange={(e) => { setBuscarCuenta(e.target.value); setNuevaCuenta(false); }} placeholder="Nombre de la persona" aria-label="Buscar cuenta" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
+                {cuentas === null ? <p className="opacity-60">Cargando cuentas…</p> : (
+                  <div className="flex flex-wrap gap-2">
+                    {sugeridas.map((c) => <button key={c.id} type="button" onClick={() => setCuentaId(c.id)} className="px-3 py-1.5 rounded-lg border border-teal-700 text-teal-200">{c.nombre}</button>)}
+                    {buscarCuenta.trim() && !nuevaCuenta && <button type="button" onClick={() => setNuevaCuenta(true)} className="px-3 py-1.5 rounded-lg border border-lime-400 text-lime-400">+ Cuenta nueva: {buscarCuenta.trim()}</button>}
+                    {nuevaCuenta && <span className="px-3 py-1.5 text-lime-400">Se crea la cuenta de {buscarCuenta.trim()}</span>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {error && <p className="text-red-400">{error}</p>}
+        <button type="button" disabled={busy || !puedeConfirmar} onClick={confirmar} className="w-full py-3 rounded-lg font-bold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : falta > 0 ? `Cobrar ${formatoPrecio(pagado) || "$0"} y anotar ${formatoPrecio(falta)}` : `Confirmar venta de ${formatoPrecio(total) || "$0"}`}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Ventas del día en el mostrador. El dueño ve quién vendió y puede anular. */
+function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) {
+  const [fecha, setFecha] = useState(hoyArgentina());
+  const [ventas, setVentas] = useState(null);
+  const [error, setError] = useState("");
+  const [anulando, setAnulando] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const enAr = (f) => encodeURIComponent(`${f}T00:00:00-03:00`);
+    try {
+      setVentas(await supabaseTable(`ventas?complejo_id=eq.${encodeURIComponent(complejoId)}&created_at=gte.${enAr(fecha)}&created_at=lt.${enAr(sumarDias(fecha, 1))}&order=created_at.desc&select=*,venta_items(descripcion,cantidad,precio_unitario),venta_pagos(medio,monto),cuentas(nombre)`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar las ventas."); }
+  }, [complejoId, accessToken, fecha]);
+  useEffect(() => { load(); }, [load, version]);
+
+  const anular = async (v) => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("anular_venta", { p_venta: v.id }, accessToken);
+      setAnulando(null);
+      await load(); onChanged();
+    } catch (e) { setError(ventaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const validas = (ventas || []).filter((v) => !v.anulada);
+  const total = validas.reduce((s, v) => s + Number(v.total), 0);
+  const porMedio = MEDIOS_VENTA.map(([m, l]) => [l, validas.flatMap((v) => v.venta_pagos).filter((p) => p.medio === m).reduce((s, p) => s + Number(p.monto), 0)]).filter(([, n]) => n > 0);
+  const aCuenta = validas.reduce((s, v) => s + Number(v.a_cuenta), 0);
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  return (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm uppercase tracking-wide text-teal-400">Ventas {fecha === hoyArgentina() ? "de hoy" : `del ${etiquetaFecha(fecha).toLowerCase()}`}</h2>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => setFecha(sumarDias(fecha, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Día anterior">‹</button>
+          <button type="button" disabled={fecha >= hoyArgentina()} onClick={() => setFecha(sumarDias(fecha, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300 disabled:opacity-30" aria-label="Día siguiente">›</button>
+        </div>
+      </div>
+      {error && <p className="text-red-400">{error}</p>}
+      {ventas === null ? (!error && <p className="opacity-60">Cargando…</p>) : ventas.length === 0 ? <p className="text-teal-400">Sin ventas.</p> : (
+        <>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <span className="font-semibold" style={{ color: BRAND.lime }}>Total {formatoPrecio(total)}</span>
+            {porMedio.map(([l, n]) => <span key={l} className="text-teal-300">{l} {formatoPrecio(n)}</span>)}
+            {aCuenta > 0 && <span className="text-amber-300">A cuenta {formatoPrecio(aCuenta)}</span>}
+          </div>
+          <ul className="divide-y divide-teal-900">
+            {ventas.map((v) => (
+              <li key={v.id} className={`py-2 ${v.anulada ? "opacity-50" : ""}`}>
+                <div className="flex items-start gap-3">
+                  <span className="w-12 shrink-0 tabular-nums text-teal-400">{hora(v.created_at)}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className={`block text-slate-100 ${v.anulada ? "line-through" : ""}`}>{v.venta_items.map((i) => `${i.cantidad > 1 ? `${i.cantidad} ` : ""}${i.descripcion}`).join(", ")}</span>
+                    <span className="block text-xs text-teal-500">
+                      #{v.numero} · {v.venta_pagos.map((p) => `${medioCobroLabel(p.medio)} ${formatoPrecio(p.monto)}`).join(" + ") || (Number(v.pendiente) > 0 || Number(v.a_cuenta) > 0 ? "" : "sin pago")}
+                      {Number(v.pendiente) > 0 && ` · ${formatoPrecio(v.pendiente)} se cobra con el turno`}
+                      {Number(v.a_cuenta) > 0 && ` · ${formatoPrecio(v.a_cuenta)} a cuenta de ${v.cuentas?.nombre || "una cuenta"}`}
+                      {Number(v.ajuste) !== 0 && ` · ${Number(v.ajuste) < 0 ? "descuento" : "recargo"} ${formatoPrecio(Math.abs(v.ajuste))}`}
+                      {esDueno && v.vendido_por_email && ` · ${v.vendido_por_email}`}
+                      {v.anulada && " · ANULADA"}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums">{formatoPrecio(v.total)}</span>
+                </div>
+                {esDueno && !v.anulada && (anulando === v.id ? (
+                  <p className="mt-1 text-xs text-right">
+                    <span className="text-teal-300">¿Anular? Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}. </span>
+                    <button type="button" disabled={busy} onClick={() => anular(v)} className="text-red-400 font-semibold mr-2">Anular</button>
+                    <button type="button" onClick={() => setAnulando(null)} className="text-teal-400">No</button>
+                  </p>
+                ) : (
+                  <p className="mt-1 text-right"><button type="button" onClick={() => setAnulando(v.id)} className="text-xs text-teal-500 hover:text-red-300">Anular</button></p>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+/* Cuentas (fiado) o Productos y stock: cada una es una sección del menú */
+function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija }) {
+  const [complejoId, setComplejoId] = useState(complejos[0].id);
+  const vista = vistaFija; // cuentas | productos
+  const [productos, setProductos] = useState(null);
+  const [cuentas, setCuentas] = useState(null);
+  const [error, setError] = useState("");
+  const [abierta, setAbierta] = useState(null); // id de la cuenta abierta
+  const [buscar, setBuscar] = useState("");
+  const [soloDeben, setSoloDeben] = useState(false);
+  const [nueva, setNueva] = useState(null); // { nombre, telefono }
+  const [busy, setBusy] = useState(false);
+  const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+
+  const load = useCallback(async () => {
+    try {
+      const [ps, cs] = await Promise.all([
+        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
+        supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken),
+      ]);
+      setProductos(ps); setCuentas(cs || []); setError("");
+    } catch { setError("No se pudieron cargar los consumos. Revisá la conexión."); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { setProductos(null); setCuentas(null); setAbierta(null); load(); }, [load]);
+
+  const crearCuenta = async () => {
+    const telefono = nueva.telefono.trim() ? normalizeArPhone(nueva.telefono) : null;
+    if (!nueva.nombre.trim()) { setError("Poné el nombre."); return; }
+    if (nueva.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    setBusy(true); setError("");
+    try {
+      const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: nueva.nombre.trim(), telefono }, accessToken, prefer: "return=representation" });
+      setNueva(null);
+      await load();
+      setAbierta(c.id);
+    } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una cuenta con ese WhatsApp: buscala en la lista." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+
+  const cuenta = (cuentas || []).find((c) => c.id === abierta);
+  const texto = buscar.trim().toLowerCase();
+  const lista = (cuentas || [])
+    .filter((c) => (!soloDeben || totalDe(c) > 0) && (!texto || c.nombre.toLowerCase().includes(texto) || (c.telefono || "").includes(texto.replace(/\D/g, "") || "~")))
+    .sort((a, b) => (totalDe(b) > 0) - (totalDe(a) > 0) || (a.ultimo < b.ultimo ? 1 : -1));
+  const totalDeuda = (cuentas || []).reduce((s, c) => s + totalDe(c), 0);
+  const avisos = (productos || []).filter(pocoStock);
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      {complejos.length > 1 && (
+        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+          {complejos.map((c) => <option key={c.id} value={c.id}>{nombreComplejo(c.id)}</option>)}
+        </select>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {avisos.length > 0 && (
+        <p className="text-xs text-amber-300">⚠ Queda poco: {avisos.map((p) => `${p.nombre} (${p.stock})`).join(", ")}</p>
+      )}
+
+      {productos === null || cuentas === null ? (
+        !error && <p className="opacity-60">Cargando…</p>
+      ) : vista === "productos" ? (
+        <ProductosConfig complejoId={complejoId} productos={productos} accessToken={accessToken} esDueno={esDueno} onChanged={load} />
+      ) : cuenta ? (
+        <CuentaDetalle cuenta={cuenta} complejoId={complejoId} complejoNombre={nombreComplejo(complejoId)} productos={productos} accessToken={accessToken} esDueno={esDueno} onBack={() => setAbierta(null)} onChanged={load} />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Deuda total" tono="rojo" valor={formatoPrecio(totalDeuda) || "$0"} detalle="Consumos e inscripciones" />
+            <TarjetaResumen titulo="Deben" tono="ambar" valor={`${cuentas.filter((c) => totalDe(c) > 0).length} de ${cuentas.length}`} detalle="Cuentas con saldo" onClick={() => setSoloDeben(true)} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Al día" tono="lime" valor={cuentas.length ? `${Math.round((cuentas.filter((c) => totalDe(c) <= 0).length / cuentas.length) * 100)}%` : "—"} detalle="De todas las cuentas" /></div>
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cuenta" className="flex-1 min-w-[12rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
+            <label className="flex items-center gap-1 text-teal-300"><input type="checkbox" checked={soloDeben} onChange={(e) => setSoloDeben(e.target.checked)} /> Solo los que deben</label>
+          </div>
+          {nueva ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={nueva.nombre} onChange={(e) => setNueva({ ...nueva, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={nueva.telefono} onChange={(e) => setNueva({ ...nueva, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={crearCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Crear cuenta</button>
+                <button type="button" onClick={() => setNueva(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setNueva({ nombre: buscar.trim(), telefono: "" })} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Nueva cuenta</button>
+          )}
+          {lista.length === 0 ? (
+            <p className="text-teal-400">{cuentas.length === 0 ? "Todavía no hay cuentas. Creá una para anotarle consumos." : "No hay cuentas con ese filtro."}</p>
+          ) : (
+            <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+              {lista.map((c) => {
+                const saldo = totalDe(c);
+                return (
+                  <li key={c.id}>
+                    <button type="button" onClick={() => setAbierta(c.id)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-white/5">
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-teal-100 font-semibold truncate">{c.nombre}</span>
+                        {c.telefono && <span className="block text-xs text-teal-500">{formatArPhone(c.telefono)}</span>}
+                      </span>
+                      <span className="text-sm font-semibold shrink-0" style={{ color: saldo > 0 ? "#f87171" : BRAND.lime }}>{saldo > 0 ? `Debe ${formatoPrecio(saldo)}` : "Al día"}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Anotar consumos: tocar productos (con − / +) y algo suelto ("+ Otro"). onAnotar(items, otro, total)
+   guarda y devuelve true si salió bien (ahí se vacía). Se usa en la cuenta y en Cobros del torneo. */
+function AnotarConsumo({ productos, esDueno, busy, onAnotar, compacto = false }) {
+  const [carrito, setCarrito] = useState({}); // productoId -> cantidad
+  const [otro, setOtro] = useState(null); // { descripcion, precio }
+  const [error, setError] = useState("");
+  // Las prendas con talles se venden desde el Mostrador (ahí se elige el talle)
+  const activos = productos.filter((p) => p.activo && tallesDe(p).length === 0);
+  const items = Object.entries(carrito).filter(([, n]) => n > 0).map(([id, n]) => ({ p: productos.find((x) => x.id === id), n })).filter((x) => x.p);
+  const otroPrecio = otro ? leerPrecio(otro.precio) : null;
+  const total = items.reduce((s, { p, n }) => s + n * Number(p.precio), 0) + (otro && otro.descripcion.trim() && otroPrecio != null ? otroPrecio : 0);
+  const sumar = (id, d) => setCarrito((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
+
+  const anotar = async () => {
+    if (otro && (!otro.descripcion.trim() || otroPrecio == null)) { setError("Completá qué es y el precio de lo que no está en la lista."); return; }
+    if (items.length === 0 && !otro) return;
+    setError("");
+    if (await onAnotar(items, otro ? { descripcion: otro.descripcion.trim(), precio: otroPrecio } : null, total)) { setCarrito({}); setOtro(null); }
+  };
+
+  return (
+    <div className={`rounded-lg border border-teal-800 space-y-3 ${compacto ? "p-2" : "p-3"}`}>
+      {!compacto && <p className="text-xs uppercase tracking-wide text-teal-500">Anotar</p>}
+      {activos.length === 0 && <p className="text-teal-400 text-sm">No hay productos cargados. {esDueno ? "Cargalos en Consumos → \"Productos y stock\"." : "Pedile al dueño que los cargue."} Igual podés anotar algo con "+ Otro".</p>}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {activos.map((p) => (
+          <button key={p.id} type="button" onClick={() => sumar(p.id, 1)} className="relative rounded-lg border px-2 py-2 text-left hover:border-lime-400" style={{ borderColor: carrito[p.id] ? BRAND.lime : "#134e4a", backgroundColor: "rgba(8,18,24,0.7)" }}>
+            <span className="block text-teal-100 font-semibold truncate text-sm">{p.nombre}</span>
+            <span className="block text-xs text-teal-400">{formatoPrecio(p.precio)}{p.stock != null && <span className={pocoStock(p) ? "text-amber-300" : ""}> · quedan {p.stock}</span>}</span>
+            {carrito[p.id] > 0 && <span className="absolute -top-2 -right-2 w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{carrito[p.id]}</span>}
+          </button>
+        ))}
+        <button type="button" onClick={() => setOtro(otro ? null : { descripcion: "", precio: "" })} className="rounded-lg border border-dashed border-teal-700 px-2 py-2 text-teal-300 text-sm">+ Otro</button>
+      </div>
+      {otro && (
+        <div className="flex flex-wrap gap-2">
+          <input value={otro.descripcion} onChange={(e) => setOtro({ ...otro, descripcion: e.target.value })} maxLength={60} placeholder="Qué es" aria-label="Descripción" className="flex-1 min-w-[8rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
+          <input inputMode="numeric" value={otro.precio} onChange={(e) => setOtro({ ...otro, precio: e.target.value })} placeholder="Precio" aria-label="Precio" className="w-28 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+        </div>
+      )}
+      {items.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {items.map(({ p, n }) => (
+            <li key={p.id} className="flex items-center gap-2 text-teal-200">
+              <button type="button" onClick={() => sumar(p.id, -1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno menos de ${p.nombre}`}>−</button>
+              <span className="w-6 text-center">{n}</span>
+              <button type="button" onClick={() => sumar(p.id, 1)} className="w-7 h-7 rounded border border-teal-700" aria-label={`Uno más de ${p.nombre}`}>+</button>
+              <span className="flex-1">{p.nombre}</span>
+              <span>{formatoPrecio(n * Number(p.precio))}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+      {(items.length > 0 || otro) && (
+        <button type="button" disabled={busy} onClick={anotar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Anotando…" : `Anotar ${formatoPrecio(total)}`}</button>
+      )}
+    </div>
+  );
+}
+
+/* Guarda en la cuenta lo elegido en AnotarConsumo (el precio y el nombre del producto los pone la base) */
+async function guardarConsumos(accessToken, cuenta, items, otro) {
+  for (const { p, n } of items) {
+    await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, producto_id: p.id, descripcion: p.nombre, cantidad: n, precio_unitario: p.precio } });
+  }
+  if (otro) await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, descripcion: otro.descripcion, cantidad: 1, precio_unitario: otro.precio } });
+}
+
+/* Una cuenta: anotar consumos (tocando productos), cobrar y ver todo lo anotado y pagado */
+function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessToken, esDueno, onBack, onChanged }) {
+  const [movs, setMovs] = useState(null);
+  const [cobrando, setCobrando] = useState(false);
+  const [form, setForm] = useState({ monto: "", medio: "efectivo" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [anulando, setAnulando] = useState(null);
+  const [inscripciones, setInscripciones] = useState([]); // jugadores de torneos vinculados a la cuenta
+  const [cobrandoTodo, setCobrandoTodo] = useState(false);
+  const saldo = saldoDe(cuenta);
+  const debeInscripciones = inscripciones.reduce((s, i) => s + Number(i.debe), 0);
+  const total = Math.max(0, saldo) + debeInscripciones;
+
+  const load = useCallback(async () => {
+    try {
+      const [cs, ps] = await Promise.all([
+        supabaseTable(`cuenta_consumos?cuenta_id=eq.${cuenta.id}&order=created_at.desc`, { accessToken }),
+        supabaseTable(`cuenta_pagos?cuenta_id=eq.${cuenta.id}&order=created_at.desc`, { accessToken }),
+      ]);
+      setMovs([...cs.map((c) => ({ ...c, tipo: "consumo" })), ...ps.map((p) => ({ ...p, tipo: "pago" }))].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+      setInscripciones((await supabaseRpc("inscripciones_de_cuenta", { p_cuenta: cuenta.id }, accessToken).catch(() => [])) || []);
+      setError("");
+    } catch { setError("No se pudo cargar la cuenta."); }
+  }, [cuenta.id, accessToken]);
+  useEffect(() => { load(); }, [load, cuenta.consumido, cuenta.pagado]);
+
+  // Devuelve true si salió bien
+  const run = async (fn, okMsg) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); return true; } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); return false; }
+    finally { setBusy(false); }
+  };
+  const anotar = (items, otro, totalAnotado) => run(() => guardarConsumos(accessToken, { id: cuenta.id, complejo_id: complejoId }, items, otro), `Anotado: ${formatoPrecio(totalAnotado)}`);
+  const cobrar = () => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    run(async () => {
+      await supabaseTable("cuenta_pagos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: complejoId, cuenta_id: cuenta.id, monto, medio: form.medio } });
+      setCobrando(false);
+    }, `Cobrado: ${formatoPrecio(monto)}`);
+  };
+  // Un solo pago: primero las inscripciones y el resto a los consumos (lo reparte la base)
+  const cobrarTodo = () => {
+    const monto = leerPrecio(form.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    let detalle = "";
+    run(async () => {
+      const r = await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
+      detalle = [Number(r?.inscripciones) > 0 && `${formatoPrecio(r.inscripciones)} de inscripción`, Number(r?.consumos) > 0 && `${formatoPrecio(r.consumos)} de consumos`].filter(Boolean).join(" y ");
+      setCobrandoTodo(false);
+    }).then(() => { if (detalle) setAviso(`Cobrado ${formatoPrecio(monto)}: ${detalle}.`); });
+  };
+  const anular = (m) => run(async () => {
+    // Un renglón "Venta #N" del mostrador se anula con la venta entera (vuelve el stock y la venta queda anulada)
+    const venta = m.tipo === "consumo" ? (await supabaseTable(`ventas?consumo_id=eq.${m.id}&anulada=is.false&select=id`, { accessToken }))[0] : null;
+    if (venta) await supabaseRpc("anular_venta", { p_venta: venta.id }, accessToken);
+    else await supabaseTable(`${m.tipo === "pago" ? "cuenta_pagos" : "cuenta_consumos"}?id=eq.${m.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+    setAnulando(null);
+  });
+  const cuando = (iso) => new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+  // Detalle para el WhatsApp: lo consumido desde el último pago
+  const ultimoPago = (movs || []).find((m) => m.tipo === "pago");
+  const pendientes = (movs || []).filter((m) => m.tipo === "consumo" && (!ultimoPago || m.created_at > ultimoPago.created_at)).reverse();
+  const lineasInscripcion = inscripciones.filter((i) => Number(i.debe) > 0).map((i) => `inscripción ${i.torneo} (${i.categoria}) ${formatoPrecio(i.debe)}`);
+  const detalleWa = [...(saldo > 0 ? pendientes.map((m) => `${m.cantidad} ${m.descripcion}`) : []), ...lineasInscripcion];
+  const mensaje = `Hola ${cuenta.nombre}, te paso tu cuenta en ${complejoNombre}: ${detalleWa.join(", ")}${detalleWa.length ? ". " : ""}Total a pagar: ${formatoPrecio(total)}. ¡Gracias!`;
+
+  return (
+    <div className="space-y-4">
+      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Cuentas</button>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex-1 min-w-[10rem]">
+          <p className="text-lg text-teal-100 font-semibold">{cuenta.nombre}</p>
+          {cuenta.telefono && <p className="text-xs text-teal-500">{formatArPhone(cuenta.telefono)}</p>}
+        </div>
+        <span className="text-lg font-semibold" style={{ color: total > 0 ? "#f87171" : BRAND.lime }}>{total > 0 ? `Debe ${formatoPrecio(total)}` : saldo < 0 ? `A favor ${formatoPrecio(-saldo)}` : "Al día"}</span>
+      </div>
+      {debeInscripciones > 0 && (
+        <div className="rounded-lg border border-amber-400/40 p-3 space-y-1">
+          <p className="text-xs uppercase tracking-wide text-amber-300">También debe</p>
+          {inscripciones.filter((i) => Number(i.debe) > 0).map((i) => (
+            <p key={`${i.torneo_id}|${i.categoria_id}|${i.pareja_id}|${i.jugador}`} className="flex justify-between gap-2 text-teal-200">
+              <span>Inscripción {i.torneo} · {i.categoria} · {i.nombre}</span>
+              <span className="text-amber-300 shrink-0">{formatoPrecio(i.debe)}</span>
+            </p>
+          ))}
+          {saldo > 0 && <p className="flex justify-between gap-2 text-teal-200"><span>Consumos</span><span className="text-amber-300">{formatoPrecio(saldo)}</span></p>}
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="text-lime-400">{aviso}</p>}
+
+      <AnotarConsumo productos={productos} esDueno={esDueno} busy={busy} onAnotar={anotar} />
+
+      <div className="flex flex-wrap gap-2 items-center">
+        {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); setForm({ monto: String(total), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
+        {!cobrando && !cobrandoTodo && saldo > 0 && <button type="button" onClick={() => { setCobrando(true); setForm({ monto: String(saldo), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">{debeInscripciones > 0 ? "Solo consumos" : "Cobrar"}</button>}
+        {total > 0 && cuenta.telefono && <a href={waLink(cuenta.telefono, mensaje)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 text-lime-400 underline">Mandarle la cuenta por WhatsApp</a>}
+      </div>
+      {(cobrando || cobrandoTodo) && (
+        <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+          {cobrandoTodo && <p className="text-xs text-teal-400">Primero se cancela la inscripción y lo que sobra va a los consumos.</p>}
+          <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
+          <div className="flex flex-wrap gap-2">
+            {MEDIOS_CUENTA.map(([m, l]) => (
+              <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+            ))}
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={cobrandoTodo ? cobrarTodo : cobrar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar pago</button>
+            <button type="button" onClick={() => { setCobrando(false); setCobrandoTodo(false); }} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <p className="text-xs uppercase tracking-wide text-teal-500 mb-2">Movimientos</p>
+        {movs === null ? <p className="opacity-60">Cargando…</p> : movs.length === 0 ? <p className="text-teal-400">Todavía no tiene consumos.</p> : (
+          <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+            {movs.map((m) => (
+              <li key={m.id} className="px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="text-xs text-teal-500 w-20">{cuando(m.created_at)}</span>
+                <span className="flex-1 min-w-[8rem] text-teal-100">
+                  {m.tipo === "pago" ? `Pago (${medioCobroLabel(m.medio)})` : `${m.cantidad} × ${m.descripcion}`}
+                  <span className="block text-xs text-teal-500 break-all">{m.cargado_por_email || m.cobrado_por_email}</span>
+                </span>
+                <span className="font-semibold" style={{ color: m.tipo === "pago" ? BRAND.lime : "#fca5a5" }}>{m.tipo === "pago" ? "−" : "+"}{formatoPrecio(m.tipo === "pago" ? m.monto : m.cantidad * m.precio_unitario)}</span>
+                {esDueno && (anulando === m.id ? (
+                  <span className="text-xs text-red-300">¿Anular? <button type="button" disabled={busy} onClick={() => anular(m)} className="font-semibold text-red-400">Sí</button> <button type="button" onClick={() => setAnulando(null)} className="text-teal-400 ml-1">No</button></span>
+                ) : (
+                  <button type="button" onClick={() => setAnulando(m.id)} className="text-xs text-red-400">Anular</button>
+                ))}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Productos del complejo: precio y stock. Los carga y cambia el dueño; el colaborador puede reponer stock. */
+const ICONOS_RUBRO = [["bebidas", "Bebidas"], ["comida", "Comida"], ["indumentaria", "Indumentaria"], ["paletas", "Paletas"], ["pelotas", "Pelotas"], ["accesorios", "Accesorios"], ["otros", "Otros"]];
+const iconoSugerido = (nombre) => (RUBRO_ICONOS[String(nombre || "").trim().toLowerCase()] ? String(nombre).trim().toLowerCase() : "otros");
+
+/* Categorías del mostrador (ver 20261030_talles_codigo_rubros.sql): nombre, ícono y orden. Cambiar
+   el nombre lo cambia también en sus productos; borrarla los deja sin categoría. Solo el dueño. */
+function CategoriasEditor({ complejoId, accessToken, rubrosTabla, productos, onChanged, onCerrar }) {
+  const [nombres, setNombres] = useState({}); // id -> nombre que se está escribiendo
+  const [nueva, setNueva] = useState({ nombre: "", icono: "otros" });
+  const [borrando, setBorrando] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await onChanged(); } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una categoría con ese nombre." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const enUso = (nombre) => productos.filter((p) => p.rubro === nombre).length;
+  // La primera vez: las que ya usan los productos y las sugeridas
+  const armar = () => run(async () => {
+    const lista = [...new Set([...rubrosDe(productos), ...RUBROS_SUGERIDOS])];
+    await supabaseTable("rubros", { method: "POST", body: lista.map((n, i) => ({ complejo_id: complejoId, nombre: n, icono: iconoSugerido(n), orden: i })), accessToken, prefer: "return=minimal" });
+  });
+  const renombrar = (r) => {
+    const nuevo = (nombres[r.id] ?? r.nombre).trim().slice(0, 30);
+    if (!nuevo || nuevo === r.nombre) return;
+    run(async () => {
+      await supabaseTable(`rubros?id=eq.${r.id}`, { method: "PATCH", body: { nombre: nuevo }, accessToken, prefer: "return=minimal" });
+      if (enUso(r.nombre) > 0) await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&rubro=eq.${encodeURIComponent(r.nombre)}`, { method: "PATCH", body: { rubro: nuevo }, accessToken, prefer: "return=minimal" });
+      setNombres((m) => { const x = { ...m }; delete x[r.id]; return x; });
+    });
+  };
+  const mover = (i, d) => {
+    const a = rubrosTabla[i]; const b = rubrosTabla[i + d];
+    if (!a || !b) return;
+    run(async () => {
+      await supabaseTable(`rubros?id=eq.${a.id}`, { method: "PATCH", body: { orden: i + d }, accessToken, prefer: "return=minimal" });
+      await supabaseTable(`rubros?id=eq.${b.id}`, { method: "PATCH", body: { orden: i }, accessToken, prefer: "return=minimal" });
+    });
+  };
+  const borrar = (r) => run(async () => {
+    await supabaseTable(`rubros?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+    if (enUso(r.nombre) > 0) await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&rubro=eq.${encodeURIComponent(r.nombre)}`, { method: "PATCH", body: { rubro: null }, accessToken, prefer: "return=minimal" });
+    setBorrando(null);
+  });
+  const agregar = () => {
+    const nombre = nueva.nombre.trim().slice(0, 30);
+    if (!nombre) return;
+    run(async () => {
+      await supabaseTable("rubros", { method: "POST", body: { complejo_id: complejoId, nombre, icono: nueva.icono, orden: rubrosTabla.length }, accessToken, prefer: "return=minimal" });
+      setNueva({ nombre: "", icono: "otros" });
+    });
+  };
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
+
+  return (
+    <div className="rounded-lg border border-teal-700 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm text-slate-200 font-semibold">Categorías del mostrador</p>
+        <button type="button" onClick={onCerrar} className="text-sm text-slate-400">Cerrar</button>
+      </div>
+      <p className="text-xs text-slate-400">Se muestran en el mostrador en este orden, después de "Más vendidos". Cada una con su ícono.</p>
+      {error && <p className="text-red-400">{error}</p>}
+      {rubrosTabla.length === 0 ? (
+        <button type="button" disabled={busy} onClick={armar} className="px-4 py-2 rounded-lg border border-teal-600 text-slate-100 disabled:opacity-50">Armar la lista con las que ya usás y las sugeridas</button>
+      ) : (
+        <ul className="space-y-2">
+          {rubrosTabla.map((r, i) => (
+            <li key={r.id} className="flex flex-wrap items-center gap-2">
+              <span className="w-8 flex justify-center"><RubroIcono icono={r.icono} rubro={r.nombre} /></span>
+              <select value={r.icono} disabled={busy} onChange={(e) => run(() => supabaseTable(`rubros?id=eq.${r.id}`, { method: "PATCH", body: { icono: e.target.value }, accessToken, prefer: "return=minimal" }))} aria-label={`Ícono de ${r.nombre}`} className="px-2 py-2 rounded-lg border text-sm" style={adminInput}>
+                {ICONOS_RUBRO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <input value={nombres[r.id] ?? r.nombre} onChange={(e) => setNombres({ ...nombres, [r.id]: e.target.value })} onBlur={() => renombrar(r)} onKeyDown={(e) => { if (e.key === "Enter") renombrar(r); }} maxLength={30} aria-label="Nombre de la categoría" className={`flex-1 min-w-[8rem] ${campo}`} style={adminInput} />
+              <span className="text-xs text-slate-500 w-16">{enUso(r.nombre)} prod.</span>
+              <button type="button" disabled={busy || i === 0} onClick={() => mover(i, -1)} className="w-8 h-8 rounded border border-teal-800 text-slate-300 disabled:opacity-30" aria-label="Subir">↑</button>
+              <button type="button" disabled={busy || i === rubrosTabla.length - 1} onClick={() => mover(i, 1)} className="w-8 h-8 rounded border border-teal-800 text-slate-300 disabled:opacity-30" aria-label="Bajar">↓</button>
+              {borrando === r.id ? (
+                <span className="text-xs text-red-300">{enUso(r.nombre) > 0 ? `Sus ${enUso(r.nombre)} productos quedan sin categoría. ` : ""}<button type="button" disabled={busy} onClick={() => borrar(r)} className="font-semibold text-red-400">Borrar</button> <button type="button" onClick={() => setBorrando(null)} className="text-slate-400 ml-1">No</button></span>
+              ) : <button type="button" onClick={() => setBorrando(r.id)} className="text-xs text-slate-400 hover:text-red-300">Borrar</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {rubrosTabla.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-teal-900 pt-3">
+          <select value={nueva.icono} onChange={(e) => setNueva({ ...nueva, icono: e.target.value })} aria-label="Ícono" className="px-2 py-2 rounded-lg border text-sm" style={adminInput}>
+            {ICONOS_RUBRO.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+          <input value={nueva.nombre} onChange={(e) => setNueva({ ...nueva, nombre: e.target.value, icono: nueva.icono === "otros" ? iconoSugerido(e.target.value) : nueva.icono })} onKeyDown={(e) => { if (e.key === "Enter") agregar(); }} maxLength={30} placeholder="Nueva categoría (ej: Snacks)" aria-label="Nueva categoría" className={`flex-1 min-w-[8rem] ${campo}`} style={adminInput} />
+          <button type="button" disabled={busy || !nueva.nombre.trim()} onClick={agregar} className="px-3 py-2 rounded-lg border border-teal-600 text-slate-100 disabled:opacity-40">+ Agregar</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductosConfig({ complejoId, productos, accessToken, esDueno, onChanged }) {
+  const [editando, setEditando] = useState(null); // "nuevo" | producto
+  const [form, setForm] = useState(null);
+  const [reponer, setReponer] = useState({}); // productoId -> cantidad escrita
+  const [reponerTalle, setReponerTalle] = useState({}); // productoId -> talle elegido para reponer
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [rubro, setRubro] = useState("");
+  const [rubrosTabla, setRubrosTabla] = useState([]);
+  const [categorias, setCategorias] = useState(false); // editor de categorías abierto
+  // Costos: los ve y los carga solo el dueño (tabla aparte, ver 20261024_mostrador.sql)
+  const [costos, setCostos] = useState({}); // productoId -> costo
+  const loadCostos = useCallback(async () => {
+    if (!esDueno) return;
+    try {
+      const rows = await supabaseTable(`producto_costos?complejo_id=eq.${encodeURIComponent(complejoId)}&select=producto_id,costo`, { accessToken });
+      setCostos(Object.fromEntries(rows.map((r) => [r.producto_id, Number(r.costo)])));
+    } catch { setCostos({}); }
+  }, [complejoId, accessToken, esDueno]);
+  useEffect(() => { loadCostos(); }, [loadCostos]);
+  const loadRubros = useCallback(async () => {
+    try { setRubrosTabla((await supabaseTable(`rubros?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc`, { accessToken })) || []); } catch { setRubrosTabla([]); }
+  }, [complejoId, accessToken]);
+  useEffect(() => { loadRubros(); }, [loadRubros]);
+
+  const rubros = rubrosDe(productos);
+  const opcionesRubro = [...new Set([...rubrosTabla.map((r) => r.nombre), ...RUBROS_SUGERIDOS, ...rubros])];
+  const abrir = (p) => {
+    const talles = tallesDe(p);
+    setEditando(p || "nuevo");
+    setForm({
+      nombre: p?.nombre || "", rubro: p?.rubro || rubro || "", precio: p ? String(Math.round(p.precio)) : "",
+      costo: p && costos[p.id] != null ? String(Math.round(costos[p.id])) : "",
+      // Los nuevos controlan stock; el mínimo para avisar es 3 si no tiene otro
+      controla: p ? p.stock != null : true,
+      stock: p?.stock != null ? String(p.stock) : "", aviso: p?.aviso_stock != null ? String(p.aviso_stock) : "3", activo: p ? p.activo : true,
+      codigo: p?.codigo || "",
+      conTalles: talles.length > 0,
+      talles: talles.map((t) => ({ talle: t.talle, stock: String(t.stock), codigo: t.codigo || "", stockAntes: String(t.stock) })),
+    });
+    setError("");
+  };
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await onChanged(); await loadCostos(); }
+    catch (e) { setError(e.pgCode === "23505" ? "Ese código ya lo tiene otro producto o talle." : e.code === "elegir_talle" ? "Ese producto tiene talles: reponé eligiendo el talle." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const setTalle = (i, cambio) => setForm((f) => ({ ...f, talles: f.talles.map((t, j) => (j === i ? { ...t, ...cambio } : t)) }));
+  const sumarSugeridos = () => setForm((f) => ({ ...f, talles: [...f.talles, ...TALLES_SUGERIDOS.filter((t) => !f.talles.some((x) => x.talle.trim().toUpperCase() === t)).map((t) => ({ talle: t, stock: "0", codigo: "" }))] }));
+  const guardar = () => {
+    const precio = leerPrecio(form.precio);
+    const costo = form.costo.trim() === "" ? null : leerPrecio(form.costo);
+    if (!form.nombre.trim()) { setError("Poné el nombre."); return; }
+    if (precio == null) { setError("Poné el precio."); return; }
+    const entero = (t) => (String(t).trim() === "" ? null : parseInt(String(t).replace(/[^\d-]/g, ""), 10));
+    const conTalles = form.controla && form.conTalles;
+    const talles = conTalles ? form.talles.map((t, i) => ({ talle: t.talle.trim().slice(0, 10), stock: entero(t.stock) ?? 0, codigo: t.codigo.trim() || null, orden: i, tocado: t.stockAntes == null || t.stock !== t.stockAntes })).filter((t) => t.talle) : [];
+    if (conTalles && talles.length === 0) { setError("Cargá al menos un talle (o destildá \"Tiene talles\")."); return; }
+    if (new Set(talles.map((t) => t.talle.toUpperCase())).size !== talles.length) { setError("Hay talles repetidos."); return; }
+    const body = {
+      nombre: form.nombre.trim(), rubro: form.rubro.trim() || null, precio,
+      stock: form.controla ? (conTalles ? talles.reduce((s, t) => s + t.stock, 0) : entero(form.stock) ?? 0) : null,
+      aviso_stock: form.controla ? entero(form.aviso) ?? 3 : null, activo: form.activo,
+      codigo: conTalles ? null : form.codigo.trim() || null,
+    };
+    // Al editar, el stock solo se manda si se cambió a mano: si no, una venta hecha con el formulario abierto se perdería
+    // (con talles, el total lo calcula la base)
+    const stockAntes = editando !== "nuevo" && editando?.stock != null ? String(editando.stock) : null;
+    if (editando !== "nuevo" && form.controla && stockAntes != null && (conTalles ? tallesDe(editando).length > 0 : form.stock === stockAntes)) delete body.stock;
+    run(async () => {
+      let id = editando?.id;
+      const antes = editando === "nuevo" ? [] : tallesDe(editando).map((t) => t.talle);
+      // Deja de tener talles: se borran antes, así el stock que se carga queda
+      if (!conTalles && antes.length > 0) await supabaseTable(`producto_talles?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      if (editando === "nuevo") {
+        const [p] = await supabaseTable("productos", { method: "POST", body: { ...body, complejo_id: complejoId, orden: productos.length }, accessToken, prefer: "return=representation" });
+        id = p.id;
+      } else await supabaseTable(`productos?id=eq.${id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" });
+      if (conTalles) {
+        const quitados = antes.filter((t) => !talles.some((x) => x.talle === t));
+        if (quitados.length > 0) await supabaseTable(`producto_talles?producto_id=eq.${id}&talle=in.(${quitados.map((t) => `"${t.replace(/"/g, "")}"`).join(",")})`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+        // Los talles nuevos o con stock cambiado a mano se graban enteros; a los demás solo se les actualiza código y orden
+        const sinTocar = talles.filter((t) => !t.tocado && antes.includes(t.talle));
+        const grabar = talles.filter((t) => !sinTocar.includes(t)).map(({ tocado, ...t }) => ({ ...t, producto_id: id, complejo_id: complejoId }));
+        if (grabar.length > 0) await supabaseTable("producto_talles?on_conflict=producto_id,talle", { method: "POST", body: grabar, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+        for (const t of sinTocar) await supabaseTable(`producto_talles?producto_id=eq.${id}&talle=eq.${encodeURIComponent(t.talle)}`, { method: "PATCH", body: { codigo: t.codigo, orden: t.orden }, accessToken, prefer: "return=minimal" });
+      }
+      if (costo != null) await supabaseTable("producto_costos?on_conflict=producto_id", { method: "POST", body: { producto_id: id, complejo_id: complejoId, costo, updated_at: new Date().toISOString() }, accessToken, prefer: "resolution=merge-duplicates,return=minimal" });
+      else if (costos[id] != null) await supabaseTable(`producto_costos?producto_id=eq.${id}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      setEditando(null);
+    });
+  };
+  const sumarStock = (p) => {
+    const n = parseInt(String(reponer[p.id] || "").replace(/[^\d-]/g, ""), 10);
+    if (!n) return;
+    const talles = tallesDe(p);
+    const talle = talles.length > 0 ? reponerTalle[p.id] || talles[0].talle : null;
+    run(async () => {
+      if (talle) await supabaseRpc("sumar_stock_talle", { p_producto: p.id, p_talle: talle, p_cantidad: n }, accessToken);
+      else await supabaseRpc("sumar_stock", { p_producto: p.id, p_cantidad: n }, accessToken);
+      setReponer((r) => ({ ...r, [p.id]: "" }));
+    });
+  };
+  const ganancia = (p) => {
+    const c = costos[p.id];
+    if (c == null) return null;
+    const g = Number(p.precio) - c;
+    return `costo ${formatoPrecio(c)} · gana ${conSigno(g)}${Number(p.precio) > 0 ? ` (${Math.round((g / Number(p.precio)) * 100)}%)` : ""}`;
+  };
+  const visibles = productos.filter((p) => !rubro || p.rubro === rubro);
+  const campo = "px-3 py-2 rounded-lg border text-base min-w-0";
+
+  return (
+    <div className="space-y-3">
+      {error && <p className="text-red-400">{error}</p>}
+      {esDueno && !editando && !categorias && (
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => abrir(null)} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar producto</button>
+          <button type="button" onClick={() => setCategorias(true)} className="px-4 py-2 rounded-lg border border-teal-700 text-slate-200">Categorías</button>
+        </div>
+      )}
+      {categorias && <CategoriasEditor complejoId={complejoId} accessToken={accessToken} rubrosTabla={rubrosTabla} productos={productos} onChanged={async () => { await loadRubros(); await onChanged(); }} onCerrar={() => setCategorias(false)} />}
+      {editando && (
+        <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+          <p className="text-xs text-slate-400">Cada modelo o color va como un producto aparte (ej: "Grip blanco" y "Grip negro"). Los talles van adentro del producto, cada uno con su stock.</p>
+          <div className="grid gap-2 grid-cols-2">
+            <input value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={60} placeholder="Nombre (ej: Agua 500 o Remera Black)" aria-label="Nombre" className={`col-span-2 ${campo}`} style={adminInput} autoFocus />
+            <input list="rubros-productos" value={form.rubro} onChange={(e) => setForm({ ...form, rubro: e.target.value })} maxLength={30} placeholder="Categoría (ej: Bebidas, Indumentaria)" aria-label="Categoría" className={`col-span-2 ${campo}`} style={adminInput} />
+            <datalist id="rubros-productos">{opcionesRubro.map((r) => <option key={r} value={r} />)}</datalist>
+            <label className="text-xs text-teal-400">Precio de venta
+              <input inputMode="numeric" value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} placeholder="$" aria-label="Precio" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
+            <label className="text-xs text-teal-400">Costo (solo lo ves vos)
+              <input inputMode="numeric" value={form.costo} onChange={(e) => setForm({ ...form, costo: e.target.value })} placeholder="$ (opcional)" aria-label="Costo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+            </label>
+            {!(form.controla && form.conTalles) && (
+              <label className="col-span-2 text-xs text-teal-400">Código de barras (opcional)
+                <input value={form.codigo} onChange={(e) => setForm({ ...form, codigo: e.target.value })} maxLength={40} placeholder="Escaneá o escribí el código" aria-label="Código de barras" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+              </label>
+            )}
+            <label className="col-span-2 flex items-start gap-2 text-slate-200">
+              <input type="checkbox" checked={form.controla} onChange={(e) => setForm({ ...form, controla: e.target.checked })} className="mt-1" />
+              <span>Controla stock<span className="block text-xs text-slate-400">Destildalo para lo que se prepara en el momento (papas fritas, tragos): en el mostrador dice "Cocina".</span></span>
+            </label>
+            {form.controla && (
+              <label className="col-span-2 flex items-start gap-2 text-slate-200">
+                <input type="checkbox" checked={form.conTalles} onChange={(e) => setForm({ ...form, conTalles: e.target.checked, talles: e.target.checked && form.talles.length === 0 ? TALLES_SUGERIDOS.map((t) => ({ talle: t, stock: "0", codigo: "" })) : form.talles })} className="mt-1" />
+                <span>Tiene talles<span className="block text-xs text-slate-400">Remeras, shorts, zapatillas: cada talle lleva su stock y su código. En el mostrador se elige el talle.</span></span>
+              </label>
+            )}
+            {form.controla && form.conTalles ? (
+              <div className="col-span-2 space-y-2">
+                <div className="grid grid-cols-[4.5rem_5rem_minmax(0,1fr)_auto] gap-2 text-xs text-slate-400"><span>Talle</span><span>Stock</span><span>Código (opcional)</span><span /></div>
+                {form.talles.map((t, i) => (
+                  <div key={i} className="grid grid-cols-[4.5rem_5rem_minmax(0,1fr)_auto] gap-2 items-center">
+                    <input value={t.talle} onChange={(e) => setTalle(i, { talle: e.target.value })} maxLength={10} aria-label="Talle" className={campo} style={adminInput} />
+                    <input inputMode="numeric" value={t.stock} onChange={(e) => setTalle(i, { stock: e.target.value })} aria-label={`Stock del talle ${t.talle}`} className={campo} style={adminInput} />
+                    <input value={t.codigo} onChange={(e) => setTalle(i, { codigo: e.target.value })} maxLength={40} aria-label={`Código del talle ${t.talle}`} className={campo} style={adminInput} />
+                    <button type="button" onClick={() => setForm((f) => ({ ...f, talles: f.talles.filter((_, j) => j !== i) }))} className="text-slate-400 hover:text-red-300 px-2" aria-label={`Quitar el talle ${t.talle}`}>✕</button>
+                  </div>
+                ))}
+                <div className="flex flex-wrap gap-3 text-sm">
+                  <button type="button" onClick={() => setForm((f) => ({ ...f, talles: [...f.talles, { talle: "", stock: "0", codigo: "" }] }))} className="text-cyan-300">+ Talle</button>
+                  <button type="button" onClick={sumarSugeridos} className="text-slate-400 underline">Sumar S · M · L · XL</button>
+                </div>
+                <label className="block text-xs text-teal-400 max-w-[14rem]">Stock mínimo por talle (avisa en amarillo)
+                  <input inputMode="numeric" value={form.aviso} onChange={(e) => setForm({ ...form, aviso: e.target.value })} placeholder="3" aria-label="Stock mínimo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+                </label>
+              </div>
+            ) : form.controla && (
+              <>
+                <label className="text-xs text-teal-400">Stock
+                  <input inputMode="numeric" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="0" aria-label="Stock" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+                </label>
+                <label className="text-xs text-teal-400">Stock mínimo (avisa en amarillo)
+                  <input inputMode="numeric" value={form.aviso} onChange={(e) => setForm({ ...form, aviso: e.target.value })} placeholder="3" aria-label="Stock mínimo" className={`block w-full mt-1 ${campo}`} style={adminInput} />
+                </label>
+              </>
+            )}
+            <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={form.activo} onChange={(e) => setForm({ ...form, activo: e.target.checked })} /> A la venta</label>
+          </div>
+          {(() => {
+            const pr = leerPrecio(form.precio); const co = form.costo.trim() ? leerPrecio(form.costo) : null;
+            return pr != null && co != null && <p className="text-xs text-teal-300">Ganancia por unidad: {conSigno(pr - co)}{pr > 0 ? ` (${Math.round(((pr - co) / pr) * 100)}%)` : ""}</p>;
+          })()}
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{editando === "nuevo" ? "Agregar" : "Guardar"}</button>
+            <button type="button" onClick={() => setEditando(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+      {rubros.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {[["", "Todos"], ...rubros.map((r) => [r, r])].map(([k, l]) => (
+            <button key={k || "todos"} type="button" onClick={() => setRubro(k)} className={`px-3 py-1.5 rounded-full border text-sm ${rubro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+          ))}
+        </div>
+      )}
+      {productos.length === 0 ? <p className="text-teal-400">Todavía no hay productos.</p> : (
+        <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
+          {visibles.map((p) => {
+            const talles = tallesDe(p);
+            return (
+              <li key={p.id} className={`px-3 py-2 flex flex-wrap items-center gap-2 ${p.activo ? "" : "opacity-60"}`}>
+                <span className="flex-1 min-w-[8rem]">
+                  <span className="block text-teal-100 font-semibold">{p.nombre}{!p.activo && <span className="text-xs text-teal-500 font-normal"> · no está a la venta</span>}</span>
+                  <span className="block text-xs text-teal-400">
+                    {p.rubro && !rubro && <span className="text-teal-500">{p.rubro} · </span>}
+                    {formatoPrecio(p.precio)} · {p.stock == null ? "no controla stock (Cocina)" : <span className={pocoStock(p) ? "text-amber-300" : ""}>quedan {p.stock}</span>}
+                    {p.codigo && <span className="text-teal-600"> · código {p.codigo}</span>}
+                  </span>
+                  {talles.length > 0 && (
+                    <span className="block text-xs text-slate-400">
+                      {talles.map((t, i) => <span key={t.talle}>{i > 0 && " · "}<span className={Number(t.stock) <= 0 ? "text-red-300" : Number(t.stock) <= minimoStock(p) ? "text-amber-300" : ""}>{t.talle} {t.stock}</span></span>)}
+                    </span>
+                  )}
+                  {esDueno && ganancia(p) && <span className="block text-xs text-teal-500">{ganancia(p)}</span>}
+                </span>
+                {p.stock != null ? (
+                  <>
+                    {talles.length > 0 && (
+                      <select value={reponerTalle[p.id] || talles[0].talle} onChange={(e) => setReponerTalle({ ...reponerTalle, [p.id]: e.target.value })} aria-label={`Talle a reponer de ${p.nombre}`} className="px-2 py-1.5 rounded border text-sm" style={adminInput}>
+                        {talles.map((t) => <option key={t.talle} value={t.talle}>{t.talle}</option>)}
+                      </select>
+                    )}
+                    <input inputMode="numeric" value={reponer[p.id] || ""} onChange={(e) => setReponer({ ...reponer, [p.id]: e.target.value })} placeholder="+ cant." aria-label={`Reponer ${p.nombre}`} className="w-20 px-2 py-1.5 rounded border text-sm" style={adminInput} />
+                    <button type="button" disabled={busy || !reponer[p.id]} onClick={() => sumarStock(p)} className="text-xs text-lime-400 disabled:opacity-40">Sumar stock</button>
+                  </>
+                ) : esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-lime-400">Controlar stock</button>}
+                {esDueno && <button type="button" onClick={() => abrir(p)} className="text-xs text-teal-300 underline">Editar</button>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Avisos de horarios por WhatsApp (solo torneos clásicos) ---------- */
+
+/* Firma corta de un mensaje: si cambia, cambió algo de los horarios de esa pareja */
+function firmaTexto(texto) {
+  let h = 5381;
+  for (let i = 0; i < texto.length; i++) h = ((h << 5) + h + texto.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+
+/* A quién ya se le avisó y con qué mensaje (en este navegador): { [parejaId]: firma } */
+const avisosKey = (torneoId) => `sp:avisos:${torneoId}`;
+function leerAvisos(torneoId) {
+  try { return JSON.parse(localStorage.getItem(avisosKey(torneoId)) || "{}"); } catch { return {}; }
+}
+function guardarAvisos(torneoId, avisos) {
+  try { localStorage.setItem(avisosKey(torneoId), JSON.stringify(avisos)); } catch {}
+}
+
+/* Mensaje de una pareja con sus próximos partidos (los que tienen día y hora y todavía no se jugaron) */
+function mensajeHorarios(tournament, category, pair, partidos, pairsById) {
+  const lineas = partidos.map((m) => {
+    const rivalId = m.pairA === pair.id ? m.pairB : m.pairA;
+    const rival = pairsById[rivalId]?.name || (m.placeholder ? "a definir" : "a definir");
+    return `• ${formatDateShort(m.schedule.date)} · ${formatHour(m.schedule.time)}${m.schedule.court ? ` · ${courtName(tournament, m.schedule.court)}` : ""} · vs ${rival} (${m.label})`;
+  });
+  return `Hola ${pair.name}! 🎾 Tus horarios en ${tournament.name} (${category.name}):\n${lineas.join("\n")}\n¡Los esperamos! Si hay algún cambio, les avisamos por acá.`;
+}
+
+function AvisosPanel({ tournament, inscripciones = [] }) {
+  const [avisos, setAvisos] = useState(() => leerAvisos(tournament.id));
+  const [filtro, setFiltro] = useState("pendientes"); // pendientes | todas
+  const [categoriaId, setCategoriaId] = useState("todas");
+  const [telefonos, setTelefonos] = useState({}); // WhatsApp escrito a mano para parejas cargadas sin inscripción (no se guarda)
+  const [copiado, setCopiado] = useState(null);
+
+  // Partidos con día y hora que todavía no se jugaron (sin llaves en borrador)
+  const partidos = collectScheduleableMatches(tournament).filter((m) => m.schedule?.date && m.schedule?.time && !m.draft && !m.walkover && !m.retired && !(m.sets || []).length);
+  const filas = tournament.categories.flatMap((c) => {
+    const pairsById = Object.fromEntries((c.pairs || []).map((p) => [p.id, p]));
+    return (c.pairs || []).map((pair) => {
+      const suyos = partidos.filter((m) => m.categoryId === c.id && (m.pairA === pair.id || m.pairB === pair.id))
+        .sort((a, b) => `${a.schedule.date} ${a.schedule.time}`.localeCompare(`${b.schedule.date} ${b.schedule.time}`));
+      const mensaje = suyos.length ? mensajeHorarios(tournament, c, pair, suyos, pairsById) : null;
+      const firma = mensaje ? firmaTexto(mensaje) : null;
+      const enviado = avisos[pair.id];
+      const estado = !mensaje ? "sin_horario" : !enviado ? "sin_avisar" : enviado === firma ? "avisado" : "cambio";
+      const telefono = inscripciones.find((i) => i.id === pair.inscripcionId)?.telefono || normalizeArPhone(telefonos[pair.id]) || null;
+      return { c, pair, suyos, mensaje, firma, estado, telefono };
+    });
+  });
+  const conHorario = filas.filter((f) => f.estado !== "sin_horario");
+  const avisadas = conHorario.filter((f) => f.estado === "avisado").length;
+  const cambios = conHorario.filter((f) => f.estado === "cambio").length;
+  const visibles = filas.filter((f) => (categoriaId === "todas" || f.c.id === categoriaId) && (filtro === "todas" || f.estado === "sin_avisar" || f.estado === "cambio"));
+
+  const marcar = (f) => {
+    const next = { ...avisos, [f.pair.id]: f.firma };
+    setAvisos(next);
+    guardarAvisos(tournament.id, next);
+  };
+  const copiar = async (f) => {
+    try { await navigator.clipboard.writeText(f.mensaje); setCopiado(f.pair.id); setTimeout(() => setCopiado(null), 2000); } catch {}
+    marcar(f);
+  };
+  const desmarcar = (f) => {
+    const { [f.pair.id]: _, ...rest } = avisos;
+    setAvisos(rest);
+    guardarAvisos(tournament.id, rest);
+  };
+  const ESTADOS = { sin_avisar: ["Sin avisar", "#fbbf24"], avisado: ["Avisado ✓", BRAND.lime], cambio: ["Cambió el horario: volver a avisar", "#f87171"], sin_horario: ["Todavía sin horarios", "#64748b"] };
+  const pill = (activo, onClick, label) => (
+    <button type="button" onClick={onClick} className={`shrink-0 px-3 py-1 rounded-full text-sm border ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+
+  if (partidos.length === 0) {
+    return <p className="text-sm text-teal-300" style={F.body}>Todavía no hay partidos con día y hora. Armá los horarios en la pestaña Horarios y volvé acá para avisarle a cada pareja.</p>;
+  }
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="rounded-xl p-3 flex flex-wrap gap-x-6 gap-y-1" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
+        <span className="text-teal-200"><span className="text-lime-400 font-semibold">{avisadas}</span> de {conHorario.length} parejas avisadas</span>
+        {cambios > 0 && <span className="text-red-300 font-semibold">{cambios} con horarios cambiados</span>}
+      </div>
+      <p className="text-xs text-teal-500">El mensaje lleva los próximos partidos de cada pareja. Al tocar WhatsApp o Copiar queda marcada como avisada; si después le cambiás un horario, vuelve a aparecer para avisarle de nuevo. Lo marcado se guarda en este celular o compu.</p>
+      <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+        {pill(filtro === "pendientes", () => setFiltro("pendientes"), "Por avisar")}
+        {pill(filtro === "todas", () => setFiltro("todas"), "Todas")}
+        {tournament.categories.length > 1 && <>
+          <span className="w-px bg-teal-800 shrink-0" />
+          {pill(categoriaId === "todas", () => setCategoriaId("todas"), "Todas las categorías")}
+          {tournament.categories.map((c) => pill(categoriaId === c.id, () => setCategoriaId(c.id), c.name))}
+        </>}
+      </div>
+      {visibles.length === 0 ? (
+        <p className="text-lime-400">{filtro === "pendientes" ? "¡Listo! No queda nadie por avisar." : "No hay parejas."}</p>
+      ) : (
+        <ul className="space-y-2">
+          {visibles.map((f) => {
+            const [label, color] = ESTADOS[f.estado];
+            return (
+              <li key={f.pair.id} className="rounded-lg border border-teal-900 p-3 space-y-2">
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="flex-1 min-w-[10rem]">
+                    <p className="text-teal-100 font-semibold">{f.pair.name}</p>
+                    <p className="text-xs text-teal-500">{f.c.name}{f.telefono ? ` · ${formatArPhone(f.telefono)}` : ""}</p>
+                  </div>
+                  <span className="text-xs font-semibold" style={{ color }}>● {label}</span>
+                </div>
+                {f.suyos.length > 0 && (
+                  <ul className="text-xs text-teal-300 space-y-0.5">
+                    {f.suyos.map((m) => {
+                      const rivalId = m.pairA === f.pair.id ? m.pairB : m.pairA;
+                      const rival = (f.c.pairs || []).find((p) => p.id === rivalId)?.name || "a definir";
+                      return <li key={m.key}>{formatDateShort(m.schedule.date)} · {formatHour(m.schedule.time)}{m.schedule.court ? ` · ${courtName(tournament, m.schedule.court)}` : ""} · vs {rival} <span className="text-teal-500">({m.label})</span></li>;
+                    })}
+                  </ul>
+                )}
+                {f.mensaje && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {f.telefono ? (
+                      <a href={waLink(f.telefono, f.mensaje)} target="_blank" rel="noopener noreferrer" onClick={() => marcar(f)} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Avisar por WhatsApp</a>
+                    ) : (
+                      <input type="tel" value={telefonos[f.pair.id] || ""} onChange={(e) => setTelefonos({ ...telefonos, [f.pair.id]: e.target.value })} placeholder="WhatsApp (no se guarda)" aria-label={`WhatsApp de ${f.pair.name}`} className="w-48 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+                    )}
+                    <button type="button" onClick={() => copiar(f)} className="px-3 py-1.5 rounded-lg border border-teal-700 text-teal-200">{copiado === f.pair.id ? "¡Copiado!" : "Copiar mensaje"}</button>
+                    {f.estado === "avisado" && <button type="button" onClick={() => desmarcar(f)} className="text-xs text-teal-500 underline">marcar sin avisar</button>}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
-  const update = (t) => save({ ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) });
+  // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
+  // colaborador que solo carga resultados no puede guardar el torneo entero, así que eso queda para el dueño
+  // Pago por torneo: cuántos créditos le quedan al organizador para publicar este (ver 20261036_creditos.sql)
+  const { filas: planFilas, recargar: recargarPlan } = React.useContext(MiPlanContext);
+  const [avisoPublico, setAvisoPublico] = useState("");
+  const creditos = (() => {
+    const f = planFilas.find((x) => x.tipo === "organizador" && x.modo === "por_torneo" && x.ref_id === tournament.organizerId);
+    if (!f) return null;
+    const corto = ["americano", "super8"].includes(tournamentType(tournament));
+    return { corto, pagado: (f.torneos_pagados || []).includes(tournament.id), disponibles: (f.creditos_torneo || 0) + (corto ? f.creditos_corto || 0 : 0) };
+  })();
+  const update = (t) => {
+    const next = { ...t, categories: (t.categories || []).map((c) => withAutoBracket(t, c)) };
+    save(soloResultados ? next : withAutoStatus(next));
+  };
+  // Al abrir el torneo ya empezado (o terminado), se guarda el estado al día
+  useEffect(() => {
+    if (soloResultados) return;
+    const auto = withAutoStatus(tournament);
+    if (auto.status !== tournament.status || auto.inscripcionesAbiertas !== tournament.inscripcionesAbiertas) save(auto);
+  }, [tournament, soloResultados]); // eslint-disable-line react-hooks/exhaustive-deps
   const usesSchedule = tournamentUsesSchedule(tournament);
   const pendingCount = inscripciones.filter((i) => i.estado === "pendiente").length;
   // Pestañas en el orden en que se organiza un torneo. El Súper 8 no tiene grupos, llave ni grilla
   // de horarios: sus partidos van en "Partidos".
-  const tabs = usesSchedule
-    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["llaves", "Llaves"], ["encancha", "En cancha"]]
-    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"]];
+  // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
+  const allTabs = usesSchedule
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
+    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : [])];
+  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
-    if (tournament.status === STATUS.EN_CURSO) return usesSchedule ? "encancha" : "partidos";
+    if (tournamentStatusOf(tournament) === STATUS.EN_CURSO) return usesSchedule ? "encancha" : "partidos";
     if (pendingCount > 0) return "inscripciones";
     if (tournament.categories.length === 0 || (usesSchedule && (tournament.playDates || []).length === 0)) return "config";
     return usesSchedule ? "horarios" : "inscripciones";
   });
-  const view = tabs.some(([key]) => key === chosenView) ? chosenView : "config";
+  const view = tabs.some(([key]) => key === chosenView) ? chosenView : tabs[0][0];
   // Avance y avisos para la tira de resumen y las marcas ✓ / ⚠ de las pestañas
   const alertsCount = useMemo(() => (usesSchedule ? scheduleAlerts(tournament, collectScheduleableMatches(tournament)).alerts.length : 0), [tournament, usesSchedule]);
   const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
@@ -8983,7 +16331,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
   return (
     <CourtNamesContext.Provider value={tournament}>
       {/* La planilla de Horarios necesita más ancho (y Sin horario al costado) */}
-      <div className={`px-6 py-8 mx-auto ${view === "horarios" ? "max-w-7xl" : "max-w-4xl"}`}>
+      <div className={`${enPanel ? "" : "px-6 py-8 mx-auto"} ${view === "horarios" ? "max-w-7xl" : "max-w-4xl"}`}>
         <button onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-2" style={F.body}>← Mis torneos</button>
         <div className="flex justify-between items-center flex-wrap gap-3 mb-1">
           <h1 className="text-xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
@@ -9032,9 +16380,36 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
 
         {view === "config" && (
           <>
+            <div className="mb-5 rounded-xl border p-4" style={{ borderColor: esPublico(tournament) ? "#9fe02266" : "#475569", backgroundColor: "rgba(8,18,24,0.5)" }}>
+              <Toggle
+                checked={esPublico(tournament)}
+                onChange={(v) => {
+                  if (v && creditos && !creditos.pagado && creditos.disponibles === 0) { setAvisoPublico("No te quedan torneos para publicar. Escribinos a smashpoint.arg@gmail.com para sumar uno."); return; }
+                  setAvisoPublico("");
+                  update({ ...tournament, publico: v });
+                  if (v && creditos && !creditos.pagado) setTimeout(recargarPlan, 2500); // el crédito se descuenta al guardar
+                }}
+                label="Torneo público"
+                description={esPublico(tournament) ? "Se ve en la página pública: portada, horarios, grupos y llaves." : "No se ve en la página pública. Solo vos lo ves en tu panel (las inscripciones online tampoco se pueden usar)."}
+              />
+              {creditos && (
+                <p className="text-xs mt-2" style={{ ...F.body, color: creditos.pagado ? "#9fe022" : creditos.disponibles > 0 ? "#38bdf8" : "#fbbf24" }}>
+                  {creditos.pagado ? "Este torneo ya está pago: lo podés ocultar y volver a publicar sin gastar otro."
+                    : esPublico(tournament) ? "Ya estaba público, así que no gasta. Si lo ocultás, volver a publicarlo usa un torneo de los tuyos."
+                    : `Pagás por torneo: ${creditos.disponibles > 0 ? `publicarlo usa 1 de tus ${creditos.disponibles} disponible${creditos.disponibles === 1 ? "" : "s"}` : "no te quedan torneos disponibles"}${creditos.corto && creditos.disponibles > 0 ? " (Americano / Súper 8: usa primero uno corto)" : ""}.`}
+                </p>
+              )}
+              {avisoPublico && <p role="alert" className="text-xs mt-2 text-amber-300" style={F.body}>{avisoPublico}</p>}
+            </div>
             <TournamentTypeEditor tournament={tournament} update={update} />
             <CategoriesSettings
               tournament={tournament} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory}
+              onPrecioTorneo={(precio) => { const { precioJugador: _, ...rest } = tournament; update(precio == null ? rest : { ...rest, precioJugador: precio }); }}
+              onPrecioCategoria={(id, precio) => setCategories(tournament.categories.map((c) => {
+                if (c.id !== id) return c;
+                const { precioJugador: _, ...rest } = c;
+                return precio == null ? rest : { ...rest, precioJugador: precio };
+              }))}
               onCupo={(id, cupo) => setCategories(tournament.categories.map((c) => {
                 if (c.id !== id) return c;
                 const { cupo: _, ...rest } = c;
@@ -9043,6 +16418,14 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
             />
             {usesSchedule && <CourtsAndDatesEditor tournament={tournament} onChange={update} />}
           </>
+        )}
+
+        {view === "avisos" && usesSchedule && (
+          <AvisosPanel tournament={tournament} inscripciones={inscripciones} />
+        )}
+
+        {view === "cobros" && cobros && (
+          <CobrosPanel tournament={tournament} inscripciones={inscripciones} accessToken={cobros.accessToken} organizerId={cobros.organizerId} esDueno={cobros.esDueno} complejoIds={cobros.complejoIds} />
         )}
 
         {view === "inscripciones" && (
@@ -9067,7 +16450,7 @@ function AdminTournament({ tournament, update: save, onBack, inscripciones = [],
                 : tournament.categories.length > 1 && <CategoryTabs categories={tournament.categories} activeId={category?.id} onSelect={setCategoryId} />}
               {category && (
                 <CategoryAdminView
-                  key={category.id} category={category} format={tournament.matchFormat} playDates={tournament.playDates} tournament={tournament}
+                  key={category.id} category={category} format={tournament.matchFormat} tournament={tournament}
                   onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update}
                   section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]}
                 />
@@ -9221,7 +16604,7 @@ function useTournamentSaver(session, setTournaments, setSaveNotice) {
           if (changes && err.pgCode === "PGRST202") { partidosEnabled.current = false; pending.current[id] = pending.current[id] || mine; continue; }
           if (err.pgCode === "PGRST202") { await saveWholeList().catch(() => {}); continue; }
           pending.current[id] = pending.current[id] || mine; // se reintenta con el próximo cambio
-          setSaveNotice(err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
+          setSaveNotice(err.code === "sin_creditos" ? "No te quedan torneos para publicar. Escribinos a smashpoint.arg@gmail.com para sumar uno." : err.code === "plan_vencido" ? "Tu plan está vencido: no se pueden crear torneos nuevos. Escribinos a smashpoint.arg@gmail.com para renovarlo." : err.code === "no_autorizado" ? "No tenés permiso para guardar este torneo." : "No se pudo guardar el último cambio. Revisá la conexión: se vuelve a intentar con el próximo cambio.");
           return;
         }
         if (changes && res?.estado === "ok") {
@@ -9311,11 +16694,53 @@ function SmashPointAppInner() {
   const [venues, setVenues] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [events, setEvents] = useState([]);
-  const [route, setRoute] = useState("public-home");
+  // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
+  const [complejos, setComplejos] = useState([]);
+  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS); // funciones en prueba prendidas (ver FuncionesContext)
+  const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
+  const [adsOcultas, setAdsOcultas] = useState([]); // publicidades con el cliente vencido o de baja (ver publicidades_ocultas)
+  const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
+  const [route, setRoute] = useState(() => routeFromHash() || "public-home");
+  const [avisoCuenta, setAvisoCuenta] = useState(null); // "Tu cuenta quedó confirmada", etc.
+  // #complejo (el link viejo de empleados) abre Mi cuenta
+  useEffect(() => {
+    const onHash = () => { const r = routeFromHash(); if (r) { setRoute(r); window.scrollTo(0, 0); } };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
+  // El plan propio (lo administra el creador): carteles, solo lectura y créditos por torneo
+  const [misPlanes, setMisPlanes] = useState([]);
+  const recargarPlan = useCallback(() => {
+    if (!session?.accessToken || session.role === "creador") { setMisPlanes([]); return; }
+    supabaseRpc("mi_plan", {}, session.accessToken).then((rows) => setMisPlanes(rows || [])).catch(() => {});
+  }, [session?.accessToken, session?.role]);
+  useEffect(() => { recargarPlan(); }, [recargarPlan]);
+  const planCtx = useMemo(() => ({ filas: misPlanes, recargar: recargarPlan }), [misPlanes, recargarPlan]);
   const [saveNotice, setSaveNotice] = useState(null);
   const saver = useTournamentSaver(session, setTournaments, setSaveNotice);
+  const jugadorApi = useJugador();
+
+  /* Llegó desde un link del mail: confirmar la cuenta (entra y va a Mi cuenta) o elegir una
+     contraseña nueva. Si el link venció, a la entrada con el aviso. */
+  const linkProcesado = useRef(false);
+  useEffect(() => {
+    if (!LINK_DE_MAIL || linkProcesado.current) return;
+    linkProcesado.current = true;
+    if (LINK_DE_MAIL.error) { setAvisoCuenta("El link del mail ya venció o ya se usó. Ingresá o pedí uno nuevo."); setRoute("login"); return; }
+    (async () => {
+      try {
+        const user = await supabaseGetUser(LINK_DE_MAIL.auth.access_token);
+        await jugadorApi.login({ ...LINK_DE_MAIL.auth, user });
+        if (LINK_DE_MAIL.tipo === "recovery") setRoute("nueva-clave");
+        else { setAvisoCuenta("¡Listo! Tu cuenta quedó confirmada."); setRoute("cuenta"); }
+      } catch {
+        setAvisoCuenta("El link del mail ya venció o ya se usó. Ingresá o pedí uno nuevo.");
+        setRoute("login");
+      }
+    })();
+  }, [jugadorApi]);
 
   useEffect(() => {
     (async () => {
@@ -9337,8 +16762,9 @@ function SmashPointAppInner() {
           if (tours === null) tours = await kvGet(STORAGE_KEY_TOURNAMENTS);
         } catch { tours = null; }
         if (!Array.isArray(tours)) {
-          const firstOrganizer = orgs.find((o) => o.role === "organizador") || orgs[0] || { id: "sin-organizador" };
-          tours = seedTournaments(firstOrganizer.id);
+          // Sin conexión o la base no respondió: lista vacía y aviso (nunca torneos de ejemplo, que se podrían guardar)
+          tours = [];
+          setSaveNotice("No se pudieron cargar los torneos. Revisá la conexión y recargá la página.");
         } else {
           tours = normalizeLoadedTournaments(tours);
         }
@@ -9363,6 +16789,10 @@ function SmashPointAppInner() {
         let loadedEvents;
         try { loadedEvents = await kvGet(STORAGE_KEY_EVENTS); } catch { loadedEvents = null; }
         setEvents(Array.isArray(loadedEvents) ? loadedEvents : []);
+        fetchComplejosReserva().then(setComplejos); // solo lo usan los paneles: no frena la portada
+        fetchFunciones().then(setFunciones);
+        supabaseRpc("cuentas_suspendidas", {}).then((rows) => setSuspendidos(rows || [])).catch(() => {});
+        supabaseRpc("publicidades_ocultas", {}).then((rows) => setAdsOcultas((rows || []).map((r) => (typeof r === "string" ? r : r.publicidades_ocultas)))).catch(() => {});
 
         // Sesión guardada en este navegador: se renueva y se vuelve a la pantalla en la que estaba
         const stored = readStoredAuth();
@@ -9384,7 +16814,9 @@ function SmashPointAppInner() {
               setSession(restored);
               const home = profile.role === "creador" ? "creator-home" : "admin-home";
               const canResume = stored.route === "admin-tournament" && profile.role !== "creador" && tours.some((t) => t.id === stored.selectedId && t.organizerId === profile.id);
-              setRoute(canResume ? "admin-tournament" : home);
+              // Con #complejo o #privacidad en la dirección se queda en esa pantalla; si se entró por el link de un mail
+              // (contraseña nueva, confirmación), manda ese link
+              if (!routeFromHash() && !LINK_DE_MAIL) setRoute(canResume ? "admin-tournament" : home);
               if (canResume) setSelectedId(stored.selectedId);
             } else {
               writeStoredAuth(null);
@@ -9449,7 +16881,7 @@ function SmashPointAppInner() {
   // Recuerda en qué pantalla del panel estaba, para volver ahí al recargar
   useEffect(() => {
     const current = readStoredAuth();
-    if (session && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
+    if (session && session.role !== "colaborador" && current?.refreshToken) writeStoredAuth({ ...current, route, selectedId });
   }, [session, route, selectedId]);
 
   const startSession = (org) => {
@@ -9457,11 +16889,94 @@ function SmashPointAppInner() {
     setSession(org);
     setRoute(org.role === "creador" ? "creator-home" : "admin-home");
   };
+  // Cerrar sesión cierra todo: la cuenta (useJugador) y, si estaba abierto, el panel de organizador
   const endSession = () => {
-    writeStoredAuth(null);
+    olvidarPanelComplejo();
+    jugadorApi.logout();
+    if (session?.role !== "colaborador") writeStoredAuth(null);
     setSession(null);
+    setAvisoCuenta(null);
     setRoute("public-home");
   };
+
+  /* Después de ingresar con mail y contraseña: el organizador va a su panel (con su propia sesión,
+     que se renueva aparte); quien trabaja en un complejo, a Mi cuenta para elegir; el resto, al sitio. */
+  const despuesDeEntrar = async (j, password) => {
+    setAvisoCuenta(null);
+    const perfil = organizers.find((o) => o.id === j.id);
+    if (perfil && password) {
+      try {
+        startSession({ ...perfil, ...authFields(await supabaseSignIn(j.email, password)) });
+        return;
+      } catch {}
+    }
+    if (perfil) { setRoute("cuenta"); return; }
+    let rows = [];
+    try { rows = (await supabaseRpc("mis_complejos_colaborador", {}, j.accessToken)) || []; } catch {}
+    setRoute(rows.length > 0 ? "cuenta" : "public-home");
+  };
+
+  /* Colaborador de un complejo: trabaja en el panel en nombre del dueño (session.id es el del dueño,
+     así ve y crea los torneos a su nombre) con su propio token y sus permisos; la base controla qué
+     puede hacer (ver 20261017_colaboradores_permisos.sql). La sesión es la de su cuenta
+     (useJugador): no usa la renovación de los organizadores (sin expiresAt ni refreshToken). */
+  const entrarComoColaborador = (c) => {
+    const j = jugadorApi.jugador;
+    if (!j) return;
+    const owner = organizers.find((o) => o.id === c.dueno_id);
+    const venue = venues.find((v) => v.id === c.complejo_id);
+    // Arriba del panel va el complejo donde trabaja (con su logo), no el nombre del dueño
+    setSession({
+      id: c.dueno_id,
+      name: venue?.name || owner?.name || "Complejo",
+      logoUrl: venue?.logoUrl || owner?.logoUrl || "",
+      coverUrl: owner?.coverUrl || "",
+      role: "colaborador",
+      accessToken: j.accessToken,
+      email: j.email,
+      complejoId: c.complejo_id,
+      permisos: { agenda: c.p_agenda, resultados: c.p_resultados, torneos: c.p_torneos, canchas: c.p_canchas, consumos: !!c.p_consumos },
+    });
+    setRoute("admin-home");
+    try { localStorage.setItem(PANEL_COMPLEJO_KEY, c.complejo_id); } catch {}
+  };
+  // Al recargar, el empleado vuelve al panel del complejo en el que estaba (si sigue habilitado ahí)
+  const panelRestaurado = useRef(false);
+  useEffect(() => {
+    const j = jugadorApi.jugador;
+    if (!ready || !j || session || panelRestaurado.current) return;
+    let id = null;
+    try { id = localStorage.getItem(PANEL_COMPLEJO_KEY); } catch {}
+    // Espera a que carguen los complejos: el panel arma su menú con ellos
+    if (id && !complejos.some((x) => x.id === id)) return;
+    panelRestaurado.current = true;
+    if (!id || route !== "public-home") return;
+    (async () => {
+      try {
+        const c = ((await supabaseRpc("mis_complejos_colaborador", {}, await jugadorApi.token())) || []).find((r) => r.complejo_id === id);
+        if (c) entrarComoColaborador(c); else olvidarPanelComplejo();
+      } catch {}
+    })();
+  }, [ready, jugadorApi.jugador, session, complejos]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Del panel a Mi cuenta (reservar u otro panel): el empleado sale del panel; el organizador lo deja abierto
+  const irAMiCuenta = () => {
+    if (session?.role === "colaborador") { olvidarPanelComplejo(); setSession(null); }
+    setRoute("cuenta");
+  };
+  // El token del colaborador se renueva con el del jugador; si cierra esa sesión, sale del panel
+  useEffect(() => {
+    if (session?.role !== "colaborador") return;
+    const j = jugadorApi.jugador;
+    if (!j) { setSession(null); setRoute("cuenta"); return; }
+    if (j.accessToken !== session.accessToken) setSession((cur) => (cur ? { ...cur, accessToken: j.accessToken } : cur));
+  }, [jugadorApi.jugador, session]);
+  useEffect(() => {
+    if (session?.role !== "colaborador") return;
+    const t = setInterval(() => { jugadorApi.token().catch(() => {}); }, 5 * 60000);
+    const onVisible = () => { if (document.visibilityState === "visible") jugadorApi.token().catch(() => {}); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVisible); };
+  }, [session?.role, jugadorApi]);
 
   const persistAds = useCallback(async (next) => {
     setAds(next);
@@ -9482,6 +16997,10 @@ function SmashPointAppInner() {
   const upsertById = (list, item) => (list.some((x) => x.id === item.id) ? list.map((x) => (x.id === item.id ? item : x)) : [...list, item]);
   const saveVenue = (v) => persistVenues(upsertById(venues, v));
   const deleteVenue = (id) => persistVenues(venues.filter((v) => v.id !== id));
+  const saveComplejo = async (row) => {
+    const [saved] = await supabaseTable("complejos?on_conflict=id", { method: "POST", body: row, accessToken: session?.accessToken, prefer: "resolution=merge-duplicates,return=representation" });
+    setComplejos((list) => upsertById(list, saved));
+  };
   const persistEvents = useCallback(async (next) => {
     setEvents(next);
     try { await kvSet(STORAGE_KEY_EVENTS, next, session?.accessToken); } catch {}
@@ -9639,7 +17158,7 @@ function SmashPointAppInner() {
 
   // extra: datos de un torneo creado adentro de un evento (eventId y hora de inicio)
   const createTournament = ({ name, date, circuitId, config, categories, schedule, inscripcionesAbiertas, extra }) => {
-    const base = { id: uid(), name, date, status: STATUS.PROXIMO, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: DEFAULT_MATCH_DURATION, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
+    const base = { id: uid(), name, date, status: STATUS.PROXIMO, publico: false, organizerId: session.id, coverImageUrl: "", venue: "", circuitId: circuitId || null, matchFormat: { ...DEFAULT_MATCH_FORMAT }, courtsCount: 4, matchDurationMinutes: DEFAULT_MATCH_DURATION, playDates: [], categories: [], inscripcionesAbiertas: !!inscripcionesAbiertas, ...(schedule || {}), ...(extra || {}) };
     const categoryFormat = categoryFormatForConfig(config);
     const newCategories = categories.map(({ name: n, cupo }) => ({ ...newCategory(n, categoryFormat), ...(cupo ? { cupo } : {}) }));
     const t = withTournamentConfig({ ...base, categories: newCategories }, config);
@@ -9729,6 +17248,15 @@ function SmashPointAppInner() {
 
   const selected = tournaments.find((t) => t.id === selectedId) || null;
   const myTournaments = session ? tournaments.filter((t) => t.organizerId === session.id) : [];
+  // La página pública no muestra lo suspendido por el creador (ver cuentas_suspendidas)
+  const suspendido = (tipo, ref) => suspendidos.some((x) => x.tipo === tipo && x.ref_id === ref);
+  const publicTournaments = tournaments.filter((t) => esPublico(t) && !suspendido("organizador", t.organizerId));
+  const publicOrganizers = organizers.filter((o) => !suspendido("organizador", o.id));
+  const publicAds = ads.filter((a) => !motivoPublicidadOculta(a, hoyArgentina(), adsOcultas));
+  // Con Reservas o Cantina apagadas (funciones en prueba), los complejos quedan como sin esos módulos.
+  // El creador ve los valores reales (los edita en la ficha del complejo).
+  const complejosApp = complejos.map((c) => ({ ...c, modulo_reservas: c.modulo_reservas !== false && funciones.reservas, modulo_cantina: c.modulo_cantina !== false && funciones.cantina }));
+  const publicComplejos = complejosApp.filter((c) => !suspendido("complejo", c.id) && !suspendido("organizador", c.dueno_id));
   const myCircuits = session ? circuits.filter((c) => c.organizerId === session.id) : [];
 
   let content;
@@ -9736,8 +17264,8 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
-  } else if (route === "public-tournament" && selected) {
+    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+  } else if (route === "public-tournament" && selected && (esPublico(selected) || session?.role === "creador" || selected.organizerId === session?.id)) {
     showFooterAds = true;
     content = isInfoOnly(selected)
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
@@ -9745,7 +17273,34 @@ function SmashPointAppInner() {
         ? <LoadingTournament />
         : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
   } else if (route === "login") {
-    content = <Login onBack={() => setRoute("public-home")} onLogin={startSession} />;
+    content = <Login jugadorApi={jugadorApi} aviso={avisoCuenta} onEntro={despuesDeEntrar} onBack={() => { setAvisoCuenta(null); setRoute("public-home"); }} />;
+  } else if (route === "nueva-clave" && jugadorApi.jugador) {
+    content = (
+      <div className="min-h-[75vh] flex items-center justify-center px-6 py-8">
+        <div className="w-full max-w-sm border border-teal-800 rounded-xl p-6 bg-teal-950/40">
+          <h1 className="text-lg font-semibold mb-3" style={F.body}>Contraseña nueva</h1>
+          <NuevaClave jugadorApi={jugadorApi} onListo={despuesDeEntrar} />
+        </div>
+      </div>
+    );
+  } else if (route === "privacidad") {
+    content = <PrivacidadView onBack={() => { history.replaceState(null, "", window.location.pathname); setRoute(session ? (session.role === "creador" ? "creator-home" : "admin-home") : "public-home"); }} />;
+  } else if (route === "cuenta" || route === "nueva-clave") {
+    const alSitio = () => { history.replaceState(null, "", window.location.pathname); setAvisoCuenta(null); setRoute("public-home"); };
+    content = (
+      <CuentaHome
+        jugadorApi={jugadorApi}
+        venues={venues}
+        aviso={avisoCuenta}
+        esOrganizador={!!jugadorApi.jugador && organizers.some((o) => o.id === jugadorApi.jugador.id)}
+        conPanelOrganizador={!!session && session.role !== "colaborador"}
+        onPanelOrganizador={() => setRoute(session.role === "creador" ? "creator-home" : "admin-home")}
+        onEntrarComplejo={(c) => { setAvisoCuenta(null); entrarComoColaborador(c); }}
+        onIngresar={() => setRoute("login")}
+        onReservar={alSitio}
+        onSalir={endSession}
+      />
+    );
   } else if (route === "creator-home" && session && session.role === "creador") {
     content = (
       <CreatorHome
@@ -9762,6 +17317,9 @@ function SmashPointAppInner() {
         venues={venues}
         coaches={coaches}
         events={events}
+        complejos={complejos}
+        onSaveComplejo={saveComplejo}
+        onFunciones={setFunciones}
         onSaveVenue={saveVenue}
         onDeleteVenue={deleteVenue}
         onSaveCoach={saveCoach}
@@ -9772,17 +17330,38 @@ function SmashPointAppInner() {
         onDeleteAd={deleteAd}
         onRestoreBackup={restoreBackup}
         onLogout={endSession}
+        onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
       />
     );
-  } else if (route === "admin-home" && session) {
+  } else if ((route === "admin-home" || route === "admin-tournament") && session) {
+    // El torneo abierto va adentro del panel (con el menú al costado); al elegir otra sección se cierra
+    const torneoAbierto = route !== "admin-tournament" || !selected ? null : selected._light ? <LoadingTournament /> : (
+      <AdminTournament
+        enPanel
+        tournament={selected}
+        update={updateTournament}
+        onBack={() => setRoute("admin-home")}
+        inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
+        onResolveInscripcion={resolveInscripcion}
+        soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
+        cobros={session.role === "creador" ? null : {
+          accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
+          complejoIds: complejosApp.filter((c) => c.reservas_habilitadas && c.modulo_cantina !== false && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id)).map((c) => c.id),
+        }}
+      />
+    );
     content = (
       <AdminHome
+        torneoAbierto={torneoAbierto}
+        onCerrarTorneo={() => setRoute("admin-home")}
         organizer={{ ...session, coverUrl: session.coverUrl ?? organizers.find((o) => o.id === session.id)?.coverUrl ?? "" }}
         tournaments={myTournaments}
         circuits={myCircuits}
         onCreate={createTournament}
+        onDuplicate={(t) => saver.save(t)}
         onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
         onLogout={endSession}
+        onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
         onUpdate={updateTournament}
         onDelete={deleteTournament}
         onAddCircuit={addCircuit}
@@ -9793,33 +17372,25 @@ function SmashPointAppInner() {
         events={events.filter((e) => e.organizerId === session.id)}
         onSaveEvent={saveEvent}
         onDeleteEvent={deleteEvent}
-      />
-    );
-  } else if (route === "admin-tournament" && selected?._light) {
-    content = <LoadingTournament />;
-  } else if (route === "admin-tournament" && selected) {
-    content = (
-      <AdminTournament
-        tournament={selected}
-        update={updateTournament}
-        onBack={() => setRoute("admin-home")}
-        inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
-        onResolveInscripcion={resolveInscripcion}
+        complejos={complejosApp.filter((c) => c.reservas_habilitadas && (session.role === "colaborador" ? c.id === session.complejoId : c.dueno_id === session.id))}
+        venues={venues}
       />
     );
   } else {
-    content = <PublicHome tournaments={tournaments} ads={ads} circuits={circuits} organizers={organizers} venues={venues} coaches={coaches} events={events} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute("login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   }
 
   return (
     <ComplexesContext.Provider value={venues}>
-    <div className="min-h-screen overflow-x-hidden" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
+    <MiPlanContext.Provider value={planCtx}>
+    <FuncionesContext.Provider value={funciones}>
+    <div className="min-h-screen overflow-x-clip" style={{ background: APP_BACKGROUND, backgroundAttachment: "fixed", color: "#e2e8f0", ...F.body }}>
       {content}
       {showFooterAds && (
         // Si el torneo tiene inscripciones, deja lugar para el botón fijo de abajo
         <div className={`px-6 max-w-4xl mx-auto ${registrationStatus(selected) !== "cerrado" ? "pb-32" : "pb-10"}`}>
-          <AdBanner ads={ads} />
-          <ContactFooter />
+          <AdBanner ads={publicAds} />
+          <ContactFooter onGoLogin={() => setRoute("login")} />
         </div>
       )}
       {/* Aviso de guardado: choque con otra persona o falta de conexión */}
@@ -9832,6 +17403,8 @@ function SmashPointAppInner() {
         </div>
       )}
     </div>
+    </FuncionesContext.Provider>
+    </MiPlanContext.Provider>
     </ComplexesContext.Provider>
   );
 }

@@ -25,7 +25,8 @@ export function setsNeeded(format) {
 /* ¿El set i es el super tie-break (a 10 puntos) del formato? */
 export function isSuperTiebreakSet(i, format) {
   const f = format || DEFAULT_MATCH_FORMAT;
-  return !!f.finalSuperTiebreak && f.setsToPlay > 1 && i === f.setsToPlay - 1;
+  // En "2 sets directos" no hay set decisivo: solo al mejor de 3 (o 5) el último puede ser super tie-break
+  return !!f.finalSuperTiebreak && f.setsToPlay >= 3 && i === f.setsToPlay - 1;
 }
 
 /* ¿El set cargado es un resultado final posible? Un set en juego (3-2) o mal tipeado (7-3) no:

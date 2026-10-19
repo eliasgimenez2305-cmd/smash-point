@@ -18,9 +18,10 @@ function nameTokens(name) {
   return normalizeName(name).split(" ").filter(Boolean).sort();
 }
 
-/* Jugadores de una pareja: "Gómez / Ibáñez" -> ["Gómez", "Ibáñez"] */
+/* Jugadores de una pareja: "Gómez / Ibáñez" -> ["Gómez", "Ibáñez"]. También acepta el guion con
+   espacios ("Gómez - Ibáñez"), como suelen cargarla a mano; "García-López" sigue siendo uno solo. */
 export function splitPair(pairName) {
-  return String(pairName || "").split("/").map((s) => s.trim()).filter(Boolean);
+  return String(pairName || "").split(/\/|\s+[-–]\s+/).map((s) => s.trim()).filter(Boolean);
 }
 
 /* Cuánto se parecen dos nombres de jugador:

@@ -3,7 +3,7 @@
    games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete, isByeMatch } from "./standings.js";
+import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete, isByeMatch, isSuperTiebreakSet } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
 const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
@@ -441,4 +441,11 @@ test("llave: qué lugares son bye y cuáles esperan un ganador", () => {
   assert.deepEqual(byes[1][0], { pairA: false, pairB: false }, "espera al ganador de B-C: no es bye");
   assert.deepEqual(byes[1][1], { pairA: true, pairB: false }, "del partido vacío nunca llega nadie: bye");
   assert.equal(isByeMatch(byes, 2, 0), false, "la final se juega");
+});
+
+test("2 sets directos con el tilde de super tie-break prendido: el 2.º set es un set común", () => {
+  const f = { setsToPlay: 2, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: true };
+  assert.equal(isSuperTiebreakSet(1, f), false);
+  assert.equal(setIsComplete({ a: 6, b: 3 }, 1, f), true);
+  assert.equal(isSuperTiebreakSet(2, { ...f, setsToPlay: 3 }), true);
 });
