@@ -2549,9 +2549,11 @@ function OrganizerAvatar({ organizer, size = 48, color = BRAND.cyan }) {
 function RegistrationSheet({ tournament, organizer, onClose }) {
   const categories = tournament.categories.filter(categoryAcceptsRegistrations);
   const [categoryId, setCategoryId] = useState(categories.length === 1 ? categories[0].id : "");
-  const [player1, setPlayer1] = useState("");
-  const [player2, setPlayer2] = useState("");
-  const [phone, setPhone] = useState("");
+  // Cada jugador por separado (apellido, nombre y teléfono) y a quién le escribe el organizador.
+  // Con los teléfonos, cada jugador queda con su perfil para el ranking (ver 20261039_inscripcion_perfiles.sql)
+  const [jugador1, setJugador1] = useState({ apellido: "", nombre: "", tel: "" });
+  const [jugador2, setJugador2] = useState({ apellido: "", nombre: "", tel: "" });
+  const [contacto, setContacto] = useState(1);
   const [website, setWebsite] = useState(""); // honeypot: una persona nunca lo ve ni lo completa
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -2581,30 +2583,33 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
     ? category.format === "super8_individual"
     : categories.length > 0 && categories.every((c) => c.format === "super8_individual");
   const full = category ? categorySpotsLeft(category) === 0 : false;
-  const normalizedPhone = normalizeArPhone(phone);
-  const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
-  const ready = category && !full && validName(player1) && (individual || validName(player2)) && normalizedPhone && availabilityOk;
+  const completo = (j) => j.apellido.trim() && j.nombre.trim() && normalizeArPhone(j.tel);
+  const datosOk = completo(jugador1) && (individual || completo(jugador2));
+  const ready = category && !full && datosOk && availabilityOk;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!ready || sending) return;
     setSending(true);
     setError("");
+    const disponibilidad = askAvailability ? { p_disponibilidad: chosenDays, p_cruce_mismo_dia: sameDayBracket } : {};
     const params = {
       p_torneo_id: tournament.id,
       p_categoria_id: category.id,
-      p_jugador1: player1.trim(),
-      p_jugador2: individual ? null : player2.trim(),
-      p_telefono: normalizedPhone,
+      p_j1_apellido: jugador1.apellido.trim(), p_j1_nombre: jugador1.nombre.trim(), p_j1_telefono: normalizeArPhone(jugador1.tel),
+      ...(individual ? {} : { p_j2_apellido: jugador2.apellido.trim(), p_j2_nombre: jugador2.nombre.trim(), p_j2_telefono: normalizeArPhone(jugador2.tel), p_contacto: contacto }),
       p_honeypot: website,
+      ...disponibilidad,
     };
     try {
       try {
-        await supabaseRpc("crear_inscripcion", askAvailability ? { ...params, p_disponibilidad: chosenDays, p_cruce_mismo_dia: sameDayBracket } : params);
+        await supabaseRpc("inscribir_pareja", params);
       } catch (err) {
-        // Si la base todavía no tiene la migración de disponibilidad, se inscribe igual sin ella
-        if (askAvailability && err.pgCode === "PGRST202") await supabaseRpc("crear_inscripcion", params);
-        else throw err;
+        // Si la base todavía no tiene la inscripción nueva, se inscribe como antes (sin perfiles)
+        if (err.pgCode !== "PGRST202") throw err;
+        const quien = (j) => nombreJugador(j);
+        const contactoTel = normalizeArPhone((!individual && contacto === 2 ? jugador2 : jugador1).tel);
+        await supabaseRpc("crear_inscripcion", { p_torneo_id: tournament.id, p_categoria_id: category.id, p_jugador1: quien(jugador1), p_jugador2: individual ? null : quien(jugador2), p_telefono: contactoTel, p_honeypot: website, ...disponibilidad });
       }
       setDone(true);
     } catch (err) {
@@ -2674,23 +2679,47 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
               <p className="text-sm -mt-2">Empieza: <span className="font-semibold text-lime-400">{categoryStartLabel(category)}</span></p>
             )}
 
-            <div>
-              <label className={label} htmlFor="insc-j1">{individual ? "Nombre y apellido" : "Jugador 1 · nombre y apellido"}</label>
-              <input id="insc-j1" value={player1} onChange={(e) => setPlayer1(e.target.value)} autoComplete="name" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Juan Pérez" />
-            </div>
+            {[[jugador1, setJugador1, 1], ...(individual ? [] : [[jugador2, setJugador2, 2]])].map(([j, setJ, n]) => {
+              const telOk = normalizeArPhone(j.tel);
+              return (
+                <fieldset key={n} className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
+                  <legend className="px-1 text-xs text-teal-300">{individual ? "Tus datos" : `Jugador ${n}`}</legend>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className={label} htmlFor={`insc-ap${n}`}>Apellido</label>
+                      <input id={`insc-ap${n}`} value={j.apellido} onChange={(e) => setJ({ ...j, apellido: e.target.value })} autoComplete={n === 1 ? "family-name" : "off"} maxLength={40} className={input} style={inputStyle} placeholder={n === 1 ? "Ej: Pérez" : "Ej: López"} />
+                    </div>
+                    <div>
+                      <label className={label} htmlFor={`insc-no${n}`}>Nombre</label>
+                      <input id={`insc-no${n}`} value={j.nombre} onChange={(e) => setJ({ ...j, nombre: e.target.value })} autoComplete={n === 1 ? "given-name" : "off"} maxLength={40} className={input} style={inputStyle} placeholder={n === 1 ? "Ej: Juan" : "Ej: Martín"} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={label} htmlFor={`insc-tel${n}`}>Teléfono (WhatsApp)</label>
+                    <input id={`insc-tel${n}`} type="tel" inputMode="tel" autoComplete={n === 1 ? "tel" : "off"} value={j.tel} onChange={(e) => setJ({ ...j, tel: e.target.value })} className={input} style={inputStyle} placeholder="Ej: 3446 123456" />
+                    {j.tel && !telOk && <p className="text-[11px] mt-1 text-amber-400">Con característica, sin el 0 ni el 15. Ej: 11 2345 6789</p>}
+                  </div>
+                </fieldset>
+              );
+            })}
             {!individual && (
               <div>
-                <label className={label} htmlFor="insc-j2">Jugador 2 · nombre y apellido</label>
-                <input id="insc-j2" value={player2} onChange={(e) => setPlayer2(e.target.value)} autoComplete="off" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Martín López" />
+                <p className={label}>¿A quién le escribe el organizador por WhatsApp?</p>
+                <div className="flex gap-2">
+                  {[1, 2].map((n) => {
+                    const j = n === 1 ? jugador1 : jugador2;
+                    const texto = nombreJugador(j) || `Jugador ${n}`;
+                    return (
+                      <button key={n} type="button" aria-pressed={contacto === n} onClick={() => setContacto(n)}
+                        className="flex-1 min-w-0 py-2 px-2 rounded-full text-sm font-semibold border truncate"
+                        style={contacto === n ? { backgroundColor: BRAND.lime, color: "#14181f", borderColor: BRAND.lime } : { borderColor: "#475569", color: "#cbd5e1" }}>
+                        {texto}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
-            <div>
-              <label className={label} htmlFor="insc-tel">WhatsApp</label>
-              <input id="insc-tel" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={input} style={inputStyle} placeholder="Ej: 3446 123456" />
-              <p className="text-[11px] mt-1 text-teal-500">
-                {phone && !normalizedPhone ? <span className="text-amber-400">Con característica, sin el 0 ni el 15. Ej: 11 2345 6789</span> : normalizedPhone ? `Te van a escribir al ${formatArPhone(normalizedPhone)}` : "Con característica, sin el 0 ni el 15."}
-              </p>
-            </div>
 
             {askAvailability && (
               <fieldset className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
@@ -2743,8 +2772,8 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
               <input id="insc-web" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={(e) => setWebsite(e.target.value)} />
             </div>
 
-            {((player1 && !validName(player1)) || (!individual && player2 && !validName(player2))) && (
-              <p className="text-sm text-amber-400">Poné nombre y apellido de {individual ? "quien se inscribe" : "cada jugador"}.</p>
+            {(jugador1.apellido || jugador1.nombre || jugador2.apellido || jugador2.nombre) && !datosOk && !full && (
+              <p className="text-sm text-amber-400">Completá apellido, nombre y teléfono de {individual ? "quien se inscribe" : "los dos jugadores"}.</p>
             )}
             {full && <p className="text-sm text-amber-400">El cupo de esta categoría ya está completo.</p>}
             {error && <p className="text-sm text-red-400" role="alert">{error}</p>}
@@ -2752,7 +2781,7 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
             <button type="submit" disabled={!ready || sending} className="w-full py-3.5 rounded-full font-semibold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
               {sending ? "Enviando…" : "Enviar inscripción"}
             </button>
-            <p className="text-[11px] text-teal-600 text-center">Tu WhatsApp solo lo ve el organizador del torneo.</p>
+            <p className="text-[11px] text-teal-600 text-center">{individual ? "Tu teléfono solo lo ven" : "Sus teléfonos solo los ven"} el organizador del torneo y Smash Point, para avisar{individual ? "te" : "les"} de {individual ? "tus" : "sus"} partidos.</p>
           </form>
         )}
       </div>
@@ -11061,8 +11090,11 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
               </div>
               <p className="text-sm text-teal-300">{category ? category.name : <span className="text-amber-400">Categoría eliminada</span>}</p>
               <a href={`https://wa.me/${i.telefono}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-1 text-sm underline" style={{ color: BRAND.lime }}>
-                WhatsApp {formatArPhone(i.telefono)}
+                WhatsApp {formatArPhone(i.telefono)}{i.contacto && i.jugador2_nombre ? ` (${i.contacto === 2 ? i.jugador2_nombre : i.jugador1_nombre})` : ""}
               </a>
+              {i.contacto && i.jugador2_nombre && (i.contacto === 2 ? i.telefono1 : i.telefono2) && (
+                <p className="text-xs text-teal-400">{i.contacto === 2 ? i.jugador1_nombre : i.jugador2_nombre}: {formatArPhone(i.contacto === 2 ? i.telefono1 : i.telefono2)}</p>
+              )}
               {Array.isArray(i.disponibilidad) && i.disponibilidad.length > 0 && (
                 <p className="text-xs text-teal-300 mt-1">Disponibilidad: {i.disponibilidad.map((d) => `${formatDateShort(d.date)} ${d.from} a ${d.to}`).join(" · ")}</p>
               )}

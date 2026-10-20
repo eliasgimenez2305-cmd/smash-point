@@ -76,6 +76,7 @@ Y [`migrations/20261035_publicidades.sql`](migrations/20261035_publicidades.sql)
 Y [`migrations/20261036_creditos.sql`](migrations/20261036_creditos.sql) (pago por torneo: organizadores "Por torneo" que usan un crédito al publicar cada torneo) → **Run** → **Success**.
 Y [`migrations/20261037_funciones.sql`](migrations/20261037_funciones.sql) (funciones en prueba: Reservas, Cuentas y empleados, y Cantina/caja quedan **apagadas**; se prenden desde el panel del creador › Funciones) → **Run** → **Success**. **No** descomentar la última línea (`update public.funciones set activa = true`): esa es solo para PRUEBA.
 Y [`migrations/20261038_perfiles_jugador.sql`](migrations/20261038_perfiles_jugador.sql) (perfiles de jugador con ID fijo y teléfono privado: el organizador anota con teléfono, el nombre se completa solo y el ranking del circuito suma por jugador) → **Run** → **Success**.
+Y [`migrations/20261039_inscripcion_perfiles.sql`](migrations/20261039_inscripcion_perfiles.sql) (inscripción pública con los dos jugadores por separado, sus teléfonos y a quién contactar; al aceptarla cada jugador queda con su perfil. La inscripción vieja sigue andando, así que se puede correr antes de publicar la app) → **Run** → **Success**.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 
