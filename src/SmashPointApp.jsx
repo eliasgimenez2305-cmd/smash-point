@@ -4856,6 +4856,7 @@ function scheduleAlerts(tournament, matches) {
 
 function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [notice, setNotice] = useState(null);
+  const [copiado, setCopiado] = useState(false);
   const [gridOpen, setGridOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
@@ -5056,6 +5057,15 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                 )}
               </div>
 
+              <div className="flex flex-wrap items-center gap-2 mb-3" style={F.body}>
+                <button type="button" onClick={() => {
+                  const texto = textoHorariosDia(tournament, dateInfo.date, scheduled.filter(inCategory), pairsById);
+                  navigator.clipboard?.writeText(texto).then(() => { setCopiado(true); setTimeout(() => setCopiado(false), 2500); }).catch(() => setNotice("No se pudo copiar. Probá de nuevo."));
+                }} className="px-3 py-1.5 rounded-lg text-sm font-semibold" style={{ backgroundColor: "#25d366", color: "#0b1c24" }}>
+                  {copiado ? "¡Copiado! Pegalo en el grupo" : "Copiar horarios para WhatsApp"}
+                </button>
+                {categoryFilter && <span className="text-xs text-teal-500">Solo la categoría elegida</span>}
+              </div>
               <StreamLinksEditor tournament={tournament} date={dateInfo.date} courts={courtsOfDay(tournament, dateInfo.date, scheduled)} onSave={(streams) => update({ ...tournament, streams })} />
               <div className="lg:flex lg:items-start lg:gap-4">
                 <div className="flex-1 min-w-0 mb-6">
@@ -5253,6 +5263,23 @@ function Scoreboard({ match, pairsById, format }) {
       {line("b")}
     </div>
   );
+}
+
+/* Horarios de un día como texto para pegar en el grupo de WhatsApp del torneo (negritas con *):
+   la hora y debajo cada partido con su cancha, categoría y parejas. Los partidos ya jugados van
+   con el resultado. */
+function textoHorariosDia(tournament, date, matches, pairsById) {
+  const delDia = matches.filter((m) => m.schedule?.date === date).sort(compareBySchedule);
+  const porHora = {};
+  delDia.forEach((m) => { (porHora[m.schedule.time] = porHora[m.schedule.time] || []).push(m); });
+  const nombre = (id) => pairsById[id]?.name || "—";
+  const bloques = Object.keys(porHora).sort().map((time) => [`*${time}*`, ...porHora[time].map((m) => {
+    const donde = [courtName(tournament, m.schedule.court), m.categoryName, m.label].filter(Boolean).join(" · ");
+    const quienes = m.placeholder ? m.placeholder : `${nombre(m.pairA)} vs ${nombre(m.pairB)}`;
+    const resultado = !m.placeholder && matchIsPlayed(m, tournament.matchFormat) ? ` (${m.walkover ? "W.O." : effectiveSets(m, tournament.matchFormat).filter((x) => x && x.a != null && x.b != null).map((x) => `${x.a}-${x.b}`).join(" ")})` : "";
+    return `${donde}: ${quienes}${resultado}`;
+  })].join("\n"));
+  return [`*${tournament.name}*`, `Horarios del ${etiquetaFecha(date).toLowerCase()}`, "", bloques.join("\n\n")].join("\n");
 }
 
 /* Horarios en modo lectura para la vista pública: una lista compacta por día y horario, dos
@@ -10701,6 +10728,18 @@ function mensajeTurno(r, venueName, canchaNombre, confirmado) {
     : `Hola ${r.nombre}, no podemos darte el turno en ${venueName} ${turno}. Si querés, pedí otro horario.`;
 }
 
+/* Aviso al jugador cuando el complejo le cancela un turno confirmado (o un turno fijo desde una fecha) */
+function mensajeTurnoCancelado(r, venueName, canchaNombre, serie = false) {
+  const desde = minutoEnGrilla(r.fecha, r.inicio);
+  const cancha = canchaNombre || "cancha";
+  const dia = etiquetaFecha(r.fecha).split(" ")[0].toLowerCase();
+  const diaPlural = dia.endsWith("o") ? `${dia}s` : dia; // sábados, domingos; lunes a viernes no cambian
+  const turno = serie
+    ? `tu turno fijo de los ${diaPlural} a las ${etiquetaHora(desde)} (${cancha}) a partir del ${etiquetaFecha(r.fecha).toLowerCase()}`
+    : `tu turno del ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${cancha})`;
+  return `Hola ${r.nombre}, te escribimos de ${venueName}: tuvimos que cancelar ${turno}. Disculpá las molestias. Si querés, coordinamos otro horario por acá.`;
+}
+
 /* "sábado 10/10 a las 23:30" (hora de Argentina) */
 function etiquetaVencimiento(iso) {
   const ar = new Date(Date.parse(iso) - 3 * 3600000).toISOString();
@@ -10807,6 +10846,7 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   // Lo que se cargó a este turno desde el mostrador y todavía no se cobró (ver 20261029_cargar_a_turno.sql)
   const [consumos, setConsumos] = useState(null); // { pendiente, detalle } | null
   const [aviso, setAviso] = useState("");
+  const [cancelado, setCancelado] = useState(null); // "uno" | "serie": recién cancelado, para avisarle al jugador
   const pendiente = Number(consumos?.pendiente || 0);
   const desde = minutoEnGrilla(fecha, r.inicio);
   const hasta = minutoEnGrilla(fecha, r.fin);
@@ -10846,9 +10886,9 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   });
   const patch = (body) => run(() => supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body, accessToken, prefer: "return=minimal" }));
   const quitar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "DELETE", accessToken, prefer: "return=minimal" }); onClose(); });
-  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelar = () => run(async () => { await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); setConfirmCancel(false); setCancelado("uno"); });
   // Turno fijo: este y todos los que siguen de la serie
-  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
+  const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); setConfirmCancel(false); setCancelado("serie"); });
   const confirmar = () => patch({ estado: "confirmada" });
   const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
   const cobro = (medio) => run(async () => {
@@ -10870,7 +10910,15 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
     <Modal title={r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
       <div className="space-y-3 text-sm" style={F.body}>
         <p className="text-teal-200">{cancha?.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(desde, hasta)} ({hasta - desde} min)</p>
-        {r.tipo === "bloqueo" ? (
+        {cancelado ? (
+          <>
+            <p className="text-red-300">{cancelado === "serie" ? "Se cancelaron este turno y los siguientes del turno fijo." : "Turno cancelado: el horario quedó libre."}</p>
+            {r.telefono ? (
+              <a href={waLink(r.telefono, mensajeTurnoCancelado(r, venueName, cancha?.nombre, cancelado === "serie"))} target="_blank" rel="noopener noreferrer" className="block px-3 py-2 rounded-lg font-semibold text-center" style={{ backgroundColor: "#25d366", color: "#0b1c24" }}>Avisarle por WhatsApp</a>
+            ) : <p className="text-xs text-teal-500">El turno no tiene WhatsApp cargado: avisale por otro medio.</p>}
+            <button type="button" onClick={onClose} className={`${btn} border-teal-700 text-teal-200 w-full`}>Cerrar</button>
+          </>
+        ) : r.tipo === "bloqueo" ? (
           <>
             {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
             <button type="button" disabled={busy} onClick={quitar} className={`${btn} border-red-400 text-red-400`}>Quitar bloqueo</button>
