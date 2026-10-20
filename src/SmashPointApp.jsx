@@ -11,6 +11,7 @@ import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtC
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
+import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
@@ -1168,11 +1169,12 @@ function tournamentSummary(t) {
       const light = { ...c };
       HEAVY_CATEGORY_FIELDS.forEach((k) => delete light[k]);
       const names = Object.fromEntries((c.pairs || []).map((p) => [p.id, p.name]));
+      const players = Object.fromEntries((c.pairs || []).filter((p) => p.players).map((p) => [p.id, p.players]));
       return {
         ...light,
         _pairsCount: (c.pairs || []).length,
         _groupsCount: (c.groups || []).length,
-        _placements: isSuper8(c) || isInfoOnly(t) ? [] : categoryPlacements(c, t.matchFormat).map(({ pairId, tier }) => ({ name: names[pairId], tier })).filter((p) => p.name),
+        _placements: isSuper8(c) || isInfoOnly(t) ? [] : categoryPlacements(c, t.matchFormat).map(({ pairId, tier }) => ({ name: names[pairId], ...(players[pairId] ? { players: players[pairId] } : {}), tier })).filter((p) => p.name),
       };
     }),
     _stats: { progress: tournamentProgress(t), matchesByDate },
@@ -2222,8 +2224,8 @@ function categoryPlacements(category, format) {
    (no por pareja, porque puede cambiar de compañero entre fechas) */
 function computeCircuitStandings(circuit, tournaments) {
   const points = circuit.pointsScale || DEFAULT_CIRCUIT_POINTS;
-  const table = {}; // { [categoryName]: { [playerKey]: { name, points, fechas } } }
-  circuit.categoryNames.forEach((cn) => { table[cn] = {}; });
+  const table = {}; // { [categoryName]: [{ players, points }] }, una entrada por pareja y por fecha
+  circuit.categoryNames.forEach((cn) => { table[cn] = []; });
 
   // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito; uno Próximo
   // tampoco hasta que tenga algún resultado (anotarse no da puntos de "fase de grupos")
@@ -2234,24 +2236,22 @@ function computeCircuitStandings(circuit, tournaments) {
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
       if (!matchName) return;
       // Con el resumen (portada) vienen ya los nombres con su instancia
-      const placed = cat._placements || categoryPlacements(cat, t.matchFormat).map(({ pairId, tier }) => ({ name: cat.pairs.find((p) => p.id === pairId)?.name, tier }));
-      placed.forEach(({ name, tier }) => {
+      const placed = cat._placements || categoryPlacements(cat, t.matchFormat).map(({ pairId, tier }) => {
+        const pair = cat.pairs.find((p) => p.id === pairId);
+        return { name: pair?.name, players: pair?.players, tier };
+      });
+      placed.forEach(({ name, players, tier }) => {
         if (!name) return;
-        const pts = points[tier] ?? 0;
-        // "Gómez / Ibáñez" o "Gómez - Ibáñez"; "Ibáñez" e "Ibanez" son la misma persona
-        splitPair(name).forEach((playerName) => {
-          const key = normalizeName(playerName);
-          if (!table[matchName][key]) table[matchName][key] = { name: playerName, points: 0, fechas: 0 };
-          table[matchName][key].points += pts;
-          table[matchName][key].fechas += 1;
-        });
+        // Por jugador: con su ID si se cargó con teléfono; si no, por nombre ("Ibáñez" e "Ibanez" son
+        // la misma persona). Ver rankingPorJugador en jugadores.js
+        table[matchName].push({ players: jugadoresConPerfil({ name, players }), points: points[tier] ?? 0 });
       });
     });
   });
 
   const result = {};
-  Object.entries(table).forEach(([cn, players]) => {
-    result[cn] = Object.values(players).sort((a, b) => b.points - a.points);
+  Object.entries(table).forEach(([cn, entradas]) => {
+    result[cn] = rankingPorJugador(entradas);
   });
   return result;
 }
@@ -11231,9 +11231,14 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
 
 /* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
    pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
-function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
+function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section, accessToken = null }) {
   const tab = section || "parejas"; // la sección la elige el menú del torneo
-  const [pairName, setPairName] = useState("");
+  // Carga de una pareja: por cada jugador, teléfono (opcional; obligatorio en torneos de circuito) y
+  // "Apellido Nombre". Con el teléfono se busca su perfil y el nombre se completa solo (ver jugadores.js)
+  const jugadorVacio = { tel: "", texto: "", opciones: null, elegido: null };
+  const [cargaJugadores, setCargaJugadores] = useState(() => [jugadorVacio, jugadorVacio]);
+  const [agregando, setAgregando] = useState(false);
+  const [confirmarRepetido, setConfirmarRepetido] = useState(""); // aviso de jugador ya anotado: se agrega al tocar de nuevo
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
   const [editingPairId, setEditingPairId] = useState(null);
@@ -11251,15 +11256,71 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const super8Generated = super8 && category.groups.length > 0;
   const usesSchedule = tournamentUsesSchedule(tournament);
 
-  const addPair = () => {
-    if (!pairName.trim()) return;
+  const cuantosJugadores = individual ? 1 : 2;
+  const filasCarga = cargaJugadores.slice(0, cuantosJugadores);
+  const circuito = !!tournament.circuitId;
+  const cambiarJugador = (i, cambios) => {
+    setConfirmarRepetido("");
+    setCargaJugadores((l) => l.map((j, k) => (k === i ? { ...j, ...cambios } : j)));
+  };
+  // Al completar un teléfono válido se busca el perfil: si hay uno, se completa el nombre; si hay
+  // varios (por ejemplo, un padre que anota a sus hijos con su número), se elige
+  const buscarPorTelefono = async (i, tel) => {
+    const numero = normalizeArPhone(tel);
+    if (!numero || !accessToken) { cambiarJugador(i, { opciones: null, elegido: null }); return; }
+    try {
+      const encontrados = (await supabaseRpc("buscar_jugadores", { p_telefono: numero }, accessToken)) || [];
+      setCargaJugadores((l) => l.map((j, k) => {
+        if (k !== i || normalizeArPhone(j.tel) !== numero) return j;
+        if (encontrados.length === 1 && !j.texto.trim()) return { ...j, opciones: encontrados, elegido: encontrados[0].id, texto: nombreJugador(encontrados[0]) };
+        return { ...j, opciones: encontrados, elegido: null };
+      }));
+    } catch { cambiarJugador(i, { opciones: null, elegido: null }); }
+  };
+  const elegirPerfil = (i, perfil) => cambiarJugador(i, perfil ? { elegido: perfil.id, texto: nombreJugador(perfil) } : { elegido: null, texto: "" });
+
+  const addPair = async () => {
+    if (agregando) return;
+    if (filasCarga.every((j) => !j.texto.trim())) return;
     if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
     if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
+    const faltaNombre = filasCarga.findIndex((j) => !j.texto.trim());
+    if (faltaNombre >= 0) { setPairError(`Falta el apellido y nombre del jugador ${faltaNombre + 1}.`); return; }
+    const telMal = filasCarga.findIndex((j) => j.tel.trim() && !normalizeArPhone(j.tel));
+    if (telMal >= 0) { setPairError(`Revisá el teléfono del jugador ${telMal + 1} (característica y número, sin el 0 ni el 15).`); return; }
+    if (circuito) {
+      const sinTel = filasCarga.findIndex((j) => !j.tel.trim());
+      if (sinTel >= 0) { setPairError(`En los torneos de circuito el teléfono es obligatorio (jugador ${sinTel + 1}): sin teléfono no suma puntos.`); return; }
+    }
     setPairError("");
-    // Aviso (no bloqueo) si algún jugador ya está anotado en el torneo con un nombre igual o parecido
-    setPairNotice(duplicateNamesText(findNameDuplicates(splitPair(pairName), tournamentPairEntries(tournament))) || "");
-    onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name: pairName.trim(), availability: [] }] });
-    setPairName("");
+    setAgregando(true);
+    try {
+      // Con teléfono, el jugador queda con su perfil (se crea si no existe); sin teléfono, solo el nombre
+      const players = [];
+      for (const j of filasCarga) {
+        const name = nombreJugador(separarNombre(j.texto));
+        const numero = normalizeArPhone(j.tel);
+        let id = null;
+        if (numero && accessToken) {
+          const elegido = j.opciones?.find((o) => o.id === j.elegido);
+          id = elegido && nombreJugador(elegido) === name ? elegido.id : await supabaseRpc("crear_jugador", { p_apellido: separarNombre(j.texto).apellido, p_nombre: separarNombre(j.texto).nombre, p_telefono: numero }, accessToken);
+        }
+        players.push({ id, name });
+      }
+      // Un jugador con perfil que ya está anotado en el torneo: hay que confirmarlo (tocar Agregar de nuevo)
+      const donde = perfilesEnTorneo(tournament);
+      const repetido = players.find((p) => p.id && donde[p.id]);
+      const avisoRepetido = repetido ? `${repetido.name} ya está anotado en ${donde[repetido.id]}.` : "";
+      if (avisoRepetido && confirmarRepetido !== avisoRepetido) { setConfirmarRepetido(avisoRepetido); return; }
+      const name = nombrePareja(players);
+      // Aviso (no bloqueo) si un jugador sin perfil se parece a otro ya anotado
+      setPairNotice(duplicateNamesText(findNameDuplicates(players.filter((p) => !p.id).map((p) => p.name), tournamentPairEntries(tournament))) || "");
+      onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name, availability: [], players }] });
+      setCargaJugadores([jugadorVacio, jugadorVacio]);
+      setConfirmarRepetido("");
+    } catch (e) {
+      setPairError(e?.code === "no_autorizado" || e?.pgCode === "no_autorizado" ? "No tenés permiso para cargar jugadores." : "No se pudo guardar el jugador. Revisá la conexión y probá de nuevo.");
+    } finally { setAgregando(false); }
   };
 
   const updatePairAvailability = (pairId, availability) => {
@@ -11288,7 +11349,10 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const cancelEditPair = () => { setEditingPairId(null); setEditPairName(""); };
   const saveEditPair = (id) => {
     if (!editPairName.trim()) return;
-    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, name: editPairName.trim() } : p)) });
+    // Si la pareja tiene jugadores con perfil, cada uno conserva su ID con el nombre corregido
+    const nuevos = splitPair(editPairName.trim());
+    const conJugadores = (p) => (Array.isArray(p.players) ? { players: p.players.map((j, i) => ({ ...j, name: nuevos[i] ?? j.name })) } : {});
+    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, name: editPairName.trim(), ...conJugadores(p) } : p)) });
     setEditingPairId(null);
     setEditPairName("");
   };
@@ -11491,19 +11555,45 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
       )}
       {tab === "parejas" && (
         <div>
-          <div className="flex gap-2 mb-1">
-            <input
-              value={pairName}
-              onChange={(e) => setPairName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
-              placeholder={individual ? "Ej: Pérez" : "Ej: Pérez / López"}
-              className="flex-1 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-            <button type="button" onClick={addPair} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar</button>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-2 mb-1" style={F.body}>
+            <div className="flex-1 min-w-0 space-y-2">
+              {filasCarga.map((j, i) => (
+                <div key={i}>
+                  <div className="flex gap-2">
+                    <input
+                      value={j.tel} inputMode="tel" aria-label={`Teléfono del jugador ${i + 1}`}
+                      onChange={(e) => { cambiarJugador(i, { tel: e.target.value, opciones: null, elegido: null }); if (normalizeArPhone(e.target.value)) buscarPorTelefono(i, e.target.value); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
+                      placeholder={circuito ? "Teléfono" : "Teléfono (opcional)"}
+                      className="w-36 sm:w-44 shrink-0 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                    />
+                    <input
+                      value={j.texto} aria-label={`Apellido y nombre del jugador ${i + 1}`}
+                      onChange={(e) => cambiarJugador(i, { texto: e.target.value })}
+                      onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
+                      placeholder={individual ? "Apellido Nombre" : `Jugador ${i + 1}: Apellido Nombre`}
+                      className="flex-1 min-w-0 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                    />
+                  </div>
+                  {j.opciones && j.opciones.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-xs">
+                      <span className="text-teal-400">Con ese teléfono hay varios jugadores:</span>
+                      {j.opciones.map((o) => (
+                        <button key={o.id} type="button" onClick={() => elegirPerfil(i, o)} className="px-2 py-0.5 rounded-full border" style={j.elegido === o.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>{nombreJugador(o)}</button>
+                      ))}
+                      <button type="button" onClick={() => elegirPerfil(i, null)} className="px-2 py-0.5 rounded-full border" style={!j.elegido ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>Otro</button>
+                    </div>
+                  )}
+                  {j.opciones && j.opciones.length === 1 && j.elegido && <p className="text-[11px] text-lime-400 mt-0.5">Jugador encontrado por su teléfono.</p>}
+                </div>
+              ))}
+            </div>
+            <button type="button" onClick={addPair} disabled={agregando} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: confirmarRepetido ? "#fbbf24" : "#9fe022", color: "#14181f" }}>{agregando ? "…" : confirmarRepetido ? "Agregar igual" : "Agregar"}</button>
           </div>
+          {confirmarRepetido && <p className="text-xs text-amber-400 mb-3" style={F.body}>{confirmarRepetido} Si es correcto, tocá "Agregar igual".</p>}
           {pairError && <p className="text-xs text-red-400 mb-3" style={F.body}>{pairError}</p>}
           {pairNotice && <p className="text-xs text-amber-400 mb-3" style={F.body}>{pairNotice} Si son personas distintas, no hace falta hacer nada.</p>}
-          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Si un jugador ya está anotado en el torneo con un nombre igual o parecido, te avisamos (no se bloquea).</p>
+          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Con el teléfono, el jugador suma sus puntos aunque cambie de compañero, y si ya jugó antes su nombre se completa solo. {circuito ? "En los torneos de circuito es obligatorio." : "Es opcional: sin teléfono se anota solo con el nombre."}</p>
           <ul className="space-y-2">
             {category.pairs.map((p) => {
               const played = pairHasPlayed(category, p.id);
@@ -16249,7 +16339,7 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
   );
 }
 
-function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
+function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null, accessToken = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
@@ -16456,7 +16546,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
                 <CategoryAdminView
                   key={category.id} category={category} format={tournament.matchFormat} tournament={tournament}
                   onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update}
-                  section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]}
+                  section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]} accessToken={accessToken}
                 />
               )}
             </>
@@ -17347,6 +17437,7 @@ function SmashPointAppInner() {
         onBack={() => setRoute("admin-home")}
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
+        accessToken={session.accessToken}
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
         cobros={session.role === "creador" ? null : {
           accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
