@@ -4856,7 +4856,6 @@ function scheduleAlerts(tournament, matches) {
 
 function ScheduleAdminView({ tournament, update, onGoConfig }) {
   const [notice, setNotice] = useState(null);
-  const [copiado, setCopiado] = useState(false);
   const [gridOpen, setGridOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
   // Resultado y mover se hacen en ventanitas (sirven también en el celular, donde arrastrar no anda)
@@ -5057,15 +5056,6 @@ function ScheduleAdminView({ tournament, update, onGoConfig }) {
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 mb-3" style={F.body}>
-                <button type="button" onClick={() => {
-                  const texto = textoHorariosDia(tournament, dateInfo.date, scheduled.filter(inCategory), pairsById);
-                  navigator.clipboard?.writeText(texto).then(() => { setCopiado(true); setTimeout(() => setCopiado(false), 2500); }).catch(() => setNotice("No se pudo copiar. Probá de nuevo."));
-                }} className="px-3 py-1.5 rounded-lg text-sm font-semibold" style={{ backgroundColor: "#25d366", color: "#0b1c24" }}>
-                  {copiado ? "¡Copiado! Pegalo en el grupo" : "Copiar horarios para WhatsApp"}
-                </button>
-                {categoryFilter && <span className="text-xs text-teal-500">Solo la categoría elegida</span>}
-              </div>
               <StreamLinksEditor tournament={tournament} date={dateInfo.date} courts={courtsOfDay(tournament, dateInfo.date, scheduled)} onSave={(streams) => update({ ...tournament, streams })} />
               <div className="lg:flex lg:items-start lg:gap-4">
                 <div className="flex-1 min-w-0 mb-6">
@@ -5263,23 +5253,6 @@ function Scoreboard({ match, pairsById, format }) {
       {line("b")}
     </div>
   );
-}
-
-/* Horarios de un día como texto para pegar en el grupo de WhatsApp del torneo (negritas con *):
-   la hora y debajo cada partido con su cancha, categoría y parejas. Los partidos ya jugados van
-   con el resultado. */
-function textoHorariosDia(tournament, date, matches, pairsById) {
-  const delDia = matches.filter((m) => m.schedule?.date === date).sort(compareBySchedule);
-  const porHora = {};
-  delDia.forEach((m) => { (porHora[m.schedule.time] = porHora[m.schedule.time] || []).push(m); });
-  const nombre = (id) => pairsById[id]?.name || "—";
-  const bloques = Object.keys(porHora).sort().map((time) => [`*${time}*`, ...porHora[time].map((m) => {
-    const donde = [courtName(tournament, m.schedule.court), m.categoryName, m.label].filter(Boolean).join(" · ");
-    const quienes = m.placeholder ? m.placeholder : `${nombre(m.pairA)} vs ${nombre(m.pairB)}`;
-    const resultado = !m.placeholder && matchIsPlayed(m, tournament.matchFormat) ? ` (${m.walkover ? "W.O." : effectiveSets(m, tournament.matchFormat).filter((x) => x && x.a != null && x.b != null).map((x) => `${x.a}-${x.b}`).join(" ")})` : "";
-    return `${donde}: ${quienes}${resultado}`;
-  })].join("\n"));
-  return [`*${tournament.name}*`, `Horarios del ${etiquetaFecha(date).toLowerCase()}`, "", bloques.join("\n\n")].join("\n");
 }
 
 /* Horarios en modo lectura para la vista pública: una lista compacta por día y horario, dos
