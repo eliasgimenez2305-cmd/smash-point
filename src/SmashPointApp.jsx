@@ -347,6 +347,15 @@ const volverA = () => `?redirect_to=${encodeURIComponent(window.location.origin 
    no avisa (para no revelar quién está registrado): responde sin identidades. */
 const supabaseSignUp = (email, password) => supabaseAuthPost(`signup${volverA()}`, { email, password });
 const supabaseResendConfirm = (email) => supabaseAuthPost(`resend${volverA()}`, { type: "signup", email });
+
+/* Jugadores: cuenta con teléfono y contraseña (ver 20261040_cuenta_por_telefono.sql). El código para
+   crear la cuenta o recuperar la contraseña lo manda Supabase con el proveedor configurado. */
+const CANAL_CODIGO = "sms"; // "whatsapp" cuando esté lista la cuenta de WhatsApp de Meta (Twilio)
+const supabaseSignUpTelefono = (phone, password) => supabaseAuthPost("signup", { phone, password, channel: CANAL_CODIGO });
+const supabaseReenviarAlta = (phone) => supabaseAuthPost("resend", { type: "sms", phone });
+const supabasePedirCodigo = (phone) => supabaseAuthPost("otp", { phone, create_user: false, channel: CANAL_CODIGO });
+const supabaseVerificarCodigo = (phone, token) => supabaseAuthPost("verify", { type: "sms", phone, token });
+const supabaseSignInTelefono = (phone, password) => supabaseAuthPost("token?grant_type=password", { phone, password });
 async function supabaseGetUser(accessToken) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error("La sesión no es válida.");
@@ -384,9 +393,15 @@ const CUENTA_ERRORES = {
   same_password: "Es la misma contraseña que tenías: elegí otra.",
   over_email_send_rate_limit: "Mandamos muchos mails seguidos. Esperá un rato y probá de nuevo.",
   over_request_rate_limit: "Demasiados intentos. Esperá un minuto y probá de nuevo.",
-  otp_expired: "El link del mail ya venció o ya se usó. Pedí uno nuevo.",
+  otp_expired: "El código no es correcto o ya venció. Pedí uno nuevo.",
+  phone_not_confirmed: "Todavía no confirmaste tu teléfono con el código.",
+  phone_exists: "Ese teléfono ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\".",
+  user_already_exists: "Ese teléfono ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\".",
+  sms_send_failed: "No pudimos mandarte el código. Revisá el número y probá de nuevo en un rato.",
+  over_sms_send_rate_limit: "Pediste muchos códigos seguidos. Esperá un rato y probá de nuevo.",
+  otp_disabled: "Ese teléfono no tiene cuenta. Tocá \"Crear cuenta\".",
 };
-const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : "No se pudo completar. Revisá la conexión y probá de nuevo.");
+const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /phone not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.phone_not_confirmed : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : /expired|invalid.*(token|otp)/i.test(e?.message || "") ? CUENTA_ERRORES.otp_expired : /already registered/i.test(e?.message || "") ? CUENTA_ERRORES.phone_exists : "No se pudo completar. Revisá la conexión y probá de nuevo.");
 
 const PEDIDO_ERRORES = {
   sin_sesion: "Tu sesión venció: volvé a entrar.",
@@ -429,7 +444,7 @@ function useJugador() {
     writeStoredJugador(j ? { refreshToken: j.refreshToken } : null);
   }, []);
   const fromAuth = useCallback(async (auth) => {
-    const base = { id: auth.user.id, email: auth.user.email, ...authFields(auth) };
+    const base = { id: auth.user.id, email: auth.user.email || null, phone: auth.user.phone || null, ...authFields(auth) };
     const rows = await supabaseTable(`jugadores?id=eq.${base.id}&select=*`, { accessToken: base.accessToken });
     return { ...base, perfil: rows?.[0] || null };
   }, []);
@@ -464,13 +479,21 @@ function useJugador() {
     });
     setJugador({ ...ref.current, perfil: rows[0] });
   }, [token, setJugador]);
+  // Después de completar la cuenta (ver completar_cuenta): vuelve a leer sus datos
+  const recargarPerfil = useCallback(async () => {
+    const accessToken = await token();
+    const rows = await supabaseTable(`jugadores?id=eq.${ref.current.id}&select=*`, { accessToken });
+    const next = { ...ref.current, perfil: rows?.[0] || null };
+    setJugador(next);
+    return next;
+  }, [token, setJugador]);
   const logout = useCallback(() => {
     const j = ref.current;
     setJugador(null);
     if (j) fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${j.accessToken}` } }).catch(() => {});
   }, [setJugador]);
 
-  return useMemo(() => ({ jugador, token, login, savePerfil, logout }), [jugador, token, login, savePerfil, logout]);
+  return useMemo(() => ({ jugador, token, login, savePerfil, recargarPerfil, logout }), [jugador, token, login, savePerfil, recargarPerfil, logout]);
 }
 
 /* Link de WhatsApp con un mensaje ya escrito */
@@ -6539,87 +6562,142 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
    onEntro(jugador, contraseña) se llama con la sesión ya iniciada. */
 function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
   const { cuentas: conCuentas } = React.useContext(FuncionesContext);
-  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar"); // entrar | crear | recuperar | enviado
-  const [email, setEmail] = useState("");
+  // entrar | crear | recuperar | enviado (mail) | codigo-alta | codigo-recupero | nueva-clave | reclamar
+  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar");
+  const [usuario, setUsuario] = useState(""); // teléfono (jugadores) o mail (organizadores)
   const [password, setPassword] = useState("");
+  const [codigo, setCodigo] = useState("");
   const [ver, setVer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
   const [sinConfirmar, setSinConfirmar] = useState(false);
-  const mail = email.trim().toLowerCase();
+  const esMail = usuario.includes("@");
+  const mail = usuario.trim().toLowerCase();
   const mailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail);
-  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); };
+  const telefono = esMail ? null : normalizeArPhone(usuario);
+  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); setCodigo(""); };
+  const conPerfil = async (j) => {
+    // Cuenta con teléfono sin sus datos todavía: primero reclama su perfil (o se crea uno)
+    if (j.phone && !j.perfil) { cambiar("reclamar"); setBusy(false); return; }
+    await onEntro(j, password);
+  };
 
   const entrar = async () => {
-    if (!mailOk || !password) { setError("Completá mail y contraseña."); return; }
+    if (!password || (esMail ? !mailOk : !telefono)) { setError(esMail ? "Completá mail y contraseña." : "Completá tu teléfono (con característica) y tu contraseña."); return; }
     setBusy(true); setError(""); setSinConfirmar(false);
     try {
-      const j = await jugadorApi.login(await supabaseSignIn(mail, password));
-      await onEntro(j, password);
+      const j = await jugadorApi.login(esMail ? await supabaseSignIn(mail, password) : await supabaseSignInTelefono(telefono, password));
+      await conPerfil(j);
     } catch (e) {
       const texto = cuentaErrorText(e);
-      setError(texto);
-      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed);
+      setError(esMail || texto !== CUENTA_ERRORES.invalid_credentials ? texto : "Teléfono o contraseña incorrectos.");
+      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed || texto === CUENTA_ERRORES.phone_not_confirmed);
       setBusy(false);
     }
   };
   const crear = async () => {
-    if (!mailOk) { setError("Revisá el mail."); return; }
+    if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15. Ej: 3446 123456"); return; }
     if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
     setBusy(true); setError("");
     try {
-      const r = await supabaseSignUp(mail, password);
-      if (r.access_token) { // sin confirmación por mail: ya entra
-        const j = await jugadorApi.login(r);
-        await onEntro(j, password);
-        return;
-      }
-      const user = r.user || r;
-      if (Array.isArray(user.identities) && user.identities.length === 0) {
-        setError("Ese mail ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\" (también si antes entrabas con un código).");
-      } else {
-        cambiar("enviado");
-      }
+      const r = await supabaseSignUpTelefono(telefono, password);
+      if (r.access_token) { await conPerfil(await jugadorApi.login(r)); return; } // sin confirmación por código: ya entra
+      cambiar("codigo-alta");
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
   };
   const recuperar = async () => {
-    if (!mailOk) { setError("Revisá el mail."); return; }
     setBusy(true); setError("");
     try {
-      await supabaseRequestPasswordReset(mail);
-      setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+      if (esMail) {
+        if (!mailOk) { setError("Revisá el mail."); setBusy(false); return; }
+        await supabaseRequestPasswordReset(mail);
+        setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+      } else {
+        if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); setBusy(false); return; }
+        await supabasePedirCodigo(telefono);
+        cambiar("codigo-recupero");
+      }
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
+  };
+  const verificar = async () => {
+    if (!/^\d{6}$/.test(codigo.trim())) { setError("El código tiene 6 números."); return; }
+    setBusy(true); setError("");
+    try {
+      const j = await jugadorApi.login(await supabaseVerificarCodigo(telefono, codigo.trim()));
+      if (modo === "codigo-recupero") { setPassword(""); cambiar("nueva-clave"); setBusy(false); return; }
+      await conPerfil(j);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
   };
   const reenviar = async () => {
     setBusy(true); setError("");
     try {
-      await supabaseResendConfirm(mail);
+      if (esMail) { await supabaseResendConfirm(mail); setAviso("Te mandamos de nuevo el mail para confirmar la cuenta."); }
+      else if (modo === "codigo-recupero") { await supabasePedirCodigo(telefono); setAviso("Te mandamos un código nuevo."); }
+      else { await supabaseReenviarAlta(telefono); setAviso("Te mandamos un código nuevo."); if (modo === "entrar") cambiar("codigo-alta"); }
       setSinConfirmar(false);
-      setAviso("Te mandamos de nuevo el mail para confirmar la cuenta.");
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
   };
-  const enviar = modo === "crear" ? crear : modo === "recuperar" ? recuperar : entrar;
+  const guardarClave = async () => {
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseUpdatePassword(await jugadorApi.token(), password);
+      await conPerfil(jugadorApi.jugador);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
+  };
+  const enviar = { crear, recuperar, "codigo-alta": verificar, "codigo-recupero": verificar, "nueva-clave": guardarClave }[modo] || entrar;
   const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
   const boton = (texto, ocupado) => (
     <button type="button" disabled={busy} onClick={enviar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? ocupado : texto}</button>
   );
+  const campoClave = (placeholder, nueva) => (
+    <div className="relative">
+      <input type={ver ? "text" : "password"} autoComplete={nueva ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={placeholder} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
+      <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
+    </div>
+  );
 
+  if (modo === "reclamar") {
+    return <ReclamarPerfil jugadorApi={jugadorApi} onListo={(j) => onEntro(j, password)} />;
+  }
   if (modo === "enviado") {
     return (
       <div className="space-y-3 text-sm" style={F.body}>
         <p className="text-teal-100 font-semibold">¡Ya casi! Revisá tu mail</p>
-        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta. Tocalo y listo: después entrás siempre con tu mail y contraseña.</p>
-        <p className="text-xs text-teal-500">Puede tardar un minuto. Si no llega, revisá el correo no deseado.</p>
+        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta.</p>
         {aviso && <p className="text-lime-400">{aviso}</p>}
         {error && <p className="text-red-400">{error}</p>}
+        <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400">Ya la confirmé: ingresar</button>
+      </div>
+    );
+  }
+  if (modo === "codigo-alta" || modo === "codigo-recupero") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-100 font-semibold">Te mandamos un código</p>
+        <p className="text-teal-300">Escribí el código de 6 números que te llegó al <span className="text-teal-100 font-semibold">{formatArPhone(telefono)}</span>.</p>
+        <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={codigo} onChange={(e) => setCodigo(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="123456" className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
+        {error && <p className="text-red-400">{error}</p>}
+        {aviso && <p className="text-lime-400">{aviso}</p>}
+        {boton("Confirmar", "Confirmando…")}
         <div className="flex justify-between gap-3 text-xs">
-          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Reenviar el mail</button>
-          <button type="button" onClick={() => cambiar("entrar")} className="text-teal-400">Ya la confirmé: ingresar</button>
+          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Mandarme otro código</button>
+          <button type="button" onClick={() => cambiar(modo === "codigo-alta" ? "crear" : "recuperar")} className="text-teal-400">← Cambiar el número</button>
         </div>
+      </div>
+    );
+  }
+  if (modo === "nueva-clave") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">Elegí tu contraseña nueva.</p>
+        {campoClave("Contraseña nueva (mínimo 8 caracteres)", true)}
+        {error && <p className="text-red-400">{error}</p>}
+        {boton("Guardar contraseña", "Guardando…")}
       </div>
     );
   }
@@ -6633,23 +6711,91 @@ function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
           ))}
         </div>
       ) : (
-        <p className="text-teal-300">Poné tu mail y te mandamos un link para elegir una contraseña nueva. Si antes entrabas con un código, así te creás la contraseña.</p>
+        <p className="text-teal-300">Poné tu teléfono y te mandamos un código para elegir una contraseña nueva. Si sos organizador, poné tu mail.</p>
       )}
-      <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
-      {modo !== "recuperar" && (
-        <div className="relative">
-          <input type={ver ? "text" : "password"} autoComplete={modo === "crear" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña"} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
-          <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
-        </div>
-      )}
+      <input
+        type={modo === "crear" ? "tel" : "text"} inputMode={modo === "crear" ? "tel" : undefined} autoComplete={modo === "crear" ? "tel" : "username"}
+        value={usuario} onChange={(e) => setUsuario(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()}
+        placeholder={modo === "crear" ? "Tu teléfono (Ej: 3446 123456)" : conCuentas ? "Teléfono o mail" : "Mail"}
+        className={inputCls} style={adminInput} aria-label={modo === "crear" ? "Teléfono" : "Teléfono o mail"} autoFocus
+      />
+      {modo === "crear" && usuario && !telefono && <p className="text-xs text-amber-400">Con característica, sin el 0 ni el 15. Ej: 3446 123456</p>}
+      {modo !== "recuperar" && campoClave(modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña", modo === "crear")}
+      {modo === "crear" && <p className="text-xs text-teal-500">Te vamos a mandar un código a ese número para confirmar que es tuyo.</p>}
       {error && <p className="text-red-400">{error}</p>}
-      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">Mandarme de nuevo el mail para confirmar</button>}
+      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">{esMail ? "Mandarme de nuevo el mail para confirmar" : "Mandarme el código para confirmar"}</button>}
       {aviso && <p className="text-lime-400">{aviso}</p>}
       {modo === "entrar" && boton("Ingresar", "Ingresando…")}
       {modo === "crear" && boton("Crear mi cuenta", "Creando…")}
-      {modo === "recuperar" && boton("Mandarme el link", "Mandando…")}
+      {modo === "recuperar" && boton(esMail ? "Mandarme el link" : "Mandarme el código", "Mandando…")}
       {modo === "entrar" && <button type="button" onClick={() => cambiar("recuperar")} className="text-xs text-teal-400 hover:text-lime-400">Olvidé mi contraseña</button>}
       {modo === "recuperar" && <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400 hover:text-lime-400">← Volver a ingresar</button>}
+    </div>
+  );
+}
+
+/* Después de crear la cuenta con teléfono: "¿Sos alguno de estos?" con los perfiles que ya tienen
+   ese número (un organizador lo anotó en un torneo) o "Soy nuevo". Así hereda sus torneos y puntos.
+   Ver completar_cuenta en 20261040_cuenta_por_telefono.sql */
+function ReclamarPerfil({ jugadorApi, onListo }) {
+  const [perfiles, setPerfiles] = useState(null);
+  const [elegido, setElegido] = useState(null); // id del perfil, "nuevo" o null
+  const [form, setForm] = useState({ apellido: "", nombre: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = (await supabaseRpc("mis_perfiles_por_telefono", {}, await jugadorApi.token())) || [];
+        setPerfiles(rows);
+        if (rows.length === 0) setElegido("nuevo");
+      } catch { setPerfiles([]); setElegido("nuevo"); }
+    })();
+  }, [jugadorApi]);
+  const guardar = async () => {
+    if (!elegido) { setError("Elegí quién sos."); return; }
+    if (elegido === "nuevo" && (!form.apellido.trim() || !form.nombre.trim())) { setError("Completá apellido y nombre."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("completar_cuenta", { p_perfil: elegido === "nuevo" ? null : elegido, p_apellido: elegido === "nuevo" ? form.apellido : "", p_nombre: elegido === "nuevo" ? form.nombre : "" }, await jugadorApi.token());
+      await onListo(await jugadorApi.recargarPerfil());
+    } catch { setError("No se pudieron guardar tus datos. Probá de nuevo."); setBusy(false); }
+  };
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  if (perfiles === null) return <p className="text-sm opacity-60" style={F.body}>Cargando…</p>;
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-100 font-semibold">¡Listo, tu teléfono quedó confirmado!</p>
+      {perfiles.length > 0 && (
+        <>
+          <p className="text-teal-300">Ya te anotaron en algún torneo con este número. ¿Sos {perfiles.length === 1 ? "vos" : "alguno de estos"}? Así sumás tus torneos y puntos.</p>
+          <div className="space-y-2">
+            {perfiles.map((p) => (
+              <button key={p.id} type="button" onClick={() => setElegido(p.id)} className="w-full text-left px-3 py-2.5 rounded-lg border font-semibold" style={elegido === p.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#e2e8f0" }}>
+                Sí, soy {nombreJugador(p)}
+              </button>
+            ))}
+            <button type="button" onClick={() => setElegido("nuevo")} className="w-full text-left px-3 py-2.5 rounded-lg border" style={elegido === "nuevo" ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>
+              No, soy otra persona
+            </button>
+          </div>
+        </>
+      )}
+      {elegido === "nuevo" && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" htmlFor="rec-apellido">Apellido</label>
+            <input id="rec-apellido" autoComplete="family-name" value={form.apellido} onChange={(e) => setForm({ ...form, apellido: e.target.value })} maxLength={40} className={inputCls} style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" htmlFor="rec-nombre">Nombre</label>
+            <input id="rec-nombre" autoComplete="given-name" value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={40} className={inputCls} style={adminInput} />
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-teal-500">Tu teléfono solo lo ven los organizadores de tus torneos, los complejos donde reservás y Smash Point. <a href="#privacidad" target="_blank" rel="noopener noreferrer" className="underline text-teal-300">Política de privacidad</a></p>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy || !elegido} onClick={guardar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Seguir"}</button>
     </div>
   );
 }
@@ -6697,10 +6843,10 @@ function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titu
 }
 
 /* Datos del jugador: nombre, apellido, WhatsApp y (opcional) fecha de nacimiento */
-function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
+function PerfilJugadorForm({ initial, email, submitLabel, onSave, telefonoFijo = null }) {
   const [form, setForm] = useState({
     nombre: initial?.nombre || "", apellido: initial?.apellido || "",
-    telefono: initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
+    telefono: telefonoFijo ? formatArPhone(telefonoFijo) : initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -6721,7 +6867,7 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
 
   return (
     <div className="space-y-3 text-sm" style={F.body}>
-      {email && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email}</span>.</p>}
+      {(email || telefonoFijo) && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email || formatArPhone(telefonoFijo)}</span>.</p>}
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nombre">Nombre</label>
@@ -6732,10 +6878,12 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
           <input id="jug-apellido" autoComplete="family-name" value={form.apellido} onChange={set("apellido")} maxLength={40} className={inputCls} style={adminInput} />
         </div>
       </div>
-      <div>
-        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
-        <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
-      </div>
+      {!telefonoFijo && (
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
+          <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
+        </div>
+      )}
       <div>
         <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nac">Fecha de nacimiento (opcional)</label>
         <input id="jug-nac" type="date" value={form.fecha_nacimiento} onChange={set("fecha_nacimiento")} min="1920-01-02" className={inputCls} style={adminInput} />
@@ -6906,7 +7054,7 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
             </div>
             <div className="text-teal-300">
               <p>{jugador.perfil.nombre} {jugador.perfil.apellido} · {formatArPhone(jugador.perfil.telefono)}</p>
-              <p className="text-xs text-teal-500">{jugador.email}</p>
+              <p className="text-xs text-teal-500">{jugador.email || formatArPhone(jugador.phone)}</p>
             </div>
             <ul className="text-xs text-teal-400 space-y-1 list-disc pl-4">
               <li>El complejo tiene que confirmar tu pedido. Si no lo confirma en 24 h (o antes del turno), vence y el horario se libera.</li>
@@ -7037,7 +7185,7 @@ function MisReservas({ jugadorApi, venues, onBack }) {
     <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
       <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
       <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Mis reservas</h1>
-      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email}</p>
+      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email || formatArPhone(jugador.phone)}</p>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
       {aviso && <p className="text-sm text-lime-400 mb-3">{aviso}</p>}
       {reservas === null ? (
@@ -7063,7 +7211,14 @@ function MisReservas({ jugadorApi, venues, onBack }) {
       </div>
       {editando && (
         <Modal title="Mis datos" onClose={() => setEditando(false)}>
-          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} submitLabel="Guardar" onSave={async (p) => { await jugadorApi.savePerfil(p); setEditando(false); }} />
+          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} telefonoFijo={jugador.phone} submitLabel="Guardar" onSave={async (p) => {
+            // Cuenta con teléfono: los datos van también a su perfil de jugador (ver completar_cuenta)
+            if (jugador.phone) {
+              await supabaseRpc("completar_cuenta", { p_perfil: null, p_apellido: p.apellido, p_nombre: p.nombre, p_fecha_nacimiento: p.fecha_nacimiento }, await jugadorApi.token());
+              await jugadorApi.recargarPerfil();
+            } else await jugadorApi.savePerfil(p);
+            setEditando(false);
+          }} />
         </Modal>
       )}
     </section>
@@ -10218,7 +10373,7 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
         <h1 className="text-xl" style={F.display}>MI CUENTA</h1>
         <button type="button" onClick={onSalir} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
       </div>
-      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email}</p>
+      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email || formatArPhone(jugador.phone)}</p>
       {aviso && <p className="text-sm text-lime-400 mb-4">{aviso}</p>}
       <div className="space-y-2">
         {opcion("Reservar un turno", "En cualquier complejo, y ver mis reservas", onReservar, "reservar")}
