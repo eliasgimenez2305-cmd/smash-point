@@ -16,7 +16,6 @@ alter table public.colaboradores add column if not exists id uuid default gen_ra
 update public.colaboradores set id = gen_random_uuid() where id is null;
 alter table public.colaboradores alter column id set not null;
 alter table public.colaboradores add column if not exists telefono text check (telefono is null or telefono ~ '^549[0-9]{10}$');
-alter table public.colaboradores alter column email drop not null;
 do $$
 begin
   -- La clave pasa de (complejo, mail) a id, para poder cargar empleados sin mail
@@ -29,6 +28,7 @@ begin
     alter table public.colaboradores add constraint colaboradores_mail_o_telefono check (email is not null or telefono is not null);
   end if;
 end $$;
+alter table public.colaboradores alter column email drop not null;
 create unique index if not exists colaboradores_por_mail on public.colaboradores (complejo_id, email) where email is not null;
 create unique index if not exists colaboradores_por_telefono on public.colaboradores (complejo_id, telefono) where telefono is not null;
 
