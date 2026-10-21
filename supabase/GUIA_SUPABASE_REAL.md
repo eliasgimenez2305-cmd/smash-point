@@ -80,6 +80,14 @@ Y [`migrations/20261039_inscripcion_perfiles.sql`](migrations/20261039_inscripci
 Y [`migrations/20261040_cuenta_por_telefono.sql`](migrations/20261040_cuenta_por_telefono.sql) (cuentas de jugador con teléfono: al crear la cuenta reclama su perfil). Para que se puedan crear cuentas hace falta además activar **Phone** en Authentication con el proveedor (Twilio, canal WhatsApp) → **Run** → **Success**.
 Y [`migrations/20261041_telefonos_empleados.sql`](migrations/20261041_telefonos_empleados.sql) (empleados por teléfono, cambio de teléfono del jugador y corrección de teléfonos por el organizador) → **Run** → **Success**.
 Y [`migrations/20261042_avisos.sql`](migrations/20261042_avisos.sql) (la campanita: avisos de pedidos de turno, confirmaciones, cancelaciones e inscripciones, y el recordatorio 2 h antes con una tarea programada de pg_cron cada 10 minutos) → **Run** → **Success**.
+Y [`migrations/20261043_push.sql`](migrations/20261043_push.sql) (avisos al celular: los aparatos que activan "Recibir avisos en este celular" y el disparador que llama a la función `enviar-push`) → **Run** → **Success**. Sin los pasos de abajo no manda nada, pero tampoco molesta.
+
+> **Avisos al celular (push), una sola vez en el real:**
+> 1. Generar un par de claves VAPID **nuevo para el real** (no usar las de PRUEBA): `npx web-push generate-vapid-keys`.
+> 2. **Edge Functions** › crear `enviar-push` con el código de `supabase/functions/enviar-push/index.ts` y, en Settings, apagar **Verify JWT**.
+> 3. **Edge Functions › Secrets**: `VAPID_PUBLICA`, `VAPID_PRIVADA` y `PUSH_SECRETO` (una clave larga al azar).
+> 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-push', 'push_url');` y `select vault.create_secret('<el mismo PUSH_SECRETO>', 'push_secreto');`
+> 5. **Netlify › Environment variables**: `VITE_VAPID_PUBLICA` con la clave pública, y volver a publicar. Sin esa variable la app no muestra el botón.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 

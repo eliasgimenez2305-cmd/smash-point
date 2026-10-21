@@ -8,3 +8,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <SmashPointApp />
   </React.StrictMode>
 );
+
+// App instalable y notificaciones push (ver public/sw.js)
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => { navigator.serviceWorker.register("/sw.js").catch(() => {}); });
+}

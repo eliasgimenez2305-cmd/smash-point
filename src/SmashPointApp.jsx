@@ -42,6 +42,8 @@ const STORAGE_KEY_EVENTS = "sp:events";
    .env.local (no se sube) con VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY. */
 const SUPABASE_URL = import.meta.env?.VITE_SUPABASE_URL || "https://cfaapvyttzedackbmkpt.supabase.co";
 const SUPABASE_ANON_KEY = import.meta.env?.VITE_SUPABASE_ANON_KEY || "sb_publishable_D6uARuXOiMKEmpOr2evMsQ_r7V3d9wh";
+// Clave pública de las notificaciones push (ver supabase/functions/enviar-push). Sin ella no se ofrece el botón.
+const VAPID_PUBLICA = import.meta.env?.VITE_VAPID_PUBLICA || "";
 
 async function supabaseSignIn(email, password) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -9656,6 +9658,85 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
 
 /* La campanita: los avisos de la cuenta (ver 20261042_avisos.sql). Se actualiza cada minuto y al
    volver a la pestaña. Al tocar un aviso se marca leído y lleva a donde corresponde (onIr). */
+/* "Recibir avisos en este celular": suscribe este navegador a las notificaciones push (los avisos de la
+   campanita también llegan como notificación). En iPhone solo anda con la app agregada a la pantalla de inicio. */
+function base64AUint8(b64) {
+  const t = (b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+}
+function AvisosEnEsteAparato({ token }) {
+  const soporta = !!VAPID_PUBLICA && typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const esIphone = typeof navigator !== "undefined" && /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const instalada = typeof window !== "undefined" && (window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true);
+  const [estado, setEstado] = useState(soporta ? "cargando" : "no"); // cargando | apagado | activo | bloqueado | no
+  const [ocupado, setOcupado] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!soporta) return;
+    if (Notification.permission === "denied") { setEstado("bloqueado"); return; }
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager.getSubscription())
+      .then((sub) => setEstado(sub && Notification.permission === "granted" ? "activo" : "apagado"))
+      .catch(() => setEstado("apagado"));
+  }, [soporta]);
+  const activar = async () => {
+    setOcupado(true); setError("");
+    try {
+      const permiso = await Notification.requestPermission();
+      if (permiso !== "granted") { setEstado(permiso === "denied" ? "bloqueado" : "apagado"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64AUint8(VAPID_PUBLICA) }));
+      const d = sub.toJSON();
+      await supabaseRpc("guardar_suscripcion", { p_endpoint: d.endpoint, p_p256dh: d.keys?.p256dh, p_auth: d.keys?.auth, p_agente: navigator.userAgent }, await token());
+      setEstado("activo");
+    } catch (e) {
+      setError("No se pudieron activar los avisos. Probá de nuevo.");
+      console.error(e);
+    } finally { setOcupado(false); }
+  };
+  const desactivar = async () => {
+    setOcupado(true); setError("");
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await supabaseRpc("quitar_suscripcion", { p_endpoint: sub.endpoint }, await token()).catch(() => {});
+        await sub.unsubscribe();
+      }
+      setEstado("apagado");
+    } finally { setOcupado(false); }
+  };
+  let contenido;
+  if (!soporta) {
+    if (!VAPID_PUBLICA) return null;
+    contenido = esIphone && !instalada
+      ? <p className="text-xs text-teal-400">Para recibir avisos en el iPhone, abrí Smash Point en Safari, tocá <b>Compartir</b> › <b>Agregar a inicio</b> y entrá desde ese ícono.</p>
+      : <p className="text-xs text-teal-500">Este navegador no permite recibir avisos.</p>;
+  } else if (estado === "cargando") return null;
+  else if (estado === "activo") {
+    contenido = (
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-lime-400">Avisos activados en este aparato.</p>
+        <button type="button" disabled={ocupado} onClick={desactivar} className="text-xs text-teal-400 hover:text-red-400 disabled:opacity-50">Desactivar</button>
+      </div>
+    );
+  } else if (estado === "bloqueado") {
+    contenido = <p className="text-xs text-teal-400">Bloqueaste los avisos de Smash Point. Para recibirlos, permitilos en la configuración del navegador (el candadito al lado de la dirección).</p>;
+  } else {
+    contenido = (
+      <button type="button" disabled={ocupado} onClick={activar} className="w-full rounded-lg py-2 text-sm font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#0b1c24" }}>
+        {ocupado ? "Activando…" : "Recibir avisos en este celular"}
+      </button>
+    );
+  }
+  return (
+    <div className="px-3 py-2.5 border-t border-teal-900">
+      {contenido}
+      {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+    </div>
+  );
+}
+
 function Campanita({ token, onIr }) {
   const [avisos, setAvisos] = useState(null);
   const [abierta, setAbierta] = useState(false);
@@ -9680,6 +9761,27 @@ function Campanita({ token, onIr }) {
     document.addEventListener("mousedown", fuera);
     return () => document.removeEventListener("mousedown", fuera);
   }, [abierta]);
+  const [pedido, setPedido] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("aviso"); } catch { return null; }
+  });
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const alMensaje = (e) => { if (e.data?.tipo === "aviso" && e.data.id) { setPedido(e.data.id); cargar(); } };
+    navigator.serviceWorker.addEventListener("message", alMensaje);
+    return () => navigator.serviceWorker.removeEventListener("message", alMensaje);
+  }, [cargar]);
+  useEffect(() => {
+    if (!pedido || !avisos) return;
+    const a = avisos.find((x) => x.id === pedido);
+    setPedido(null);
+    try {
+      const u = new URL(window.location.href);
+      if (u.searchParams.has("aviso")) { u.searchParams.delete("aviso"); window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash); }
+    } catch {}
+    if (!a) return;
+    if (!a.leida_at) marcar(a.id);
+    onIr?.(a.destino || {});
+  }, [pedido, avisos]); // eslint-disable-line react-hooks/exhaustive-deps
   const sinLeer = (avisos || []).filter((a) => !a.leida_at).length;
   const marcar = async (filtro) => {
     const ahora = new Date().toISOString();
@@ -9721,6 +9823,7 @@ function Campanita({ token, onIr }) {
               </button>
             ))}
           </div>
+          <AvisosEnEsteAparato token={token} />
         </div>
       )}
     </div>
