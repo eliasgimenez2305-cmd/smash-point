@@ -2828,7 +2828,7 @@ function RegistrationSheet({ tournament, organizer, onClose, jugadorApi = null }
               <input id="insc-web" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={(e) => setWebsite(e.target.value)} />
             </div>
 
-            {(jugador1.apellido || jugador1.nombre || jugador2.apellido || jugador2.nombre) && !datosOk && !full && (
+            {((!usoMiCuenta && (jugador1.apellido || jugador1.nombre)) || jugador2.apellido || jugador2.nombre) && !datosOk && !full && (
               <p className="text-sm text-amber-400">Completá apellido, nombre y teléfono de {individual ? "quien se inscribe" : "los dos jugadores"}.</p>
             )}
             {full && <p className="text-sm text-amber-400">El cupo de esta categoría ya está completo.</p>}
