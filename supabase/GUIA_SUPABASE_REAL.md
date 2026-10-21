@@ -79,6 +79,7 @@ Y [`migrations/20261038_perfiles_jugador.sql`](migrations/20261038_perfiles_juga
 Y [`migrations/20261039_inscripcion_perfiles.sql`](migrations/20261039_inscripcion_perfiles.sql) (inscripción pública con los dos jugadores por separado, sus teléfonos y a quién contactar; al aceptarla cada jugador queda con su perfil. La inscripción vieja sigue andando, así que se puede correr antes de publicar la app) → **Run** → **Success**.
 Y [`migrations/20261040_cuenta_por_telefono.sql`](migrations/20261040_cuenta_por_telefono.sql) (cuentas de jugador con teléfono: al crear la cuenta reclama su perfil). Para que se puedan crear cuentas hace falta además activar **Phone** en Authentication con el proveedor (Twilio, canal WhatsApp) → **Run** → **Success**.
 Y [`migrations/20261041_telefonos_empleados.sql`](migrations/20261041_telefonos_empleados.sql) (empleados por teléfono, cambio de teléfono del jugador y corrección de teléfonos por el organizador) → **Run** → **Success**.
+Y [`migrations/20261042_avisos.sql`](migrations/20261042_avisos.sql) (la campanita: avisos de pedidos de turno, confirmaciones, cancelaciones e inscripciones, y el recordatorio 2 h antes con una tarea programada de pg_cron cada 10 minutos) → **Run** → **Success**.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 

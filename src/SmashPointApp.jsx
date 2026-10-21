@@ -5632,11 +5632,12 @@ function ContactFooter({ onGoLogin, conCuentas = true }) {
 
 /* Encabezado público: arriba a la derecha "Ingresar" o "Mi cuenta", el logo al medio y debajo las
    pestañas Torneos · Complejos · Entrenamientos */
-function SiteHeader({ tab, onTab, cuenta }) {
+function SiteHeader({ tab, onTab, cuenta, campanita = null }) {
   return (
     <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-3 pb-3">
       {cuenta && (
-        <div className="flex justify-end mb-1">
+        <div className="flex justify-end items-center gap-1 mb-1">
+          {campanita}
           <button type="button" onClick={cuenta.onClick} className="px-3 py-1 rounded-full text-xs font-semibold border hover:border-lime-400" style={{ ...F.body, borderColor: `${BRAND.cyan}66`, color: cuenta.logueado ? BRAND.lime : "#cbd5e1" }}>{cuenta.logueado ? "Mi cuenta" : "Ingresar"}</button>
         </div>
       )}
@@ -7546,7 +7547,11 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
+      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }}
+        campanita={jugadorApi?.jugador ? <Campanita token={jugadorApi.token} onIr={(d) => {
+          if (d.ir === "mis-reservas") { goTab("canchas"); setMisReservas(true); }
+          else if (d.ir === "torneo-publico" && d.torneo) onOpen(d.torneo);
+        }} /> : null} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
       <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
@@ -9547,6 +9552,7 @@ const PANEL_ICONOS = {
   respaldo: "M12 3v12M7 10l5 5 5-5M4 17v3h16v-3",
   funciones: "M4 8h10M18 8h2M4 16h2M10 16h10M16 6v4M8 14v4",
   menu: "M4 7h16M4 12h16M4 17h16",
+  campana: "M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 003.4 0",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
 function PanelIcono({ nombre, className = "w-5 h-5" }) {
@@ -9559,7 +9565,7 @@ function PanelIcono({ nombre, className = "w-5 h-5" }) {
 
 /* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
    botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
-function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, children }) {
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, campanita = null, children }) {
   const [abierto, setAbierto] = useState(false);
   useEffect(() => {
     if (!abierto) return;
@@ -9626,6 +9632,7 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
         </button>
         <p className="flex-1 min-w-0 text-sm font-semibold truncate" style={F.body}>{nombre}</p>
         {grupos.flatMap((g) => g.items).some(([, , , aviso]) => aviso > 0) && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} aria-label="Hay avisos" />}
+        {campanita}
       </div>
       {abierto && (
         <div className="lg:hidden fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Menú">
@@ -9639,9 +9646,83 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
         </div>
       )}
       <main className={`px-4 sm:px-6 lg:px-10 py-6 lg:py-8 ${anchoCompleto ? "" : "max-w-5xl"}`}>
+        {campanita && <div className="hidden lg:flex justify-end -mt-4 mb-2">{campanita}</div>}
         {titulo && <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>}
         {children}
       </main>
+    </div>
+  );
+}
+
+/* La campanita: los avisos de la cuenta (ver 20261042_avisos.sql). Se actualiza cada minuto y al
+   volver a la pestaña. Al tocar un aviso se marca leído y lleva a donde corresponde (onIr). */
+function Campanita({ token, onIr }) {
+  const [avisos, setAvisos] = useState(null);
+  const [abierta, setAbierta] = useState(false);
+  const caja = useRef(null);
+  const cargar = useCallback(async () => {
+    try {
+      const t = await token();
+      if (!t) return;
+      setAvisos((await supabaseTable("notificaciones?select=id,tipo,titulo,texto,destino,creada_at,leida_at&order=creada_at.desc&limit=30", { accessToken: t })) || []);
+    } catch { /* sin conexión o sin la tabla todavía: se reintenta en el próximo minuto */ }
+  }, [token]);
+  useEffect(() => {
+    cargar();
+    const id = setInterval(() => { if (document.visibilityState === "visible") cargar(); }, 60000);
+    const alVolver = () => { if (document.visibilityState === "visible") cargar(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", alVolver); };
+  }, [cargar]);
+  useEffect(() => {
+    if (!abierta) return;
+    const fuera = (e) => { if (caja.current && !caja.current.contains(e.target)) setAbierta(false); };
+    document.addEventListener("mousedown", fuera);
+    return () => document.removeEventListener("mousedown", fuera);
+  }, [abierta]);
+  const sinLeer = (avisos || []).filter((a) => !a.leida_at).length;
+  const marcar = async (filtro) => {
+    const ahora = new Date().toISOString();
+    setAvisos((l) => (l || []).map((a) => (!a.leida_at && (filtro === "todos" || a.id === filtro) ? { ...a, leida_at: ahora } : a)));
+    try {
+      await supabaseTable(`notificaciones?leida_at=is.null${filtro === "todos" ? "" : `&id=eq.${filtro}`}`, { method: "PATCH", body: { leida_at: ahora }, accessToken: await token(), prefer: "return=minimal" });
+    } catch {}
+  };
+  const cuando = (iso) => {
+    const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (min < 1) return "recién";
+    if (min < 60) return `hace ${min} min`;
+    if (min < 1440) return `hace ${Math.round(min / 60)} h`;
+    return fechaCorta(fechaArgentina(iso));
+  };
+  if (avisos === null) return null;
+  return (
+    <div ref={caja} className="relative" style={F.body}>
+      <button type="button" onClick={() => setAbierta((v) => !v)} className="relative p-2 rounded-lg text-slate-200 hover:bg-white/5" aria-label={sinLeer ? `Avisos: ${sinLeer} sin leer` : "Avisos"} aria-expanded={abierta}>
+        <PanelIcono nombre="campana" className="w-6 h-6" />
+        {sinLeer > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] font-bold flex items-center justify-center" style={{ backgroundColor: "#ef4444", color: "#fff" }}>{sinLeer > 9 ? "9+" : sinLeer}</span>}
+      </button>
+      {abierta && (
+        <div className="absolute right-0 mt-2 w-80 max-w-[90vw] rounded-xl border border-teal-800 shadow-xl z-50 overflow-hidden" style={{ backgroundColor: "#071319", colorScheme: "dark" }}>
+          <div className="flex items-center justify-between px-3 py-2 border-b border-teal-900">
+            <p className="text-sm font-semibold text-slate-100">Avisos</p>
+            {sinLeer > 0 && <button type="button" onClick={() => marcar("todos")} className="text-xs text-teal-400 hover:text-lime-400">Marcar todo como leído</button>}
+          </div>
+          <div className="max-h-96 overflow-y-auto">
+            {avisos.length === 0 ? <p className="px-3 py-6 text-sm text-center text-teal-500">No tenés avisos.</p> : avisos.map((a) => (
+              <button key={a.id} type="button" onClick={() => { if (!a.leida_at) marcar(a.id); setAbierta(false); onIr?.(a.destino || {}); }}
+                className="w-full text-left px-3 py-2.5 border-b border-teal-900/60 hover:bg-white/5 flex gap-2">
+                <span className="mt-1.5 w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: a.leida_at ? "transparent" : BRAND.lime }} />
+                <span className="min-w-0">
+                  <span className={`block text-sm ${a.leida_at ? "text-slate-300" : "text-slate-100 font-semibold"}`}>{a.titulo}</span>
+                  {a.texto && <span className="block text-xs text-teal-400">{a.texto}</span>}
+                  <span className="block text-[11px] text-teal-600 mt-0.5">{cuando(a.creada_at)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -9938,6 +10019,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   ].filter((g) => g.items.length > 0);
   const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
+  const tokenPanel = useCallback(async () => organizer.accessToken, [organizer.accessToken]);
 
   return (
     <PanelLayout
@@ -9951,6 +10033,10 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       onMiCuenta={onMiCuenta}
       titulo={torneoAbierto ? null : tituloSeccion}
       anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
+      campanita={<Campanita token={tokenPanel} onIr={(d) => {
+        if (d.ir === "agenda" && verReservas) { if (torneoAbierto) onCerrarTorneo(); setSeccion("reservas"); }
+        else if (d.ir === "torneo" && d.torneo) onOpen(d.torneo);
+      }} />}
     >
       <PlanAviso filas={filasAviso} colaborador={colaborador} />
       {torneoAbierto ? torneoAbierto : seccion === "inicio" && verInicio ? (
