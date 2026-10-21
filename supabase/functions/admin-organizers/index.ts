@@ -1,7 +1,8 @@
 // Edge Function: admin-organizers
 // Crea o borra cuentas de organizador de verdad (usuario de Auth + fila en la tabla
-// "organizers"). Usa la service_role key, que solo existe acá adentro (nunca en el
-// navegador), y primero valida que quien llama esté logueado como "creador".
+// "organizers"), y le muestra/cambia al creador el mail de entrada y la contraseña de cada uno.
+// Usa la service_role key, que solo existe acá adentro (nunca en el navegador), y primero
+// valida que quien llama esté logueado como "creador".
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -112,6 +113,53 @@ Deno.serve(async (req) => {
       }
 
       return json({ success: true });
+    }
+
+    // Mail de entrada de un organizador (para mostrarlo en el panel del creador)
+    // y cambio de mail o contraseña (los mails de entrada pueden ser inventados: el
+    // organizador no puede recuperar la clave solo, se la cambia el creador).
+    if (body.action === "acceso" || body.action === "cambiar_acceso") {
+      const { id } = body;
+      if (!id || !/^[0-9a-f-]{36}$/i.test(String(id))) return json({ error: "Falta el id." }, 400);
+      const esOrg = await fetch(`${SUPABASE_URL}/rest/v1/organizers?id=eq.${id}&select=id`, {
+        headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
+      });
+      if (!esOrg.ok || !(await esOrg.json())[0]) return json({ error: "No es una cuenta de organizador." }, 404);
+
+      if (body.action === "acceso") {
+        const userRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${id}`, {
+          headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
+        });
+        const u = await userRes.json();
+        if (!userRes.ok) return json({ error: u.msg || u.message || "No se encontró la cuenta." }, 400);
+        return json({ email: u.email || "", ultimoIngreso: u.last_sign_in_at || null });
+      }
+
+      const cambios: Record<string, unknown> = {};
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      if (email) {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "El mail no es válido." }, 400);
+        cambios.email = email;
+        cambios.email_confirm = true;
+      }
+      if (password) {
+        if (password.length < 6) return json({ error: "La contraseña tiene que tener al menos 6 caracteres." }, 400);
+        cambios.password = password;
+      }
+      if (!Object.keys(cambios).length) return json({ error: "No hay nada para cambiar." }, 400);
+      const upd = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${id}`, {
+        method: "PUT",
+        headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(cambios),
+      });
+      const r = await upd.json();
+      if (!upd.ok) {
+        const msg = r.msg || r.message || "";
+        if (/already|registered|exists/i.test(msg)) return json({ error: "Ese mail ya lo usa otra cuenta." }, 400);
+        return json({ error: msg || "No se pudo cambiar." }, 400);
+      }
+      return json({ email: r.email || email });
     }
 
     return json({ error: "Acción no reconocida." }, 400);

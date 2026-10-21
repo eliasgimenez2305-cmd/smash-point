@@ -90,6 +90,7 @@ Y [`migrations/20261043_push.sql`](migrations/20261043_push.sql) (avisos al celu
 > 5. **Netlify › Environment variables**: `VITE_VAPID_PUBLICA` con la clave pública, y volver a publicar. Sin esa variable la app no muestra el botón.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
+> **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 
 ### Verificación (solo lectura, no cambia nada)
 

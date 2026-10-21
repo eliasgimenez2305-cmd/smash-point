@@ -8082,6 +8082,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [editingAcceso, setEditingAcceso] = useState(false);
 
   const saveProfile = async () => {
     setSaving(true);
@@ -8126,6 +8127,9 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
           <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
             Nombre y logo
           </button>
+          <button type="button" onClick={() => setEditingAcceso((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
+            Mail y contraseña
+          </button>
           {!confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
@@ -8140,6 +8144,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
         <p className="text-xs text-teal-500 mt-2" style={F.body}>Se borra la cuenta de acceso; sus torneos ya cargados van a quedar en la plataforma pero sin organizador asignado.</p>
       )}
       {deleteError && <p className="text-xs text-red-400 mt-1" style={F.body}>{deleteError}</p>}
+      {editingAcceso && <AccesoOrganizador id={o.id} accessToken={accessToken} onCerrar={() => setEditingAcceso(false)} />}
       {editingProfile && (
         <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-teal-900">
           <div>
@@ -8158,6 +8163,69 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
           {saveError && <p className="text-xs text-red-400 w-full" style={F.body}>{saveError}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* Mail de entrada y contraseña de un organizador, desde el panel del creador (los mails de entrada
+   pueden ser inventados, así que el organizador no puede recuperar la clave solo). */
+function AccesoOrganizador({ id, accessToken, onCerrar }) {
+  const [actual, setActual] = useState(null);
+  const [email, setEmail] = useState("");
+  const [clave, setClave] = useState("");
+  const [verClave, setVerClave] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [listo, setListo] = useState("");
+  useEffect(() => {
+    callAdminOrganizers(accessToken, { action: "acceso", id })
+      .then((d) => { setActual(d); setEmail(d.email || ""); })
+      .catch((e) => setError(e.message || "No se pudo leer la cuenta."));
+  }, [id, accessToken]);
+  const cambiaMail = !!actual && !!email.trim() && email.trim().toLowerCase() !== (actual.email || "").toLowerCase();
+  const guardar = async () => {
+    setBusy(true); setError(""); setListo("");
+    try {
+      const d = await callAdminOrganizers(accessToken, { action: "cambiar_acceso", id, email: cambiaMail ? email.trim() : "", password: clave });
+      setActual((a) => ({ ...a, email: d.email }));
+      setEmail(d.email);
+      setListo(clave ? "Listo. Pasale la contraseña nueva al organizador (por WhatsApp, por ejemplo)." : "Listo. Desde ahora entra con ese mail.");
+      setClave("");
+    } catch (e) {
+      setError(e.message || "No se pudo cambiar.");
+    }
+    setBusy(false);
+  };
+  const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  return (
+    <div className="mt-3 pt-3 border-t border-teal-900 space-y-3" style={F.body}>
+      {actual === null && !error ? <p className="text-sm opacity-60">Cargando…</p> : actual && (
+        <>
+          {actual.ultimoIngreso && <p className="text-xs text-teal-500">Último ingreso: {fechaCorta(fechaArgentina(actual.ultimoIngreso))}</p>}
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="min-w-[240px] flex-1">
+              <label className="block text-xs text-teal-400 mb-1">Mail para entrar</label>
+              <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setListo(""); }} className="w-full px-3 py-2 rounded border outline-none focus:border-lime-400" style={inputStyle} autoComplete="off" />
+            </div>
+            <div className="min-w-[200px] flex-1">
+              <label className="block text-xs text-teal-400 mb-1">Contraseña nueva (vacío = no se cambia)</label>
+              <div className="flex gap-2 items-center">
+                <input type={verClave ? "text" : "password"} value={clave} onChange={(e) => { setClave(e.target.value); setListo(""); }} className="w-full px-3 py-2 rounded border outline-none focus:border-lime-400" style={inputStyle} autoComplete="new-password" placeholder="Mínimo 6 caracteres" />
+                <button type="button" onClick={() => setVerClave((v) => !v)} className="text-xs text-teal-400 hover:text-lime-400 whitespace-nowrap">{verClave ? "Ocultar" : "Ver"}</button>
+              </div>
+            </div>
+          </div>
+          {cambiaMail && <p className="text-xs text-amber-400">El organizador va a tener que entrar con el mail nuevo.</p>}
+          <div className="flex items-center gap-3">
+            <button type="button" disabled={busy || (!cambiaMail && !clave)} onClick={guardar} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
+              {busy ? "Guardando…" : "Guardar"}
+            </button>
+            <button type="button" onClick={onCerrar} className="text-sm text-teal-400">Cerrar</button>
+          </div>
+        </>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {listo && <p className="text-xs text-lime-400">{listo}</p>}
     </div>
   );
 }
