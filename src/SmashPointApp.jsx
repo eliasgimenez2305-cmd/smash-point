@@ -371,6 +371,19 @@ async function supabaseUpdatePassword(accessToken, password) {
   if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo cambiar la contraseña."), { code: data.error_code || data.code, status: res.status });
   return data;
 }
+/* Cambio de teléfono: Supabase manda un código al número nuevo; se confirma con verify (phone_change) */
+async function supabasePedirCambioTelefono(accessToken, phone) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ phone, channel: CANAL_CODIGO }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo pedir el cambio."), { code: data.error_code || data.code, status: res.status });
+  return data;
+}
+const supabaseConfirmarCambioTelefono = (phone, token) => supabaseAuthPost("verify", { type: "phone_change", phone, token });
+
 /* Lo que traen los links de los mails en la dirección (#access_token=…&type=signup|recovery, o
    #error=…). Se lee una vez al abrir la página y se borra de la dirección. */
 function leerLinkDeMail() {
@@ -2569,12 +2582,20 @@ function OrganizerAvatar({ organizer, size = 48, color = BRAND.cyan }) {
 /* Formulario público de inscripción, en una hoja que sube desde abajo (en la compu, centrada).
    Sin cuenta: se guarda como "pendiente" y el organizador la acepta o rechaza desde su panel.
    Trae un campo trampa (honeypot) oculto para frenar bots y el botón se bloquea mientras envía. */
-function RegistrationSheet({ tournament, organizer, onClose }) {
+function RegistrationSheet({ tournament, organizer, onClose, jugadorApi = null }) {
   const categories = tournament.categories.filter(categoryAcceptsRegistrations);
   const [categoryId, setCategoryId] = useState(categories.length === 1 ? categories[0].id : "");
   // Cada jugador por separado (apellido, nombre y teléfono) y a quién le escribe el organizador.
   // Con los teléfonos, cada jugador queda con su perfil para el ranking (ver 20261039_inscripcion_perfiles.sql)
-  const [jugador1, setJugador1] = useState({ apellido: "", nombre: "", tel: "" });
+  // Con la sesión iniciada (cuenta de teléfono con sus datos), el jugador 1 es el que entró; "Anotar a
+  // otros" vuelve a pedir los dos jugadores
+  const cuenta = jugadorApi?.jugador;
+  const yo = cuenta?.phone && cuenta.perfil ? { apellido: cuenta.perfil.apellido, nombre: cuenta.perfil.nombre, tel: cuenta.phone.slice(3) } : null;
+  const [anotarOtros, setAnotarOtros] = useState(false);
+  const vacio = { apellido: "", nombre: "", tel: "" };
+  const [jugador1, setJugador1] = useState(() => yo || vacio);
+  const usoMiCuenta = !!yo && !anotarOtros;
+  const cambiarAnotarOtros = (otros) => { setAnotarOtros(otros); setJugador1(otros || !yo ? vacio : yo); };
   const [jugador2, setJugador2] = useState({ apellido: "", nombre: "", tel: "" });
   const [contacto, setContacto] = useState(1);
   const [website, setWebsite] = useState(""); // honeypot: una persona nunca lo ve ni lo completa
@@ -2704,9 +2725,21 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
 
             {[[jugador1, setJugador1, 1], ...(individual ? [] : [[jugador2, setJugador2, 2]])].map(([j, setJ, n]) => {
               const telOk = normalizeArPhone(j.tel);
+              if (n === 1 && usoMiCuenta) {
+                return (
+                  <div key={n} className="rounded-xl p-3 flex items-center justify-between gap-3" style={{ border: `1px solid ${BRAND.lime}55` }}>
+                    <div className="min-w-0">
+                      <p className="text-xs text-teal-400">{individual ? "Te anotás vos" : "Jugador 1: vos"}</p>
+                      <p className="font-semibold truncate">{nombreJugador(j)}</p>
+                      <p className="text-xs text-teal-500">{formatArPhone(telOk)}</p>
+                    </div>
+                    <button type="button" onClick={() => cambiarAnotarOtros(true)} className="shrink-0 text-xs underline text-teal-300">Anotar a otros</button>
+                  </div>
+                );
+              }
               return (
                 <fieldset key={n} className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
-                  <legend className="px-1 text-xs text-teal-300">{individual ? "Tus datos" : `Jugador ${n}`}</legend>
+                  <legend className="px-1 text-xs text-teal-300">{individual ? "Tus datos" : `Jugador ${n}`}{n === 1 && yo && anotarOtros && <button type="button" onClick={() => cambiarAnotarOtros(false)} className="ml-2 underline text-lime-400">Anotarme yo</button>}</legend>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className={label} htmlFor={`insc-ap${n}`}>Apellido</label>
@@ -7518,7 +7551,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
       <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
       {registering && (
-        <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
+        <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} jugadorApi={jugadorApi} />
       )}
     </div>
   );
@@ -7778,7 +7811,7 @@ function InfoTournamentDetail({ tournament, onBack }) {
   );
 }
 
-function PublicTournament({ tournament, organizers, onBack }) {
+function PublicTournament({ tournament, organizers, onBack, jugadorApi = null }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
   const usesSchedule = tournamentUsesSchedule(tournament);
   const super8Tournament = tournamentType(tournament) === "super8";
@@ -7804,7 +7837,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
             </div>
           </div>
         )}
-        {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} />}
+        {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} jugadorApi={jugadorApi} />}
         <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
         {tournament.coverImageUrl && (
           <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
@@ -10231,11 +10264,14 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
     "tu perfil",
   ].filter(Boolean);
   const [lista, setLista] = useState(null);
-  const [form, setForm] = useState({ email: "", nombre: "" });
+  // Los empleados se cargan por teléfono (ver 20261041_telefonos_empleados.sql); los de antes, por
+  // mail, siguen funcionando
+  const [form, setForm] = useState({ telefono: "", nombre: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [quitando, setQuitando] = useState(null);
   const base = `colaboradores?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+  const uno = (c) => `${base}&id=eq.${c.id}`;
 
   const load = useCallback(async () => {
     try { setLista(await supabaseTable(`${base}&order=created_at.asc`, { accessToken })); setError(""); }
@@ -10244,20 +10280,20 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
   useEffect(() => { load(); }, [load]);
 
   const agregar = async () => {
-    const email = form.email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError("Revisá el mail."); return; }
+    const telefono = normalizeArPhone(form.telefono);
+    if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15. Ej: 3446 123456"); return; }
     setBusy(true); setError("");
     try {
-      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, email, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
-      setForm({ email: "", nombre: "" });
+      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, telefono, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
+      setForm({ telefono: "", nombre: "" });
       load();
-    } catch (e) { setError(e.pgCode === "23505" ? "Ese mail ya está en la lista." : reservaErrorText(e)); }
+    } catch (e) { setError(e.pgCode === "23505" ? "Ese teléfono ya está en la lista." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const quitar = async (email) => {
+  const quitar = async (c) => {
     setBusy(true); setError("");
     try {
-      await supabaseTable(`${base}&email=eq.${encodeURIComponent(email)}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      await supabaseTable(uno(c), { method: "DELETE", accessToken, prefer: "return=minimal" });
       setQuitando(null);
       load();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -10265,22 +10301,22 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
   };
   const entrada = `${window.location.origin}${window.location.pathname}#complejo`;
   const cambiarPermiso = async (c, campo, valor) => {
-    setLista((l) => l.map((x) => (x.email === c.email ? { ...x, [campo]: valor } : x)));
+    setLista((l) => l.map((x) => (x.id === c.id ? { ...x, [campo]: valor } : x)));
     try {
-      await supabaseTable(`${base}&email=eq.${encodeURIComponent(c.email)}`, { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
+      await supabaseTable(uno(c), { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
     } catch (e) { setError(reservaErrorText(e)); load(); }
   };
 
   return (
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
-        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
+        Tus empleados se crean una cuenta (o usan la que ya tienen) con el teléfono que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
         A cada uno le elegís qué puede hacer. Siempre quedan para vos: {tuyo.slice(0, -1).join(", ")} y {tuyo[tuyo.length - 1]}.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
-          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-email">Mail</label>
-          <input id="colab-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="empleado@mail.com" className="w-full px-3 py-2 rounded border" style={adminInput} />
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-tel">Teléfono</label>
+          <input id="colab-tel" type="tel" inputMode="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} onKeyDown={(e) => e.key === "Enter" && agregar()} placeholder="Ej: 3446 123456" className="w-full px-3 py-2 rounded border" style={adminInput} />
         </div>
         <div>
           <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-nombre">Nombre (opcional)</label>
@@ -10296,16 +10332,16 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
       ) : (
         <ul className="space-y-2">
           {lista.map((c) => (
-            <li key={c.email} className="border border-teal-800 rounded-lg p-3">
+            <li key={c.id} className="border border-teal-800 rounded-lg p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex-1 min-w-[12rem]">
-                  <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
-                  {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+                  <p className="text-teal-100 font-semibold">{c.nombre || (c.telefono ? formatArPhone(c.telefono) : c.email)}</p>
+                  {c.nombre && <p className="text-teal-400 break-all">{c.telefono ? formatArPhone(c.telefono) : c.email}</p>}
                 </div>
-                {quitando === c.email ? (
-                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
+                {quitando === c.id ? (
+                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
                 ) : (
-                  <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+                  <button type="button" onClick={() => setQuitando(c.id)} className="text-red-400">Quitar</button>
                 )}
               </div>
               {c.p_agenda !== undefined && (
@@ -10354,7 +10390,7 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
     return (
       <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
         <h1 className="text-xl mb-4" style={F.display}>MI CUENTA</h1>
-        <p className="text-sm text-teal-300 mb-4">Ingresá con tu mail y contraseña. Si trabajás en un complejo, usá el mail que te cargó el dueño.</p>
+        <p className="text-sm text-teal-300 mb-4">Ingresá con tu teléfono y contraseña. Si trabajás en un complejo, usá el teléfono que te cargó el dueño.</p>
         <button type="button" onClick={onIngresar} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ingresar o crear cuenta</button>
         <button type="button" onClick={onReservar} className="block mt-6 text-sm text-teal-400 hover:text-lime-400">← Volver al sitio</button>
       </div>
@@ -10384,9 +10420,64 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
         {complejos === null && !error && <p className="text-sm opacity-60">Cargando…</p>}
         {(complejos || []).map((c) => opcion(`Panel de ${nombre(c.complejo_id)}`, "Donde trabajás", () => onEntrarComplejo(c), c.complejo_id))}
       </div>
+      {jugador.phone && <CambiarTelefono jugadorApi={jugadorApi} />}
       {complejos?.length === 0 && !esOrganizador && (
-        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con este mail y vas a ver acá el panel.</p>
+        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con {jugador.phone ? "este número" : "este mail"} y vas a ver acá el panel.</p>
       )}
+    </div>
+  );
+}
+
+/* Mi cuenta › Cambiar teléfono: el código llega al número nuevo. El ID del jugador no cambia, así que
+   conserva torneos, puntos y reservas (ver sincronizar_mi_telefono en 20261041_telefonos_empleados.sql) */
+function CambiarTelefono({ jugadorApi }) {
+  const [paso, setPaso] = useState(null); // null | "numero" | "codigo" | "listo"
+  const [tel, setTel] = useState("");
+  const [codigo, setCodigo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const nuevo = normalizeArPhone(tel);
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  const pedir = async () => {
+    if (!nuevo) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); return; }
+    if (nuevo === jugadorApi.jugador?.phone) { setError("Es el mismo teléfono que ya tenés."); return; }
+    setBusy(true); setError("");
+    try { await supabasePedirCambioTelefono(await jugadorApi.token(), nuevo); setCodigo(""); setPaso("codigo"); }
+    catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const confirmar = async () => {
+    if (!/^\d{6}$/.test(codigo.trim())) { setError("El código tiene 6 números."); return; }
+    setBusy(true); setError("");
+    try {
+      const r = await supabaseConfirmarCambioTelefono(nuevo, codigo.trim());
+      // La sesión pasa a tener el número nuevo; la ficha y el perfil del jugador también
+      await jugadorApi.login(r.access_token ? r : await supabaseRefreshOnce(jugadorApi.jugador.refreshToken));
+      await supabaseRpc("sincronizar_mi_telefono", {}, await jugadorApi.token());
+      await jugadorApi.recargarPerfil();
+      setPaso("listo");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  if (!paso) return <button type="button" onClick={() => { setPaso("numero"); setTel(""); setError(""); }} className="block mt-5 text-sm text-teal-400 hover:text-lime-400">Cambiar mi teléfono</button>;
+  if (paso === "listo") return <p className="mt-5 text-sm text-lime-400">Listo: desde ahora entrás con el {formatArPhone(jugadorApi.jugador?.phone)}.</p>;
+  return (
+    <div className="mt-5 space-y-2 text-sm rounded-lg border border-teal-800 p-3" style={F.body}>
+      {paso === "numero" ? (
+        <>
+          <p className="text-teal-300">Escribí tu teléfono nuevo. Te mandamos un código ahí para confirmar que es tuyo.</p>
+          <input type="tel" inputMode="tel" value={tel} onChange={(e) => setTel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pedir()} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} aria-label="Teléfono nuevo" autoFocus />
+          <button type="button" disabled={busy} onClick={pedir} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Mandando…" : "Mandarme el código"}</button>
+        </>
+      ) : (
+        <>
+          <p className="text-teal-300">Escribí el código de 6 números que te llegó al <span className="text-teal-100 font-semibold">{formatArPhone(nuevo)}</span>.</p>
+          <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={codigo} onChange={(e) => setCodigo(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => e.key === "Enter" && confirmar()} placeholder="123456" className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
+          <button type="button" disabled={busy} onClick={confirmar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Confirmando…" : "Confirmar"}</button>
+        </>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" onClick={() => setPaso(null)} className="text-xs text-teal-400">Cancelar</button>
     </div>
   );
 }
@@ -11416,6 +11507,79 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   );
 }
 
+/* Teléfonos de los jugadores de una pareja, para el organizador: ver y corregir el de un jugador sin
+   cuenta, o agregarlo a uno cargado sin teléfono (así pasa a sumar ranking). Si el jugador tiene
+   cuenta, el teléfono lo cambia él. Ver 20261041_telefonos_empleados.sql */
+function TelefonosPareja({ pair, accessToken, onUpdatePair }) {
+  const jugadores = jugadoresConPerfil(pair);
+  const [datos, setDatos] = useState({}); // { [id]: { telefono, con_cuenta } }
+  const [editando, setEditando] = useState({}); // { [índice]: texto }
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const ids = jugadores.map((j) => j.id).filter(Boolean).join(",");
+  useEffect(() => {
+    ids.split(",").filter(Boolean).forEach(async (id) => {
+      try {
+        const [r] = (await supabaseRpc("telefono_de_jugador", { p_perfil: id }, accessToken)) || [];
+        setDatos((d) => ({ ...d, [id]: r || { telefono: null, con_cuenta: false } }));
+      } catch { setDatos((d) => ({ ...d, [id]: { error: true } })); }
+    });
+  }, [ids, accessToken]);
+  const guardar = async (i) => {
+    const j = jugadores[i];
+    const numero = normalizeArPhone(editando[i] || "");
+    if (!numero) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); return; }
+    setBusy(i); setError(""); setAviso("");
+    try {
+      if (j.id) {
+        await supabaseRpc("corregir_telefono_jugador", { p_perfil: j.id, p_telefono: numero }, accessToken);
+        setDatos((d) => ({ ...d, [j.id]: { ...d[j.id], telefono: numero } }));
+      } else {
+        // Sin perfil todavía: se crea (o se encuentra) y la pareja queda con su ID
+        const { apellido, nombre } = separarNombre(j.name);
+        const id = await supabaseRpc("crear_jugador", { p_apellido: apellido, p_nombre: nombre, p_telefono: numero }, accessToken);
+        onUpdatePair({ ...pair, players: jugadores.map((x, k) => (k === i ? { ...x, id } : x)) });
+      }
+      setEditando((e) => { const n = { ...e }; delete n[i]; return n; });
+      setAviso("Teléfono guardado.");
+    } catch (e) {
+      const code = e?.code || e?.pgCode;
+      setError(code === "tiene_cuenta" ? "Ese jugador tiene cuenta: el teléfono lo cambia él desde Mi cuenta." : code === "no_autorizado" ? "No se pudo: guardá el torneo y probá de nuevo." : "No se pudo guardar el teléfono. Probá de nuevo.");
+    }
+    setBusy(null);
+  };
+  return (
+    <div className="mt-2 rounded border border-teal-900 p-2 space-y-2 text-xs" style={F.body}>
+      {jugadores.map((j, i) => {
+        const d = j.id ? datos[j.id] : null;
+        const enEdicion = editando[i] !== undefined;
+        return (
+          <div key={i} className="flex flex-wrap items-center gap-2">
+            <span className="text-teal-100 min-w-[8rem]">{j.name}</span>
+            {j.id && !d ? <span className="opacity-60">…</span>
+              : d?.con_cuenta ? <span className="text-teal-400">{formatArPhone(d.telefono)} · tiene cuenta (lo cambia él)</span>
+              : enEdicion ? (
+                <>
+                  <input value={editando[i]} onChange={(e) => setEditando((x) => ({ ...x, [i]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && guardar(i)} inputMode="tel" placeholder="Ej: 3446 123456" autoFocus className="w-36 px-2 py-1 rounded border" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+                  <button type="button" disabled={busy === i} onClick={() => guardar(i)} className="text-lime-400 font-semibold disabled:opacity-50">Guardar</button>
+                  <button type="button" onClick={() => setEditando((x) => { const n = { ...x }; delete n[i]; return n; })} className="text-teal-400">Cancelar</button>
+                </>
+              ) : (
+                <>
+                  <span className="text-teal-400">{d?.telefono ? formatArPhone(d.telefono) : "Sin teléfono"}</span>
+                  <button type="button" onClick={() => setEditando((x) => ({ ...x, [i]: d?.telefono ? formatArPhone(d.telefono) : "" }))} className="text-teal-300 underline">{d?.telefono ? "Corregir" : "Agregar"}</button>
+                </>
+              )}
+          </div>
+        );
+      })}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="text-lime-400">{aviso}</p>}
+    </div>
+  );
+}
+
 /* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
    pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
 function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section, accessToken = null }) {
@@ -11426,6 +11590,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const [cargaJugadores, setCargaJugadores] = useState(() => [jugadorVacio, jugadorVacio]);
   const [agregando, setAgregando] = useState(false);
   const [confirmarRepetido, setConfirmarRepetido] = useState(""); // aviso de jugador ya anotado: se agrega al tocar de nuevo
+  const [telefonosDe, setTelefonosDe] = useState(null); // pareja con los teléfonos abiertos
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
   const [editingPairId, setEditingPairId] = useState(null);
@@ -11828,9 +11993,11 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                       ) : (
                         <button type="button" onClick={() => startEditPair(p)} className="text-sm text-teal-300">Editar</button>
                       )}
+                      {!isEditing && accessToken && <button type="button" onClick={() => setTelefonosDe(telefonosDe === p.id ? null : p.id)} className="text-sm text-teal-300">Teléfonos</button>}
                       {!super8Generated && <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>}
                     </div>
                   </div>
+                  {telefonosDe === p.id && <TelefonosPareja pair={p} accessToken={accessToken} onUpdatePair={(np) => onUpdateCategory({ ...category, pairs: category.pairs.map((x) => (x.id === np.id ? np : x)) })} />}
                   {usesSchedule && <PairAvailabilityEditor pair={p} playDates={groupPlayDates(tournament)} onChange={(availability) => updatePairAvailability(p.id, availability)} />}
                 </li>
               );
@@ -17214,7 +17381,7 @@ function SmashPointAppInner() {
       coverUrl: owner?.coverUrl || "",
       role: "colaborador",
       accessToken: j.accessToken,
-      email: j.email,
+      email: j.email || formatArPhone(j.phone), // con cuenta de teléfono, el teléfono (se muestra arriba del panel)
       complejoId: c.complejo_id,
       permisos: { agenda: c.p_agenda, resultados: c.p_resultados, torneos: c.p_torneos, canchas: c.p_canchas, consumos: !!c.p_consumos },
     });
@@ -17552,7 +17719,7 @@ function SmashPointAppInner() {
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
       : selected._light
         ? <LoadingTournament />
-        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
+        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} jugadorApi={jugadorApi} />;
   } else if (route === "login") {
     content = <Login jugadorApi={jugadorApi} aviso={avisoCuenta} onEntro={despuesDeEntrar} onBack={() => { setAvisoCuenta(null); setRoute("public-home"); }} />;
   } else if (route === "nueva-clave" && jugadorApi.jugador) {
