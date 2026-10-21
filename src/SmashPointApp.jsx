@@ -11522,8 +11522,8 @@ function TelefonosPareja({ pair, accessToken, onUpdatePair }) {
     ids.split(",").filter(Boolean).forEach(async (id) => {
       try {
         const [r] = (await supabaseRpc("telefono_de_jugador", { p_perfil: id }, accessToken)) || [];
-        setDatos((d) => ({ ...d, [id]: r || { telefono: null, con_cuenta: false } }));
-      } catch { setDatos((d) => ({ ...d, [id]: { error: true } })); }
+        setDatos((d) => (d[id] ? d : { ...d, [id]: r || { telefono: null, con_cuenta: false } }));
+      } catch { setDatos((d) => (d[id] ? d : { ...d, [id]: { error: true } })); } // recién agregado: el torneo todavía se está guardando
     });
   }, [ids, accessToken]);
   const guardar = async (i) => {
@@ -11539,6 +11539,7 @@ function TelefonosPareja({ pair, accessToken, onUpdatePair }) {
         // Sin perfil todavía: se crea (o se encuentra) y la pareja queda con su ID
         const { apellido, nombre } = separarNombre(j.name);
         const id = await supabaseRpc("crear_jugador", { p_apellido: apellido, p_nombre: nombre, p_telefono: numero }, accessToken);
+        setDatos((d) => ({ ...d, [id]: { telefono: numero, con_cuenta: false } }));
         onUpdatePair({ ...pair, players: jugadores.map((x, k) => (k === i ? { ...x, id } : x)) });
       }
       setEditando((e) => { const n = { ...e }; delete n[i]; return n; });
