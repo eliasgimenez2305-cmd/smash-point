@@ -8202,6 +8202,9 @@ function AccesoOrganizador({ id, accessToken, onCerrar }) {
       {actual === null && !error ? <p className="text-sm opacity-60">Cargando…</p> : actual && (
         <>
           {actual.ultimoIngreso && <p className="text-xs text-teal-500">Último ingreso: {fechaCorta(fechaArgentina(actual.ultimoIngreso))}</p>}
+          <p className="text-xs text-teal-500">
+            Mail de avisos: {!actual.mailAvisos ? "no lo cargó" : <><span className="text-slate-200">{actual.mailAvisos.email}</span>{" · "}{!actual.mailAvisos.confirmado ? <span className="text-amber-400">sin confirmar</span> : actual.mailAvisos.pausado ? "en pausa" : <span className="text-lime-400">confirmado</span>}</>}
+          </p>
           <div className="flex flex-wrap gap-3 items-end">
             <div className="min-w-[240px] flex-1">
               <label className="block text-xs text-teal-400 mb-1">Mail para entrar</label>
@@ -9805,7 +9808,104 @@ function AvisosEnEsteAparato({ token }) {
   );
 }
 
-function Campanita({ token, onIr }) {
+/* "Avisos por mail" (al pie de la campanita del panel): un mail aparte del de entrar, que se confirma
+   con un link; si un pedido o cancelación de turno queda 15 minutos sin leer, llega por mail
+   (ver supabase/migrations/20261044_mail_avisos.sql). */
+const ERRORES_MAIL_AVISOS = {
+  mail_invalido: "Ese mail no es válido.",
+  esperar: "Esperá un minuto antes de pedir otro mail.",
+  mail_no_configurado: "Los avisos por mail todavía no están disponibles.",
+};
+function MailAvisos({ token }) {
+  const [datos, setDatos] = useState(undefined); // undefined = cargando, null = sin mail
+  const [abierto, setAbierto] = useState(false);
+  const [editando, setEditando] = useState(false);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [enviado, setEnviado] = useState(false);
+  const cargar = useCallback(async () => {
+    try { setDatos((await supabaseRpc("mi_mail_avisos", {}, await token())) || null); }
+    catch (e) { setDatos(e.pgCode === "PGRST202" ? "no" : null); }
+  }, [token]);
+  useEffect(() => { cargar(); }, [cargar]);
+  if (datos === undefined || datos === "no") return null;
+  const accion = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await cargar(); }
+    catch (e) { setError(ERRORES_MAIL_AVISOS[e.code] || "No se pudo completar. Probá de nuevo."); }
+    setBusy(false);
+  };
+  const pedir = (mail) => accion(async () => {
+    await supabaseRpc("pedir_mail_avisos", { p_email: mail.trim() }, await token());
+    setEditando(false); setEnviado(true);
+  });
+  const resumen = !datos ? "Sin cargar" : !datos.confirmado ? "Falta confirmar" : datos.pausado ? "En pausa" : "Activados";
+  const inputCls = "w-full px-2 py-1.5 rounded border text-sm text-slate-900 outline-none focus:border-lime-400";
+  return (
+    <div className="px-3 py-2.5 border-t border-teal-900 text-xs">
+      <button type="button" onClick={() => setAbierto((v) => !v)} className="w-full flex items-center justify-between text-teal-300 hover:text-lime-400">
+        <span>Avisos por mail</span>
+        <span className={datos?.confirmado && !datos.pausado ? "text-lime-400" : "text-teal-500"}>{resumen} {abierto ? "▴" : "▾"}</span>
+      </button>
+      {abierto && (
+        <div className="mt-2 space-y-2">
+          <p className="text-teal-500">Si un pedido o una cancelación de turno queda 15 minutos sin leer, te llega por mail.</p>
+          {(!datos || editando) ? (
+            <form onSubmit={(e) => { e.preventDefault(); if (email.trim()) pedir(email); }} className="space-y-2">
+              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu mail real" className={inputCls} style={{ backgroundColor: "#eef2f2" }} />
+              <div className="flex items-center gap-3">
+                <button type="submit" disabled={busy || !email.trim()} className="px-3 py-1.5 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#0b1c24" }}>{busy ? "Enviando…" : "Mandarme el mail de confirmación"}</button>
+                {editando && <button type="button" onClick={() => setEditando(false)} className="text-teal-400">Cancelar</button>}
+              </div>
+            </form>
+          ) : (
+            <>
+              <p className="text-slate-200 break-all">{datos.email}</p>
+              {!datos.confirmado && <p className="text-amber-400">{enviado ? "Te mandamos un mail: tocá el botón \"Confirmar mail\" (mirá también en Spam)." : "Todavía no lo confirmaste: buscá el mail de Smash Point (mirá también en Spam)."}</p>}
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {!datos.confirmado && <button type="button" disabled={busy} onClick={() => pedir(datos.email)} className="text-teal-300 hover:text-lime-400 disabled:opacity-50">Reenviar</button>}
+                {datos.confirmado && <button type="button" disabled={busy} onClick={() => accion(async () => supabaseRpc("pausar_mail_avisos", { p_pausado: !datos.pausado }, await token()))} className="text-teal-300 hover:text-lime-400 disabled:opacity-50">{datos.pausado ? "Reanudar" : "Pausar"}</button>}
+                <button type="button" onClick={() => { setEmail(datos.email); setEditando(true); }} className="text-teal-300 hover:text-lime-400">Cambiar mail</button>
+                <button type="button" disabled={busy} onClick={() => accion(async () => { await supabaseRpc("quitar_mail_avisos", {}, await token()); setEnviado(false); })} className="text-teal-400 hover:text-red-400 disabled:opacity-50">Quitar</button>
+              </div>
+            </>
+          )}
+          {error && <p className="text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Link del mail de confirmación (?confirmar_mail=<token>): confirma el mail de avisos y lo avisa arriba. */
+function ConfirmarMailAvisos() {
+  const [estado, setEstado] = useState(null); // null | {ok, texto}
+  useEffect(() => {
+    let token = null;
+    try { token = new URLSearchParams(window.location.search).get("confirmar_mail"); } catch {}
+    if (!token) return;
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.delete("confirmar_mail");
+      window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+    } catch {}
+    supabaseRpc("confirmar_mail_avisos", { p_token: token })
+      .then((email) => setEstado({ ok: true, texto: `Listo: los avisos te van a llegar a ${email}.` }))
+      .catch(() => setEstado({ ok: false, texto: "El link venció o ya se usó. Pedí otro desde la campanita › Avisos por mail." }));
+  }, []);
+  if (!estado) return null;
+  return (
+    <div role="status" className="fixed inset-x-0 top-0 z-[70] px-4 pt-4">
+      <div className="max-w-md mx-auto rounded-xl p-3 flex items-start gap-3 text-sm" style={{ ...F.body, ...neonStyle(estado.ok ? BRAND.lime : "#fb923c"), backgroundColor: "#1b2027", color: estado.ok ? "#ecfccb" : "#fed7aa" }}>
+        <span className="flex-1">{estado.texto}</span>
+        <button type="button" onClick={() => setEstado(null)} className="text-teal-300 shrink-0" aria-label="Cerrar aviso">✕</button>
+      </div>
+    </div>
+  );
+}
+
+function Campanita({ token, onIr, conMail = false }) {
   const [avisos, setAvisos] = useState(null);
   const [abierta, setAbierta] = useState(false);
   const caja = useRef(null);
@@ -9892,6 +9992,7 @@ function Campanita({ token, onIr }) {
             ))}
           </div>
           <AvisosEnEsteAparato token={token} />
+          {conMail && <MailAvisos token={token} />}
         </div>
       )}
     </div>
@@ -10204,7 +10305,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       onMiCuenta={onMiCuenta}
       titulo={torneoAbierto ? null : tituloSeccion}
       anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
-      campanita={<Campanita token={tokenPanel} onIr={(d) => {
+      campanita={<Campanita token={tokenPanel} conMail onIr={(d) => {
         if (d.ir === "agenda" && verReservas) { if (torneoAbierto) onCerrarTorneo(); setSeccion("reservas"); }
         else if (d.ir === "torneo" && d.torneo) onOpen(d.torneo, d.vista);
       }} />}
@@ -18104,6 +18205,7 @@ function SmashPointAppInner() {
           <ContactFooter onGoLogin={() => setRoute("login")} />
         </div>
       )}
+      <ConfirmarMailAvisos />
       {/* Aviso de guardado: choque con otra persona o falta de conexión */}
       {saveNotice && (
         <div role="alert" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)" }}>

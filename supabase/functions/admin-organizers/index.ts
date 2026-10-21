@@ -132,7 +132,13 @@ Deno.serve(async (req) => {
         });
         const u = await userRes.json();
         if (!userRes.ok) return json({ error: u.msg || u.message || "No se encontró la cuenta." }, 400);
-        return json({ email: u.email || "", ultimoIngreso: u.last_sign_in_at || null });
+        // Mail para recibir avisos (20261044_mail_avisos.sql), si lo cargó
+        const mRes = await fetch(`${SUPABASE_URL}/rest/v1/mail_avisos?usuario_id=eq.${id}&select=email,confirmado_at,pausado`, {
+          headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
+        });
+        const m = mRes.ok ? (await mRes.json())[0] : null;
+        const mailAvisos = m ? { email: m.email, confirmado: !!m.confirmado_at, pausado: !!m.pausado } : null;
+        return json({ email: u.email || "", ultimoIngreso: u.last_sign_in_at || null, mailAvisos });
       }
 
       const cambios: Record<string, unknown> = {};

@@ -89,6 +89,15 @@ Y [`migrations/20261043_push.sql`](migrations/20261043_push.sql) (avisos al celu
 > 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-push', 'push_url');` y `select vault.create_secret('<el mismo PUSH_SECRETO>', 'push_secreto');`
 > 5. **Netlify › Environment variables**: `VITE_VAPID_PUBLICA` con la clave pública, y volver a publicar. Sin esa variable la app no muestra el botón.
 
+Y [`migrations/20261044_mail_avisos.sql`](migrations/20261044_mail_avisos.sql) (avisos por mail: el "mail para recibir avisos" aparte del de entrar, confirmado con un link, y el mail si un pedido o cancelación de turno queda 15 minutos sin leer; tarea programada 'smashpoint-mails' cada 5 minutos) → **Run** → **Success**. Sin los pasos de abajo la campanita dice que los mails "todavía no están disponibles".
+
+> **Avisos por mail, una sola vez en el real (necesita dominio propio):**
+> 1. En **Resend**: verificar el dominio (registros DNS que indica Resend) y crear una API key.
+> 2. **Edge Functions** › crear `enviar-mail` con el código de `supabase/functions/enviar-mail/index.ts` y apagar **Verify JWT**.
+> 3. **Edge Functions › Secrets**: `RESEND_API_KEY`, `MAIL_REMITENTE` (por ejemplo `Smash Point <avisos@smashpoint.com.ar>`) y `APP_URL` (la dirección pública de la app). Usa el mismo `PUSH_SECRETO` de los avisos al celular.
+> 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-mail', 'mail_url');`
+> 5. Volver a publicar `admin-organizers` (muestra el mail de avisos de cada organizador en el panel del creador).
+
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 > **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 
