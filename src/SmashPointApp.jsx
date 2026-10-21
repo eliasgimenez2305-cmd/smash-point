@@ -8067,7 +8067,7 @@ function NewOrganizerForm({ onCreate }) {
       </button>
       {error && <p className="text-xs text-red-400 mt-2" style={F.body}>{error}</p>}
       {okMsg && <p className="text-xs text-lime-400 mt-2" style={F.body}>{okMsg}</p>}
-      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "Olvidé mi contraseña" en el login.</p>
+      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; si se la olvida, se la cambiás vos desde "Mail y contraseña".</p>
     </div>
   );
 }
