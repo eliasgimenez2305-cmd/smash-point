@@ -10035,7 +10035,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
       campanita={<Campanita token={tokenPanel} onIr={(d) => {
         if (d.ir === "agenda" && verReservas) { if (torneoAbierto) onCerrarTorneo(); setSeccion("reservas"); }
-        else if (d.ir === "torneo" && d.torneo) onOpen(d.torneo);
+        else if (d.ir === "torneo" && d.torneo) onOpen(d.torneo, d.vista);
       }} />}
     >
       <PlanAviso filas={filasAviso} colaborador={colaborador} />
@@ -16780,7 +16780,7 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
   );
 }
 
-function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null, accessToken = null }) {
+function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null, accessToken = null, vistaPedida = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
@@ -16822,6 +16822,8 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
     return usesSchedule ? "horarios" : "inscripciones";
   });
   const view = tabs.some(([key]) => key === chosenView) ? chosenView : tabs[0][0];
+  // Un aviso de la campanita puede pedir una pestaña (ej. Inscripciones) con el torneo ya abierto
+  useEffect(() => { if (vistaPedida?.vista) setView(vistaPedida.vista); }, [vistaPedida]);
   // Avance y avisos para la tira de resumen y las marcas ✓ / ⚠ de las pestañas
   const alertsCount = useMemo(() => (usesSchedule ? scheduleAlerts(tournament, collectScheduleableMatches(tournament)).alerts.length : 0), [tournament, usesSchedule]);
   const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
@@ -17231,7 +17233,8 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
-  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS); // funciones en prueba prendidas (ver FuncionesContext)
+  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS);
+  const [vistaPedida, setVistaPedida] = useState(null); // pestaña del torneo que pidió un aviso de la campanita // funciones en prueba prendidas (ver FuncionesContext)
   const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
   const [adsOcultas, setAdsOcultas] = useState([]); // publicidades con el cliente vencido o de baja (ver publicidades_ocultas)
   const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
@@ -17879,6 +17882,7 @@ function SmashPointAppInner() {
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
         accessToken={session.accessToken}
+        vistaPedida={vistaPedida}
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
         cobros={session.role === "creador" ? null : {
           accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
@@ -17895,7 +17899,7 @@ function SmashPointAppInner() {
         circuits={myCircuits}
         onCreate={createTournament}
         onDuplicate={(t) => saver.save(t)}
-        onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
+        onOpen={(id, vista) => { setSelectedId(id); setRoute("admin-tournament"); setVistaPedida(vista ? { vista, n: Date.now() } : null); }}
         onLogout={endSession}
         onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
         onUpdate={updateTournament}
