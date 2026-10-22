@@ -16281,7 +16281,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                 <p className="text-xs text-teal-400">Se anulan la diferencia y el pase de efectivo del cierre, y la caja vuelve a quedar abierta para contarla de nuevo.</p>
                 <input value={reabriendo.motivo} onChange={(e) => setReabriendo({ ...reabriendo, motivo: e.target.value })} maxLength={120} placeholder="Motivo (ej: contó mal los billetes)" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
                 <div className="flex gap-3 items-center">
-                  <button type="button" disabled={busy} onClick={async () => {
+                  <button type="button" disabled={busy || reabriendo.motivo.trim().length < 3} onClick={async () => {
                     setBusy(true); setError("");
                     try { await supabaseRpc("reabrir_caja", { p_turno: reabriendo.id, p_motivo: reabriendo.motivo }, accessToken); setReabriendo(null); await load(); }
                     catch (e) { setError(cajaErrorText(e)); }
