@@ -30,11 +30,12 @@ with c as (insert into compras (complejo_id, fecha, total) values ('cprueba-audi
 insert into ids select 'compra', id::text from c;
 
 -- El empleado cobra un turno en efectivo
+-- (el cobro va por transferencia: desde 20261046 un empleado no cobra en efectivo sin la caja del día abierta)
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000d1","role":"authenticated"}', true);
 set local role authenticated;
 with r as (
   insert into reservas (complejo_id, cancha_id, tipo, fecha, inicio, fin, estado, nombre, precio, medio_pago)
-  select 'cprueba-audit', valor::uuid, 'turno', '2030-01-10', '2030-01-10 20:00-03', '2030-01-10 21:30-03', 'confirmada', 'Juan', 20000, 'efectivo'
+  select 'cprueba-audit', valor::uuid, 'turno', '2030-01-10', '2030-01-10 20:00-03', '2030-01-10 21:30-03', 'confirmada', 'Juan', 20000, 'transferencia'
   from ids where clave = 'cancha'
   returning id)
 insert into ids select 'turno', id::text from r;
@@ -70,7 +71,7 @@ do $$
 declare
   v uuid := (select valor::uuid from ids where clave = 'turno');
 begin
-  update reservas set medio_pago = 'transferencia' where id = v;
+  update reservas set medio_pago = 'mercado_pago' where id = v;
   insert into resultados (caso, ok) values ('Corregir el medio no cambia quién cobró',
     (select cobrado_por from reservas where id = v) = '00000000-0000-4000-8000-0000000000d1');
   update reservas set medio_pago = null where id = v;

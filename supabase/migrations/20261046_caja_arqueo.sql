@@ -209,6 +209,10 @@ begin
   if exists (select 1 from caja_turnos where complejo_id = t.complejo_id and usuario = t.usuario and cerrada_at is null) then
     raise exception 'ya_tiene_otra_abierta';
   end if;
+  -- Solo la última: el esperado sale de los cobros desde que se abrió, y volvería a contar los de una caja posterior
+  if exists (select 1 from caja_turnos where complejo_id = t.complejo_id and usuario = t.usuario and abierta_at >= t.abierta_at and id <> t.id) then
+    raise exception 'hay_una_caja_posterior';
+  end if;
   update movimientos set anulado_at = now(), anulado_por = auth.uid(), anulado_motivo = 'Caja reabierta: ' || btrim(p_motivo)
   where ref_tipo = 'caja_cierre' and ref_id = t.id::text and anulado_at is null;
   update caja_turnos set cerrada_at = null, cerrada_por_email = null, contado = null, esperado = null, resumen = null,

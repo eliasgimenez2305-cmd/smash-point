@@ -11545,6 +11545,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
     setBusyId(r.id); setError("");
     try {
       await resolverPedido(r.id, confirmar, accessToken);
+      setPendientes((list) => list.filter((p) => p.id !== r.id));
       setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
       onChanged();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -16309,6 +16310,7 @@ const CAJA_ERRORES = {
   no_autorizado: "No tenés permiso para manejar esta caja.",
   datos_invalidos: "Revisá los montos.",
   ya_tiene_otra_abierta: "Esa persona ya abrió otra caja: primero tiene que cerrarla.",
+  hay_una_caja_posterior: "Después de esta caja se abrió otra: solo se puede reabrir la última. Corregí la diferencia en la caja nueva con un ajuste.",
   caja_abierta: "Esa caja ya está abierta.",
   falta_motivo: "Poné el motivo (al menos 3 letras).",
   cuenta_invalida: "Elegí una cuenta activa.",
@@ -16372,6 +16374,8 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const mia = (cajas || []).find((c) => c.usuario === yo && !c.cerrada_at);
   const abiertasDeOtros = esDueno ? (cajas || []).filter((c) => c.usuario !== yo && !c.cerrada_at) : [];
   const cerradas = (cajas || []).filter((c) => c.cerrada_at);
+  // Solo se reabre la última caja de cada persona, y si no tiene otra abierta (reabrir_caja hace el mismo control)
+  const reabrible = (c) => !(cajas || []).some((o) => o.id !== c.id && o.usuario === c.usuario && (!o.cerrada_at || o.abierta_at >= c.abierta_at));
   const abrir = async () => {
     setBusy(true); setError("");
     try {
@@ -16481,7 +16485,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                             {esDueno && <td className="px-3 py-2.5 text-teal-200 break-all">{c.usuario_email}</td>}
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.esperado) || "$0"}</td>
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.contado) || "$0"}</td>
-                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} />{c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="block ml-auto mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}</td>
+                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} />{c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && reabrible(c) && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="block ml-auto mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}</td>
                           </tr>
                         );
                       })}
@@ -16500,7 +16504,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                         {esDueno && <p className="text-xs text-teal-400 break-all">{c.usuario_email}</p>}
                         <p className="text-xs text-teal-500">Debía haber {formatoPrecio(c.esperado) || "$0"} · contó {formatoPrecio(c.contado) || "$0"}</p>
                         {c.nota && <p className="text-xs text-teal-400 italic">“{c.nota}”</p>}
-                        {c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}
+                        {c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && reabrible(c) && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}
                       </li>
                     );
                   })}

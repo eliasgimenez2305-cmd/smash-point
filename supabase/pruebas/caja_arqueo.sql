@@ -75,6 +75,13 @@ begin
   insert into reservas (complejo_id, cancha_id, fecha, inicio, fin, nombre, precio, medio_pago)
   values ('cprueba-arqueo', v_cancha, d, d + time '12:00', d + time '13:00', 'Gomez', 8000, 'efectivo');
   insert into resultados (caso, ok) values ('El dueño puede cobrar en efectivo sin caja abierta', true);
+
+  -- Abre y cierra otra caja: la primera ya no se reabre (volvería a contar los cobros de la segunda)
+  perform cerrar_caja_conteo(abrir_caja_conteo('cprueba-arqueo', '{}'), '{}');
+  begin
+    perform reabrir_caja(t, 'Otra vez');
+    insert into resultados (caso, ok) values ('Con una caja posterior, la anterior no se reabre', false);
+  exception when others then insert into resultados (caso, ok, detalle) values ('Con una caja posterior, la anterior no se reabre', sqlerrm = 'hay_una_caja_posterior', sqlerrm); end;
 end $$;
 
 -- El empleado
