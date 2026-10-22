@@ -11498,15 +11498,6 @@ function resolverPedido(id, confirmar, accessToken) {
   return supabaseTable(`reservas?id=eq.${id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
 }
 
-/* Mensaje de WhatsApp para avisarle al jugador que su turno quedó confirmado o rechazado */
-function mensajeTurno(r, venueName, canchaNombre, confirmado) {
-  const desde = minutoEnGrilla(r.fecha, r.inicio);
-  const turno = `el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchaNombre || "cancha"})`;
-  return confirmado
-    ? `Hola ${r.nombre}, te confirmamos el turno en ${venueName} ${turno}. ¡Te esperamos!`
-    : `Hola ${r.nombre}, no podemos darte el turno en ${venueName} ${turno}. Si querés, pedí otro horario.`;
-}
-
 /* "sábado 10/10 a las 23:30" (hora de Argentina) */
 function etiquetaVencimiento(iso) {
   const ar = new Date(Date.parse(iso) - 3 * 3600000).toISOString();
@@ -11518,7 +11509,7 @@ function etiquetaVencimiento(iso) {
 function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
   const [pendientes, setPendientes] = useState([]);
   const [canceladas, setCanceladas] = useState([]);
-  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
+  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados (al jugador le llega el aviso en la app)
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
   const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre;
@@ -11552,7 +11543,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
     finally { setBusyId(null); }
   };
 
-  const avisables = resueltos.filter((r) => r.telefono);
+  const avisables = resueltos;
   if (pendientes.length === 0 && canceladas.length === 0 && avisables.length === 0 && !error) return null;
   const linea = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id) || "Cancha"}`;
 
@@ -11583,8 +11574,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
         <ul className="space-y-1 text-sm">
           {avisables.map((r) => (
             <li key={r.id} className="text-teal-300">
-              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} ·{" "}
-              <a href={waLink(r.telefono, mensajeTurno(r, venueName, nombreCancha(r.cancha_id), r.confirmado))} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">Avisarle por WhatsApp</a>
+              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} · <span className="text-teal-500">le llega el aviso en la app</span>
             </li>
           ))}
         </ul>
@@ -11706,9 +11696,6 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null
             )}
             {r.estado === "confirmada" && (
               <>
-                {r.origen === "online" && r.telefono && (
-                  <a href={waLink(r.telefono, mensajeTurno(r, venueName, cancha?.nombre, true))} target="_blank" rel="noopener noreferrer" className="block text-lime-400 underline">Avisarle por WhatsApp que está confirmado</a>
-                )}
                 <div>
                   <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
                   <div className="flex flex-wrap gap-2">
