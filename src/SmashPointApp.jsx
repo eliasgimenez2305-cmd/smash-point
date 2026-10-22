@@ -319,6 +319,10 @@ const RESERVA_ERRORES = {
   plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
   tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
   funcion_apagada: "Esta función todavía no está habilitada.",
+  falta_nombre: "Poné el nombre de quien reserva.",
+  telefono_invalido: "Revisá el WhatsApp: número de Argentina con característica.",
+  cancha_invalida: "Elegí una cancha del complejo.",
+  turno_no_vigente: "Ese turno ya no está vigente (se canceló o venció).",
   abrir_caja_primero: "Para cobrar en efectivo abrí tu caja del día (sección Caja del día).",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
@@ -11123,7 +11127,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
           onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} canchas={canchas} reservas={lista} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
           onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
@@ -11432,8 +11436,9 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
 
 /* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
    bloquear al jugador si lo pidió online */
-function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
+function DetalleReservaModal({ reserva: r, cancha, canchas = [], reservas = [], fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
   const dueno = rol === "dueno";
+  const [editando, setEditando] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState("");
@@ -11502,9 +11507,16 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const btn = "px-3 py-2 rounded-lg text-sm border disabled:opacity-50";
 
   return (
-    <Modal title={r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+    <Modal title={editando ? "Editar turno" : r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+      {editando ? (
+        <EditarTurno r={r} canchas={canchas.length ? canchas : [cancha].filter(Boolean)} fecha={fecha} desdeActual={desde} duracionActual={hasta - desde}
+          reservas={reservas} accessToken={accessToken} onCancelar={() => setEditando(false)} onGuardado={async () => { await onChanged(); onClose(); }} />
+      ) : (
       <div className="space-y-3 text-sm" style={F.body}>
         <p className="text-teal-200">{cancha?.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(desde, hasta)} ({hasta - desde} min)</p>
+        {r.tipo !== "bloqueo" && (r.estado === "confirmada" || r.estado === "pendiente") && (
+          <button type="button" onClick={() => setEditando(true)} className="text-sm text-teal-300 underline hover:text-lime-400">Editar turno (día, hora, cancha, datos)</button>
+        )}
         {r.tipo === "bloqueo" ? (
           <>
             {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
@@ -11592,7 +11604,111 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
         )}
         {error && <p className="text-red-400">{error}</p>}
       </div>
+      )}
     </Modal>
+  );
+}
+
+/* Editar un turno ya cargado (ver 20261047_editar_turnos.sql). En un turno fijo pregunta si es solo
+   ese o ese y los que siguen. Si lo pidió un jugador por la app, la base le avisa del cambio. */
+function EditarTurno({ r, canchas, fecha, desdeActual, duracionActual, reservas, accessToken, onCancelar, onGuardado }) {
+  const [nuevaFecha, setNuevaFecha] = useState(fecha);
+  const [canchaId, setCanchaId] = useState(r.cancha_id);
+  const cancha = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const [duracion, setDuracion] = useState(duracionActual);
+  const [desde, setDesde] = useState(desdeActual);
+  const [form, setForm] = useState({ nombre: r.nombre || "", telefono: r.telefono ? formatArPhone(r.telefono) : "", precio: r.precio != null ? String(Math.round(Number(r.precio))) : "", nota: r.nota || "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k, v) => setForm((x) => ({ ...x, [k]: v }));
+  const inicios = iniciosPosibles(cancha, duracion);
+  const duraciones = DURACIONES.includes(duracion) ? DURACIONES : [...DURACIONES, duracion].sort((a, b) => a - b);
+  const otros = nuevaFecha === fecha ? reservas.filter((x) => x.id !== r.id && (!r.serie_id || x.serie_id !== r.serie_id || x.fecha < fecha)) : [];
+  const cobrado = !!r.medio_pago;
+
+  const guardar = async (siguientes) => {
+    const nombre = form.nombre.trim();
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!nombre) { setError("Poné el nombre de quien reserva."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    if (!nuevaFecha) { setError("Elegí el día."); return; }
+    const motivo = motivoNoEntra(cancha, nuevaFecha, desde, duracion, otros);
+    if (motivo === "fuera_de_horario") { setError("Ese turno no entra en el horario de la cancha."); return; }
+    if (motivo === "superpuesto") { setError("Ese horario se pisa con otro turno o bloqueo."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("editar_turno", {
+        p_id: r.id, p_fecha: nuevaFecha, p_cancha: cancha.id, p_minuto: desde, p_duracion: duracion,
+        p_nombre: nombre, p_telefono: telefono, p_precio: leerPrecio(form.precio), p_nota: form.nota.trim() || null, p_siguientes: !!siguientes,
+      }, accessToken);
+      await onGuardado();
+    } catch (e) {
+      setError(e?.pgCode === "23P01" ? (siguientes ? "Alguno de los turnos que siguen se pisa con otro turno o bloqueo: no se cambió ninguno." : "Ese horario se pisa con otro turno o bloqueo.") : reservaErrorText(e));
+    } finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded border";
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Día</label>
+          <input type="date" value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+          <select value={cancha?.id} onChange={(e) => setCanchaId(e.target.value)} className={campo} style={adminInput}>
+            {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Desde</label>
+          <select value={desde ?? ""} onChange={(e) => setDesde(Number(e.target.value))} className={campo} style={adminInput}>
+            {desde != null && !inicios.includes(desde) && <option value={desde}>{etiquetaHora(desde)}{motivoNoEntra(cancha, nuevaFecha, desde, duracion, []) ? " (no entra)" : ""}</option>}
+            {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Duración</label>
+          <select value={duracion} onChange={(e) => setDuracion(Number(e.target.value))} className={campo} style={adminInput}>
+            {duraciones.map((d) => <option key={d} value={d}>{d} min</option>)}
+          </select>
+        </div>
+      </div>
+      {desde != null && <p className="text-xs text-teal-500">{etiquetaFecha(nuevaFecha)} · {rangoLabel(desde, desde + duracion)}</p>}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+          <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Precio</label>
+          <input inputMode="numeric" value={form.precio} onChange={(e) => set("precio", e.target.value)} className={campo} style={adminInput} />
+          {cobrado && <p className="text-[11px] text-amber-300 mt-1">Ya está cobrado: el precio lo cambia solo el dueño, y la Caja se corrige sola.</p>}
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nota (opcional)</label>
+          <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} className={campo} style={adminInput} />
+        </div>
+      </div>
+      {r.origen === "online" && r.jugador_id && <p className="text-xs text-teal-400">Lo pidió un jugador por la app: si cambiás el día, la hora o la cancha, le llega un aviso.</p>}
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {r.serie_id ? (
+        <div className="space-y-2">
+          <p className="text-xs text-teal-400">Es un turno fijo: ¿cambiás solo este o también los que siguen? (Si corrés el día, los siguientes se corren igual.)</p>
+          <div className="flex gap-2">
+            <button type="button" disabled={busy} onClick={() => guardar(false)} className="flex-1 px-4 py-2.5 rounded-lg font-semibold border border-lime-400 text-lime-400 disabled:opacity-50">Solo este</button>
+            <button type="button" disabled={busy} onClick={() => guardar(true)} className="flex-1 px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Este y los que siguen"}</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" disabled={busy} onClick={() => guardar(false)} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar cambios"}</button>
+      )}
+      <button type="button" onClick={onCancelar} className="w-full text-teal-400">Volver</button>
+    </div>
   );
 }
 
