@@ -59,3 +59,19 @@ test("filtrarMovimientos: por cuenta (también destino), quién cargó, texto y 
   assert.equal(ids({}).includes("7"), false);
   assert.equal(ids({ verAnulados: true }).includes("7"), true);
 });
+
+test("separarPagos: el ticket se paga primero y el resto queda para lo demás", async () => {
+  const { separarPagos } = await import("./caja.js");
+  assert.deepEqual(separarPagos([{ medio: "efectivo", monto: 5000 }, { medio: "mercado_pago", monto: 10000 }], 7000), {
+    parte: [{ medio: "efectivo", monto: 5000 }, { medio: "mercado_pago", monto: 2000 }],
+    resto: [{ medio: "mercado_pago", monto: 8000 }],
+  });
+  assert.deepEqual(separarPagos([{ medio: "efectivo", monto: 3000 }], 0), { parte: [], resto: [{ medio: "efectivo", monto: 3000 }] });
+});
+
+test("unMedioAlcanza: la cancha necesita un medio que la cubra entera", async () => {
+  const { unMedioAlcanza } = await import("./caja.js");
+  assert.equal(unMedioAlcanza([{ medio: "efectivo", monto: 5000 }, { medio: "mercado_pago", monto: 8000 }], 10000), false);
+  assert.equal(unMedioAlcanza([{ medio: "mercado_pago", monto: 10000 }, { medio: "efectivo", monto: 3000 }], 10000), true);
+  assert.equal(unMedioAlcanza([{ medio: "efectivo", monto: 1 }], 0), true);
+});

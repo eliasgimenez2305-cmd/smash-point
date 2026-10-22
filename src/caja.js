@@ -106,3 +106,26 @@ export function filtrarMovimientos(movimientos, f, yo) {
     return true;
   });
 }
+
+/* Pago dividido: separa "monto" de los pagos [{ medio, monto }] (tomando en orden) y devuelve
+   { parte, resto }, cada uno una lista de pagos. Sirve para pagar primero los productos del ticket y
+   con lo que queda la inscripción. */
+export function separarPagos(pagos, monto) {
+  let falta = Math.max(0, Number(monto) || 0);
+  const parte = [];
+  const resto = [];
+  for (const p of pagos) {
+    const m = Number(p.monto) || 0;
+    if (m <= 0) continue;
+    const toma = Math.min(falta, m);
+    if (toma > 0) parte.push({ medio: p.medio, monto: toma });
+    if (m - toma > 0) resto.push({ medio: p.medio, monto: m - toma });
+    falta -= toma;
+  }
+  return { parte, resto };
+}
+
+/* ¿Algún medio alcanza solo para pagar "monto"? (la cancha de un turno se paga con un solo medio) */
+export function unMedioAlcanza(pagos, monto) {
+  return !(Number(monto) > 0) || pagos.some((p) => Number(p.monto) >= Number(monto));
+}

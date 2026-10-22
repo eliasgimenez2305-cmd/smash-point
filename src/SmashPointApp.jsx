@@ -13,7 +13,7 @@ import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.j
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
-import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos } from "./caja.js";
+import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos, separarPagos, unMedioAlcanza } from "./caja.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
@@ -10338,7 +10338,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "cajadia" && verCajaDia ? (
         <CajaDelDia complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} conVentas={verConsumos ? complejosCantina.map((c) => c.id) : []} />
       ) : seccion === "mostrador" && verConsumos ? (
-        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} />
+        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} tournaments={verTorneos ? tournaments : []} />
       ) : seccion === "productos" && verConsumos ? (
         <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "consumos" && verConsumos ? (
@@ -16582,6 +16582,200 @@ function RubroIcono({ rubro, icono, className = "w-6 h-6" }) {
   );
 }
 
+/* "Cobrar turno o inscripción" desde el Mostrador (ver 20261049_cobrar_en_mostrador.sql): un turno de
+   hoy (cancha + consumos cargados) o la inscripción de un jugador (y su cuenta), más lo que haya en el
+   ticket. Se puede dividir el pago en dos medios. Cada cosa queda donde siempre. */
+const ERRORES_COBRO_MOSTRADOR = {
+  monto_no_coincide: "Los pagos no suman el total.",
+  dividir_cancha: "La cancha se paga con un solo medio: uno de los dos pagos tiene que cubrirla entera.",
+  nada_para_cobrar: "No hay nada para cobrar.",
+  turno_invalido: "Ese turno ya no está confirmado.",
+  torneo_invalido: "No se encontró el torneo.",
+  "42501": "No tenés permiso para cobrar inscripciones: pedile al dueño el permiso de torneos.",
+};
+function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglones, subtotal, items, onClose, onCobrado }) {
+  const [tab, setTab] = useState("turno");
+  const [turnos, setTurnos] = useState(null);
+  const [turno, setTurno] = useState(null);
+  const [buscar, setBuscar] = useState("");
+  const [jugador, setJugador] = useState(null); // { t, c, pair, jugador, nombre, precio, pagado, cuenta: { id, saldo } | null }
+  const [montoIns, setMontoIns] = useState("");
+  const [conCuenta, setConCuenta] = useState(true);
+  const [medio, setMedio] = useState("efectivo");
+  const [dividir, setDividir] = useState(null); // { medio, monto } del segundo pago
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  useEffect(() => {
+    if (tab !== "turno" || turnos) return;
+    (async () => {
+      try {
+        const ts = (await supabaseRpc("turnos_para_cargar", { p_complejo: complejoId }, accessToken)) || [];
+        const precios = ts.length ? await supabaseTable(`reservas?id=in.(${ts.map((t) => t.id).join(",")})&select=id,precio,medio_pago`, { accessToken }) : [];
+        setTurnos(ts.map((t) => {
+          const x = precios.find((p) => p.id === t.id) || {};
+          return { ...t, cancha_monto: !x.medio_pago && Number(x.precio) > 0 ? Number(x.precio) : 0, pendiente: Number(t.pendiente) || 0 };
+        }));
+      } catch { setTurnos([]); setError("No se pudieron cargar los turnos de hoy."); }
+    })();
+  }, [tab, turnos, complejoId, accessToken]);
+
+  // Jugadores de los torneos que no terminaron, que coinciden con lo que se escribe
+  const texto = normalizeName(buscar);
+  const candidatos = texto.length < 2 ? [] : tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO).flatMap((t) => (t.categories || []).flatMap((c) => (c.pairs || []).flatMap((pair) =>
+    jugadoresDePareja(c, pair).filter((j) => normalizeName(j.nombre).includes(texto)).map((j) => ({ t, c, pair, jugador: j.jugador, nombre: j.nombre, precio: precioJugador(t, c) }))))).slice(0, 8);
+  const elegirJugador = async (j) => {
+    setError(""); setJugador({ ...j, pagado: null, cuenta: null });
+    try {
+      const [pagos, links] = await Promise.all([
+        supabaseTable(`pagos_inscripcion?torneo_id=eq.${encodeURIComponent(j.t.id)}&categoria_id=eq.${encodeURIComponent(j.c.id)}&pareja_id=eq.${encodeURIComponent(j.pair.id)}&jugador=eq.${j.jugador}&select=monto`, { accessToken }),
+        supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(j.t.id)}&categoria_id=eq.${encodeURIComponent(j.c.id)}&pareja_id=eq.${encodeURIComponent(j.pair.id)}&jugador=eq.${j.jugador}&select=cuenta_id,complejo_id`, { accessToken }).catch(() => []),
+      ]);
+      const pagado = pagos.reduce((s, p) => s + Number(p.monto), 0);
+      let cuenta = null;
+      if (links[0]) {
+        const cs = await supabaseRpc("cuentas_con_saldo", { p_complejo: links[0].complejo_id }, accessToken).catch(() => []);
+        const c = (cs || []).find((x) => x.id === links[0].cuenta_id);
+        if (c && Number(c.saldo) > 0) cuenta = { id: c.id, saldo: Number(c.saldo), nombre: c.nombre };
+      }
+      const debe = j.precio == null ? 0 : Math.max(0, j.precio - pagado);
+      setJugador({ ...j, pagado, cuenta });
+      setMontoIns(debe ? String(debe) : "");
+      setConCuenta(true);
+    } catch { setError("No se pudo cargar lo que debe ese jugador."); }
+  };
+
+  const partes = tab === "turno"
+    ? (turno ? [turno.cancha_monto > 0 && ["Cancha", turno.cancha_monto], turno.pendiente > 0 && ["Consumos del turno", turno.pendiente]].filter(Boolean) : [])
+    : (jugador && jugador.pagado != null ? [leerPrecio(montoIns) > 0 && ["Inscripción", leerPrecio(montoIns)], jugador.cuenta && conCuenta && [`Cuenta de ${jugador.cuenta.nombre}`, jugador.cuenta.saldo]].filter(Boolean) : []);
+  const sinTicket = partes.reduce((s, [, m]) => s + m, 0);
+  const total = sinTicket + (renglones.length ? subtotal : 0);
+  const segundo = dividir ? Math.min(total, leerPrecio(dividir.monto) || 0) : 0;
+  const pagos = [{ medio, monto: total - segundo }, ...(segundo > 0 ? [{ medio: dividir.medio, monto: segundo }] : [])].filter((p) => p.monto > 0);
+
+  const cobrar = async () => {
+    if (sinTicket <= 0) { setError(tab === "turno" ? "Elegí un turno con algo para cobrar." : "Elegí el jugador y el monto."); return; }
+    if (dividir && dividir.medio === medio) { setError("Elegí dos medios distintos para dividir."); return; }
+    if (tab === "turno" && !unMedioAlcanza(pagos, turno.cancha_monto)) { setError(ERRORES_COBRO_MOSTRADOR.dividir_cancha); return; }
+    setBusy(true); setError("");
+    try {
+      if (tab === "turno") {
+        // Lo del ticket se carga al turno y después se cobra todo junto
+        if (renglones.length) await supabaseRpc("vender", { p_complejo: complejoId, p_items: items(), p_pagos: [], p_ajuste: 0, p_cuenta: null, p_reserva: turno.id }, accessToken);
+        await supabaseRpc("cobrar_turno_mostrador", { p_reserva: turno.id, p_pagos: pagos }, accessToken);
+        onCobrado(`Cobrado el turno de ${turno.nombre} (${turno.cancha} · ${hora(turno.inicio)}): ${formatoPrecio(total)}.`);
+      } else {
+        const { parte, resto } = separarPagos(pagos, renglones.length ? subtotal : 0);
+        if (renglones.length) await supabaseRpc("vender", { p_complejo: complejoId, p_items: items(), p_pagos: parte, p_ajuste: 0, p_cuenta: null }, accessToken);
+        await supabaseRpc("cobrar_jugador_mostrador", {
+          p_torneo: jugador.t.id, p_categoria: jugador.c.id, p_pareja: jugador.pair.id, p_jugador: jugador.jugador,
+          p_inscripcion: leerPrecio(montoIns) || 0, p_cuenta: jugador.cuenta && conCuenta ? jugador.cuenta.id : null,
+          p_cuenta_monto: jugador.cuenta && conCuenta ? jugador.cuenta.saldo : null, p_pagos: resto,
+        }, accessToken);
+        onCobrado(`Cobrado a ${jugador.nombre} (${jugador.t.name}): ${formatoPrecio(total)}.`);
+      }
+    } catch (e) {
+      setError(ERRORES_COBRO_MOSTRADOR[e?.code] || ERRORES_COBRO_MOSTRADOR[e?.pgCode] || ventaErrorText(e));
+    } finally { setBusy(false); }
+  };
+
+  const chip = (activo) => `px-3 py-1.5 rounded-lg border text-sm ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`;
+  return (
+    <Modal title="Cobrar turno o inscripción" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl border border-teal-900">
+          {[["turno", "Turno de hoy"], ["inscripcion", "Inscripción"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => { setTab(k); setError(""); }} className="py-2 rounded-lg" style={tab === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+
+        {tab === "turno" ? (
+          turnos === null ? <p className="opacity-60">Cargando turnos…</p> : turnos.length === 0 ? <p className="text-teal-400">No hay turnos confirmados hoy.</p> : (
+            <ul className="max-h-60 overflow-y-auto divide-y divide-teal-900 rounded-lg border border-teal-900">
+              {turnos.map((t) => {
+                const nada = t.cancha_monto + t.pendiente === 0;
+                return (
+                  <li key={t.id}>
+                    <button type="button" disabled={nada} onClick={() => setTurno(t)} className={`w-full text-left px-3 py-2 flex justify-between gap-2 disabled:opacity-40 ${turno?.id === t.id ? "bg-white/5" : "hover:bg-white/5"}`}>
+                      <span className="min-w-0"><span className="block truncate text-slate-100">{hora(t.inicio)} · {t.cancha} · {t.nombre}</span>
+                        <span className="block text-xs text-teal-500">{t.cancha_monto > 0 ? `Cancha ${formatoPrecio(t.cancha_monto)}` : "Cancha cobrada"}{t.pendiente > 0 ? ` · consumos ${formatoPrecio(t.pendiente)}` : ""}</span></span>
+                      <span className="tabular-nums shrink-0">{nada ? "Al día" : formatoPrecio(t.cancha_monto + t.pendiente)}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )
+        ) : (
+          <div className="space-y-2">
+            <input value={buscar} onChange={(e) => { setBuscar(e.target.value); setJugador(null); }} placeholder="Nombre del jugador" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+            {!jugador && texto.length >= 2 && (candidatos.length === 0 ? <p className="text-teal-400">No hay jugadores con ese nombre en torneos que no terminaron.</p> : (
+              <ul className="divide-y divide-teal-900 rounded-lg border border-teal-900">
+                {candidatos.map((j) => (
+                  <li key={`${j.t.id}|${j.c.id}|${j.pair.id}|${j.jugador}`}>
+                    <button type="button" onClick={() => elegirJugador(j)} className="w-full text-left px-3 py-2 hover:bg-white/5">
+                      <span className="block text-slate-100">{j.nombre}</span>
+                      <span className="block text-xs text-teal-500">{j.t.name} · {j.c.name}{j.precio != null ? ` · inscripción ${formatoPrecio(j.precio)}` : ""}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ))}
+            {jugador && (
+              jugador.pagado == null ? <p className="opacity-60">Cargando…</p> : (
+                <div className="rounded-lg border border-teal-800 p-3 space-y-2">
+                  <p className="text-slate-100 font-semibold">{jugador.nombre} <span className="text-xs font-normal text-teal-500">· {jugador.t.name} · {jugador.c.name}</span></p>
+                  <p className="text-xs text-teal-400">{jugador.precio == null ? "El torneo no tiene precio cargado." : `Inscripción ${formatoPrecio(jugador.precio)} · pagó ${formatoPrecio(jugador.pagado) || "$0"}`}</p>
+                  <label className="flex items-center gap-2 text-teal-200">Cobrar de inscripción
+                    <input inputMode="numeric" value={montoIns} onChange={(e) => setMontoIns(e.target.value)} placeholder="$" className="w-32 px-2 py-1.5 rounded border text-base" style={adminInput} />
+                  </label>
+                  {jugador.cuenta && (
+                    <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={conCuenta} onChange={(e) => setConCuenta(e.target.checked)} />
+                      Cobrar también su cuenta ({formatoPrecio(jugador.cuenta.saldo)})</label>
+                  )}
+                  <button type="button" onClick={() => setJugador(null)} className="text-xs text-teal-400">Elegir otro jugador</button>
+                </div>
+              )
+            )}
+          </div>
+        )}
+
+        {(partes.length > 0 || renglones.length > 0) && (
+          <div className="rounded-lg border border-teal-800 p-3 space-y-1">
+            {partes.map(([l, m]) => <p key={l} className="flex justify-between"><span className="text-teal-300">{l}</span><span className="tabular-nums">{formatoPrecio(m)}</span></p>)}
+            {renglones.length > 0 && <p className="flex justify-between"><span className="text-teal-300">Productos del ticket</span><span className="tabular-nums">{formatoPrecio(subtotal)}</span></p>}
+            <p className="flex justify-between border-t border-teal-900 pt-1 font-semibold text-slate-100"><span>Total</span><span className="tabular-nums">{formatoPrecio(total)}</span></p>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2">{MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" onClick={() => setMedio(m)} className={chip(medio === m)}>{l}</button>)}</div>
+          {dividir ? (
+            <div className="flex flex-wrap items-center gap-2 text-teal-200">
+              <span>y</span>
+              <input inputMode="numeric" value={dividir.monto} onChange={(e) => setDividir({ ...dividir, monto: e.target.value })} placeholder="$" className="w-28 px-2 py-1.5 rounded border text-base" style={adminInput} />
+              <span>con</span>
+              <select value={dividir.medio} onChange={(e) => setDividir({ ...dividir, medio: e.target.value })} className="px-2 py-1.5 rounded border text-base" style={adminInput}>
+                {MEDIOS_VENTA.filter(([m]) => m !== medio).map(([m, l]) => <option key={m} value={m}>{l}</option>)}
+              </select>
+              <button type="button" onClick={() => setDividir(null)} className="text-xs text-teal-400">Sin dividir</button>
+              {total > 0 && segundo > 0 && <span className="w-full text-xs text-teal-400">{formatoPrecio(total - segundo)} con {medioCobroLabel(medio)} y {formatoPrecio(segundo)} con {medioCobroLabel(dividir.medio)}</span>}
+            </div>
+          ) : (
+            <button type="button" onClick={() => setDividir({ medio: MEDIOS_VENTA.find(([m]) => m !== medio)[0], monto: "" })} className="text-xs text-teal-400 underline">Dividir el pago en dos medios</button>
+          )}
+        </div>
+
+        {error && <p className="text-red-400">{error}</p>}
+        <button type="button" disabled={busy || total <= 0} onClick={cobrar} className="w-full px-4 py-3 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Cobrando…" : `Cobrar ${formatoPrecio(total) || "$0"}`}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 /* "Cargar a" del ticket: a qué turno de hoy (Cancha) o a qué persona (Cliente) va el consumo.
    destino: { tipo: "cancha", turno } | { tipo: "cliente", cuentaId?, nombre, telefono? } | null */
 function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
@@ -16686,7 +16880,8 @@ const MAS_VENDIDOS = "__mas_vendidos";
    crédito o seña van por "Descuento / dividir pago"), Cancha (queda en el turno de hoy y se cobra
    desde la agenda; ver 20261029_cargar_a_turno.sql) o Cliente (queda en su cuenta).
    Las ventas del día se ven en Caja del día. */
-function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) {
+function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, tournaments = [] }) {
+  const [cobrandoCuenta, setCobrandoCuenta] = useState(false); // "Cobrar turno o inscripción"
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [productos, setProductos] = useState(null);
   const [vendidos30, setVendidos30] = useState([]); // renglones vendidos en los últimos 30 días
@@ -16849,6 +17044,9 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
 
   const ticket = (
     <div className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.75)" }}>
+      <button type="button" onClick={() => setCobrandoCuenta(true)} className="w-full py-2 rounded-lg border text-sm font-semibold" style={{ borderColor: `${BRAND.cyan}88`, color: BRAND.cyan }}>
+        Cobrar turno o inscripción{renglones.length ? ` (+ ticket ${formatoPrecio(subtotal)})` : ""}
+      </button>
       <div className="space-y-2">
         <p className="text-sm text-slate-400">Cargar a</p>
         <div className="grid grid-cols-3 gap-1 p-1 rounded-xl border border-teal-900" role="radiogroup" aria-label="Cargar a">
@@ -16857,6 +17055,11 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
               className="py-2 rounded-lg text-sm transition" style={cargarA === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
           ))}
         </div>
+        {cobrandoCuenta && (
+          <CobrarTurnoInscripcion complejoId={complejoId} accessToken={accessToken} tournaments={tournaments} renglones={renglones} subtotal={subtotal}
+            items={() => itemsParaVender(carrito, sueltos)} onClose={() => setCobrandoCuenta(false)}
+            onCobrado={(texto) => { setCobrandoCuenta(false); setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setAviso({ texto, tono: "ok" }); load(); }} />
+        )}
         {cargarA !== "mostrador" && (
           <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
         )}
