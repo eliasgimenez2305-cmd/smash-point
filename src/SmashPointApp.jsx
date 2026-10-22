@@ -7987,19 +7987,15 @@ function ImageUploadField({ label, value, onChange, accessToken, folder, maxAnch
   };
 
   return (
-    <div>
+    <div className="min-w-0">
       {label && <label className="block text-xs text-teal-400 mb-1" style={F.body}>{label}</label>}
-      <div className="flex flex-wrap gap-2 items-center">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          disabled={uploading}
-          onChange={handleFile}
-          className="text-xs text-teal-300"
-          style={F.body}
-        />
-        {uploading && <span className="text-xs text-teal-400" style={F.body}>Subiendo…</span>}
+      <div className="flex flex-wrap gap-x-3 gap-y-1 items-center">
+        {/* El selector de archivos del navegador va escondido: su texto ("Sin archivos seleccionados") se encimaba */}
+        <input ref={inputRef} type="file" accept="image/*" disabled={uploading} onChange={handleFile} className="hidden" />
+        <button type="button" disabled={uploading} onClick={() => inputRef.current?.click()}
+          className="px-3 py-1.5 rounded-lg border border-lime-400/70 text-lime-400 text-xs font-semibold hover:bg-lime-400/10 disabled:opacity-50" style={F.body}>
+          {uploading ? "Subiendo…" : value ? "Cambiar imagen" : "Subir imagen"}
+        </button>
         {value && !uploading && (
           <button type="button" onClick={() => onChange("")} className="text-xs text-teal-500 hover:text-red-400 underline" style={F.body}>
             Quitar imagen
