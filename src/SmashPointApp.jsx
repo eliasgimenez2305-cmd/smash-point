@@ -13458,7 +13458,7 @@ function CajaLibro({ organizer, complejos = [], tournaments = [], venues = [] })
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {BOTONES_MOVIMIENTO.map(([t, label, color]) => (
+            {BOTONES_MOVIMIENTO.filter(([t]) => (t !== "retiro_socio" && t !== "aporte_socio") || base.socios.some((x) => x.activo)).map(([t, label, color]) => (
               <button key={t} type="button" onClick={() => { setNuevo(nuevo === t ? null : t); setAbierto(null); }}
                 className="px-3 py-2 rounded-lg border font-semibold" style={{ borderColor: color, color, backgroundColor: nuevo === t ? `${color}22` : "transparent" }}>{label}</button>
             ))}
@@ -13477,7 +13477,7 @@ function CajaLibro({ organizer, complejos = [], tournaments = [], venues = [] })
               <input value={filtros.buscar} onChange={(e) => setFiltros({ ...filtros, buscar: e.target.value })} placeholder="Buscar concepto" aria-label="Buscar concepto" className="w-full sm:w-44 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
               <select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })} aria-label="Tipo" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
                 <option value="">Todos los tipos</option>
-                {Object.entries(TIPOS_MOVIMIENTO).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                {Object.entries(TIPOS_MOVIMIENTO).filter(([k]) => (k !== "retiro_socio" && k !== "aporte_socio") || base.socios.length > 0 || delComplejo.some((m) => m.tipo === k)).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
               </select>
               <select value={filtros.cuenta} onChange={(e) => setFiltros({ ...filtros, cuenta: e.target.value })} aria-label="Cuenta" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
                 <option value="">Todas las cuentas</option>
@@ -13867,7 +13867,7 @@ function ConfigCaja({ base, accessToken, onCambio }) {
 
         <section className={caja} style={fondo}>
           <h2 className="text-sm uppercase tracking-wide text-teal-400">Socios</h2>
-          <p className="text-xs text-teal-500">Para anotar quién retira o pone plata.</p>
+          <p className="text-xs text-teal-500">Para anotar quién retira o pone plata. Con al menos un socio cargado aparecen en la Caja los botones "Retiro de socio" y "Aporte de socio".</p>
           {base.socios.length === 0 && <p className="text-xs text-teal-600">Todavía no cargaste socios.</p>}
           <ul className="divide-y divide-teal-900/70">
             {base.socios.map((s) => (
