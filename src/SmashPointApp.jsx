@@ -7108,7 +7108,7 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
             </div>
             <div className="text-teal-300">
               <p>{jugador.perfil.nombre} {jugador.perfil.apellido} · {formatArPhone(jugador.perfil.telefono)}</p>
-              <p className="text-xs text-teal-500">{jugador.email || formatArPhone(jugador.phone)}</p>
+              {jugador.email && <p className="text-xs text-teal-500">{jugador.email}</p>}
             </div>
             <ul className="text-xs text-teal-400 space-y-1 list-disc pl-4">
               <li>El complejo tiene que confirmar tu pedido. Si no lo confirma en 24 h (o antes del turno), vence y el horario se libera.</li>
