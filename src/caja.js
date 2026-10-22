@@ -19,6 +19,9 @@ export const ORIGENES_LIBRO = {
   cuota_clase: "una cuota de clases",
   pago_profe: "un pago a profe",
   compra: "una compra",
+  caja_apertura: "la apertura de la caja del día",
+  caja_cierre: "el cierre de la caja del día",
+  devolucion: "la devolución de una venta",
 };
 
 /* Lo que escribe la persona ("12.500", "12500,50") → centavos; null si no es un monto válido */

@@ -106,6 +106,8 @@ Y [`migrations/20261048_horarios_profes.sql`](migrations/20261048_horarios_profe
 Y [`migrations/20261049_cobrar_en_mostrador.sql`](migrations/20261049_cobrar_en_mostrador.sql) (cobrar desde el Mostrador un turno —cancha + consumos— o la inscripción de un jugador —y su cuenta—, con pago dividido) → **Run** → **Success**.
 Y [`migrations/20261050_horarios_complejo.sql`](migrations/20261050_horarios_complejo.sql) (horario del complejo y horario de reservas online por día de la semana; canchas con horario propio; el pedido online valida con el horario online del día. Sin cargar, todo sigue como antes) → **Run** → **Success**.
 
+Y [`migrations/20261051_devolver_venta.sql`](migrations/20261051_devolver_venta.sql) (devolver una venta del mostrador que ya quedó en un cierre de caja: el ingreso de ese día no se toca y la devolución se anota hoy, de la caja abierta, la Caja fuerte o la cuenta que se elija; categoría de gasto Devoluciones) → **Run** → **Success**.
+
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 > **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 

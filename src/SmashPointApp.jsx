@@ -16721,6 +16721,9 @@ const VENTA_ERRORES = {
   elegir_talle: "Elegí el talle de la prenda.",
   talle_invalido: "Ese talle ya no existe: recargá la pantalla.",
   turno_invalido: "Ese turno ya no está confirmado: elegí otro.",
+  usar_devolucion: "Esa venta ya quedó en un cierre de caja: devolvela desde Caja del día › Ventas (elegí el día de la venta).",
+  ya_anulada: "Esa venta ya estaba anulada.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
 };
 const ventaErrorText = (e) => VENTA_ERRORES[e?.code] || reservaErrorText(e);
 
@@ -17534,6 +17537,8 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
   const [ventas, setVentas] = useState(null);
   const [error, setError] = useState("");
   const [anulando, setAnulando] = useState(null);
+  const [devolviendo, setDevolviendo] = useState(null); // { id, motivo, cuenta: "" (automático) | id de cuenta | "sin_plata" }
+  const [cuentasCaja, setCuentasCaja] = useState([]);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -17551,7 +17556,27 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
       await supabaseRpc("anular_venta", { p_venta: v.id }, accessToken);
       setAnulando(null);
       await load(); onChanged();
-    } catch (e) { setError(ventaErrorText(e)); }
+    } catch (e) {
+      if (e?.code === "usar_devolucion") {
+        // Ya quedó en un cierre: no se borra el ingreso de ese día, se anota la devolución hoy
+        setAnulando(null);
+        setDevolviendo({ id: v.id, motivo: "", cuenta: "" });
+        supabaseTable("cuentas_caja?activa=eq.true&order=orden.asc", { accessToken }).then(setCuentasCaja).catch(() => setCuentasCaja([]));
+      } else setError(ventaErrorText(e));
+    }
+    finally { setBusy(false); }
+  };
+  const devolver = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("devolver_venta", {
+        p_venta: devolviendo.id, p_motivo: devolviendo.motivo.trim(),
+        p_cuenta: devolviendo.cuenta && devolviendo.cuenta !== "sin_plata" ? devolviendo.cuenta : null,
+        p_sin_plata: devolviendo.cuenta === "sin_plata",
+      }, accessToken);
+      setDevolviendo(null);
+      await load(); onChanged();
+    } catch (e) { setError(e?.code === "cuenta_invalida" ? "Elegí una cuenta activa." : ventaErrorText(e)); }
     finally { setBusy(false); }
   };
   const validas = (ventas || []).filter((v) => !v.anulada);
@@ -17590,12 +17615,29 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
                       {Number(v.a_cuenta) > 0 && ` · ${formatoPrecio(v.a_cuenta)} a cuenta de ${v.cuentas?.nombre || "una cuenta"}`}
                       {Number(v.ajuste) !== 0 && ` · ${Number(v.ajuste) < 0 ? "descuento" : "recargo"} ${formatoPrecio(Math.abs(v.ajuste))}`}
                       {esDueno && v.vendido_por_email && ` · ${v.vendido_por_email}`}
-                      {v.anulada && " · ANULADA"}
+                      {v.anulada && (v.devuelta ? ` · DEVUELTA${v.devolucion_motivo ? `: ${v.devolucion_motivo}` : ""}` : " · ANULADA")}
                     </span>
                   </span>
                   <span className="shrink-0 font-semibold tabular-nums">{formatoPrecio(v.total)}</span>
                 </div>
-                {esDueno && !v.anulada && (anulando === v.id ? (
+                {esDueno && !v.anulada && devolviendo?.id === v.id ? (
+                  <form onSubmit={(e) => { e.preventDefault(); devolver(); }} className="mt-2 rounded-lg border border-amber-500/50 p-3 space-y-2 text-sm">
+                    <p className="text-amber-300 font-semibold">Devolver la venta #{v.numero}</p>
+                    <p className="text-xs text-teal-400">Ya quedó en un cierre de caja: el ingreso de ese día no se toca y la devolución se anota hoy. Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}.</p>
+                    <input value={devolviendo.motivo} onChange={(e) => setDevolviendo({ ...devolviendo, motivo: e.target.value })} maxLength={200} placeholder="Motivo (ej: estaba vencida)" className="w-full px-3 py-2 rounded border" style={adminInput} />
+                    <label className="block text-xs text-teal-400">¿De dónde sale la plata?
+                      <select value={devolviendo.cuenta} onChange={(e) => setDevolviendo({ ...devolviendo, cuenta: e.target.value })} className="mt-1 w-full px-3 py-2 rounded border" style={adminInput}>
+                        <option value="">Automático: efectivo de tu caja abierta (o de la Caja fuerte); otros medios, de su cuenta</option>
+                        {cuentasCaja.map((c) => <option key={c.id} value={c.id}>De {c.nombre}</option>)}
+                        <option value="sin_plata">No se devolvió plata (se cambió por otra cosa)</option>
+                      </select>
+                    </label>
+                    <div className="flex justify-end gap-3">
+                      <button type="button" onClick={() => setDevolviendo(null)} className="text-teal-400">Cancelar</button>
+                      <button type="submit" disabled={busy || devolviendo.motivo.trim().length < 3} className="px-3 py-1.5 rounded-lg font-semibold border border-amber-400 text-amber-300 disabled:opacity-50">{busy ? "Devolviendo…" : "Devolver"}</button>
+                    </div>
+                  </form>
+                ) : esDueno && !v.anulada && (anulando === v.id ? (
                   <p className="mt-1 text-xs text-right">
                     <span className="text-teal-300">¿Anular? Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}. </span>
                     <button type="button" disabled={busy} onClick={() => anular(v)} className="text-red-400 font-semibold mr-2">Anular</button>
