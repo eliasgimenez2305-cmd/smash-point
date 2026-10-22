@@ -141,3 +141,22 @@ test("franjas del día", () => {
   assert.equal(franjaDe(18 * 60 + 30), "noche");
   assert.equal(franjaDe(24 * 60 + 30), "noche");
 });
+
+test("canchaDelDia: horario del complejo por día, horario propio y horario online", async () => {
+  const { canchaDelDia, horarioCancha } = await import("./reservas.js");
+  const cancha = { id: "c1", apertura: "08:00:00", cierre: "23:00:00" };
+  const complejo = { horario: { 1: [420, 1440], 6: [480, 1560], 0: null }, horario_online: { 1: [840, 1380], 6: [0, 1440] } };
+  // Sin horario del complejo: el de la cancha
+  assert.deepEqual(horarioCancha(canchaDelDia(cancha, {}, "2026-10-26")), { desde: 480, hasta: 1380 });
+  // Lunes 26/10: 07 a 24; online 14 a 23
+  assert.deepEqual(horarioCancha(canchaDelDia(cancha, complejo, "2026-10-26")), { desde: 420, hasta: 1440 });
+  assert.deepEqual(horarioCancha(canchaDelDia(cancha, complejo, "2026-10-26", true)), { desde: 840, hasta: 1380 });
+  // Sábado 31/10: 08 a 02 del domingo; online hasta las 24
+  assert.deepEqual(horarioCancha(canchaDelDia(cancha, complejo, "2026-10-31")), { desde: 480, hasta: 1560 });
+  assert.deepEqual(horarioCancha(canchaDelDia(cancha, complejo, "2026-10-31", true)), { desde: 480, hasta: 1440 });
+  // Domingo cerrado; martes sin cargar = cerrado
+  assert.equal(canchaDelDia(cancha, complejo, "2026-11-01"), null);
+  assert.equal(canchaDelDia(cancha, complejo, "2026-10-27"), null);
+  // Cancha con horario propio: la suya, recortada igual con el online
+  assert.deepEqual(horarioCancha(canchaDelDia({ ...cancha, horario_propio: true }, complejo, "2026-10-26", true)), { desde: 840, hasta: 1380 });
+});

@@ -15,7 +15,7 @@ import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfile
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
 import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos, separarPagos, unMedioAlcanza } from "./caja.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries, canchaDelDia } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -6221,7 +6221,8 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
     ? habilitados.map((c) => {
         const venue = venues.find((v) => v.id === c.id);
         const suyas = online.filter((x) => x.complejo_id === c.id);
-        const horarios = horariosConLibres(suyas, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+        const delDia = suyas.map((x) => canchaDelDia(x, c, fecha, true)).filter(Boolean);
+        const horarios = horariosConLibres(delDia, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
         return {
           venue, complejo: c, horarios, canchasSuyas: suyas,
           totalCanchas: canchas.filter((x) => x.complejo_id === c.id).length,
@@ -6448,7 +6449,7 @@ function FichaComplejoForm({ complejoId, nombre, accessToken }) {
 
 /* Tarjeta de un complejo con reserva online: portada, logo, datos, precio, horarios libres en grilla
    (Mañana / Tarde / Noche, con cuántas canchas quedan) y, al elegir uno, el resumen con "Reservar" */
-function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
+function TarjetaComplejo({ venue, complejo = null, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
   // Si ese día no hay lugar: el primer turno libre de los días siguientes (undefined = buscando, null = no hay)
   const [proximo, setProximo] = useState(undefined);
   useEffect(() => {
@@ -6459,7 +6460,8 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
       for (let d = sumarDias(fecha, 1); d <= ultimoDia; d = sumarDias(d, 1)) {
         try {
           const ocupado = ((await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: d })) || []).map((r) => ({ ...r, estado: "confirmada" }));
-          const libres = horariosConLibres(canchasSuyas, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+          const delDia = canchasSuyas.map((x) => canchaDelDia(x, complejo, d, true)).filter(Boolean);
+          const libres = horariosConLibres(delDia, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
           if (libres.length > 0) { if (vigente) setProximo({ fecha: d, desde: libres[0].desde }); return; }
         } catch { break; }
         if (!vigente) return;
@@ -6954,7 +6956,9 @@ function etiquetaDiaCorta(fecha, hoy) {
 /* Reservar en un complejo: día, duración, y los horarios de cada cancha (libres y ocupados) */
 function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReservas }) {
   const hoy = hoyArgentina();
-  const [canchas, setCanchas] = useState(null);
+  const [canchasBase, setCanchas] = useState(null);
+  const [complejo, setComplejo] = useState(null);
+  useEffect(() => { supabaseTable(`complejos?id=eq.${encodeURIComponent(venue.id)}&select=*`).then((r) => setComplejo(r[0] || null)).catch(() => {}); }, [venue.id]);
   const [fecha, setFecha] = useState(inicial?.fecha || hoy);
   const pendienteInicial = useRef(inicial?.desde != null ? inicial : null); // horario del buscador, a abrir apenas carguen los datos
   const [duracion, setDuracion] = useState(null);
@@ -6986,8 +6990,10 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
   }, [venue.id, fecha]);
   useEffect(() => { setOcupado(null); loadOcupado(); }, [loadOcupado]);
 
+  // Cada cancha con el horario online de ese día (las que ese día no reciben pedidos no se muestran)
+  const canchas = canchasBase ? canchasBase.map((c) => canchaDelDia(c, complejo, fecha, true)).filter(Boolean) : null;
   const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
-  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
+  const duraciones = DURACIONES.filter((d) => (canchasBase || []).some((c) => duracionesOfrecidas(c).includes(d)));
   const ahora = Date.now();
 
   const elegir = (cancha, desde) => {
@@ -10440,6 +10446,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | fijos | canchas
   const [canchas, setCanchas] = useState(null);
+  const [complejo, setComplejo] = useState(null); // { id, horario, horario_online }
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
   // Sube con cada cambio, para que la agenda y los pedidos pendientes se vuelvan a cargar juntos
@@ -10449,7 +10456,11 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
 
   const loadCanchas = useCallback(async () => {
     try {
-      setCanchas(await supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }));
+      const [cs, [cx]] = await Promise.all([
+        supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }),
+        supabaseTable(`complejos?id=eq.${encodeURIComponent(complejoId)}&select=*`, { accessToken }),
+      ]);
+      setCanchas(cs); setComplejo(cx || null);
       setError("");
     } catch { setError("No se pudieron cargar las canchas. Revisá la conexión."); }
   }, [complejoId, accessToken]);
@@ -10483,12 +10494,13 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
       ) : (view === "canchas" && verCanchas) || activas.length === 0 ? (
         <>
           {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
-          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
+          {complejo && <HorariosComplejo complejo={complejo} accessToken={accessToken} editable={dueno} onGuardado={loadCanchas} />}
+          <CanchasConfig complejoId={complejoId} canchas={canchas} complejo={complejo} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
         </>
       ) : (
         <>
           <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
-          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} complejo={complejo} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
         </>
       )}
     </div>
@@ -10846,19 +10858,126 @@ function CambiarTelefono({ jugadorApi }) {
 }
 
 /* Canchas del complejo: nombre, horario, precio de cada duración y si recibe reservas online */
-function CanchasConfig({ complejoId, canchas, accessToken, onChanged, puedeBorrar = true }) {
+/* Horario del complejo y de reservas online, por día de la semana (ver 20261050_horarios_complejo.sql).
+   { "0": [desde, hasta] | null, … } en minutos; el "hasta" puede pasar de las 24 (cierra de madrugada). */
+const DIAS_HORARIO = [[1, "Lunes"], [2, "Martes"], [3, "Miércoles"], [4, "Jueves"], [5, "Viernes"], [6, "Sábado"], [0, "Domingo"]];
+const horaConDia = (m) => `${etiquetaHora(m)}${m > 1440 ? " (día siguiente)" : ""}`;
+const semanaIgual = (desde, hasta) => Object.fromEntries(DIAS_HORARIO.map(([d]) => [String(d), [desde, hasta]]));
+function resumenSemana(h) {
+  if (!h) return "";
+  return DIAS_HORARIO.map(([d, l]) => `${l.slice(0, 3)} ${Array.isArray(h[d]) ? `${etiquetaHora(h[d][0])}-${etiquetaHora(h[d][1])}` : "cerrado"}`).join(" · ");
+}
+
+function EditorSemana({ valor, onChange, disabled }) {
+  const pasos = Array.from({ length: 48 }, (_, i) => i * 30);
+  const cambiar = (d, v) => onChange({ ...valor, [d]: v });
+  return (
+    <div className="space-y-1.5">
+      {DIAS_HORARIO.map(([d, l]) => {
+        const v = valor[d];
+        const abierto = Array.isArray(v);
+        return (
+          <div key={d} className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 w-32 text-teal-200"><input type="checkbox" checked={abierto} disabled={disabled}
+              onChange={(e) => cambiar(d, e.target.checked ? [480, 1380] : null)} /> {l}</label>
+            {abierto ? (
+              <>
+                <select value={v[0]} disabled={disabled} onChange={(e) => { const desde = Number(e.target.value); cambiar(d, [desde, Math.max(v[1], desde + 30) > desde + 1440 ? desde + 1440 : Math.max(v[1], desde + 30)]); }}
+                  className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label={`${l} desde`}>
+                  {pasos.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+                </select>
+                <span className="text-teal-400">a</span>
+                <select value={v[1]} disabled={disabled} onChange={(e) => cambiar(d, [v[0], Number(e.target.value)])} className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label={`${l} hasta`}>
+                  {Array.from({ length: 48 }, (_, i) => v[0] + 30 * (i + 1)).map((m) => <option key={m} value={m}>{horaConDia(m)}</option>)}
+                </select>
+              </>
+            ) : <span className="text-xs text-teal-600">Cerrado</span>}
+          </div>
+        );
+      })}
+      {!disabled && Array.isArray(valor[1]) && (
+        <button type="button" onClick={() => onChange(Object.fromEntries(DIAS_HORARIO.map(([d]) => [String(d), d >= 1 && d <= 5 ? [...valor[1]] : valor[d]])))} className="text-xs text-teal-400 underline">Copiar el lunes a martes, miércoles, jueves y viernes</button>
+      )}
+    </div>
+  );
+}
+
+function HorariosComplejo({ complejo, accessToken, editable, onGuardado }) {
+  const [abierto, setAbierto] = useState(false);
+  const [horario, setHorario] = useState(complejo.horario || null);
+  const [online, setOnline] = useState(complejo.horario_online || null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  useEffect(() => { setHorario(complejo.horario || null); setOnline(complejo.horario_online || null); }, [complejo]);
+  const guardar = async () => {
+    setBusy(true); setError(""); setAviso("");
+    try {
+      await supabaseRpc("guardar_horarios_complejo", { p_complejo: complejo.id, p_horario: horario, p_horario_online: online }, accessToken);
+      setAviso("Horarios guardados.");
+      await onGuardado();
+    } catch (e) { setError(e?.code === "horario_invalido" ? "Revisá los horarios: el cierre tiene que ser después de la apertura." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const caja = "rounded-xl border border-teal-800 p-4 space-y-3 mb-4";
+  return (
+    <section className={caja} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <button type="button" onClick={() => setAbierto((v) => !v)} className="w-full flex items-center justify-between gap-2 text-left">
+        <span>
+          <span className="block text-sm uppercase tracking-wide text-teal-400">Horarios del complejo y de reservas online</span>
+          <span className="block text-xs text-teal-500">{complejo.horario ? resumenSemana(complejo.horario) : "Sin cargar: cada cancha usa su propio horario."}</span>
+          {complejo.horario_online && <span className="block text-xs text-cyan-300">Online: {resumenSemana(complejo.horario_online)}</span>}
+        </span>
+        <span className="text-teal-300 shrink-0">{abierto ? "▴" : "▾"}</span>
+      </button>
+      {abierto && (
+        <div className="space-y-4 text-sm">
+          <div className="space-y-2">
+            <p className="font-semibold text-teal-100">Horario del complejo</p>
+            <p className="text-xs text-teal-500">Cuándo está abierto cada día. Con esto se arma la agenda de todas las canchas (las que tienen horario propio usan el suyo).</p>
+            {horario ? (
+              <>
+                <EditorSemana valor={horario} onChange={setHorario} disabled={!editable} />
+                {editable && <button type="button" onClick={() => setHorario(null)} className="text-xs text-teal-500 hover:text-red-400">Quitar el horario del complejo (vuelve el de cada cancha)</button>}
+              </>
+            ) : editable ? (
+              <button type="button" onClick={() => setHorario(semanaIgual(480, 1380))} className="px-3 py-1.5 rounded-lg border border-lime-400 text-lime-400">Cargar el horario del complejo</button>
+            ) : <p className="text-teal-400">Sin cargar.</p>}
+          </div>
+          <div className="space-y-2 border-t border-teal-900 pt-3">
+            <p className="font-semibold text-teal-100">Horario de reservas online</p>
+            <p className="text-xs text-teal-500">Qué horarios pueden pedir los jugadores desde la app. Fuera de este horario la cancha sigue en la agenda para cargar a mano, pero no se ve online.</p>
+            <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={!!online} disabled={!editable}
+              onChange={(e) => setOnline(e.target.checked ? (horario ? JSON.parse(JSON.stringify(horario)) : semanaIgual(840, 1380)) : null)} />
+              Limitar el horario de las reservas online</label>
+            {online ? <EditorSemana valor={online} onChange={setOnline} disabled={!editable} />
+              : <p className="text-xs text-teal-400">Se puede pedir online en todo el horario del complejo.</p>}
+          </div>
+          {error && <p className="text-red-400">{error}</p>}
+          {aviso && <p className="text-lime-400">{aviso}</p>}
+          {editable ? (
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar horarios"}</button>
+          ) : <p className="text-xs text-teal-500">Los horarios los cambia el dueño.</p>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CanchasConfig({ complejoId, canchas, complejo = null, accessToken, onChanged, puedeBorrar = true }) {
   const [adding, setAdding] = useState(false);
   return (
     <div className="space-y-3">
-      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
+      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} complejo={complejo} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
       {adding
-        ? <CanchaForm initial={null} complejoId={complejoId} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
+        ? <CanchaForm initial={null} complejoId={complejoId} complejo={complejo} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
         : <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cancha</button>}
     </div>
   );
 }
 
-function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
+function CanchaForm({ initial, complejoId, complejo = null, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
+  const conHorarioComplejo = !!complejo?.horario;
   const toForm = (c) => ({
     nombre: c?.nombre || `Cancha ${orden + 1}`,
     apertura: c ? etiquetaHora(horarioCancha(c).desde) : "14:00",
@@ -10868,6 +10987,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
     precio_120: c?.precio_120 != null ? String(Math.round(c.precio_120)) : "",
     reserva_online: c ? c.reserva_online : true,
     activa: c ? c.activa : true,
+    horario_propio: c ? !!c.horario_propio : false,
   });
   const [form, setForm] = useState(() => toForm(initial));
   const [editing, setEditing] = useState(!initial);
@@ -10886,6 +11006,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
       precio_120: leerPrecio(form.precio_120),
       reserva_online: form.reserva_online,
       activa: form.activa,
+      ...(conHorarioComplejo ? { horario_propio: form.horario_propio } : {}),
     };
     if (!row.nombre) { setError("Poné el nombre de la cancha."); return; }
     if (row.apertura === row.cierre) { setError("La apertura y el cierre no pueden ser la misma hora."); return; }
@@ -10916,7 +11037,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
       <div className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-x-4 gap-y-1">
         <div className="flex-1 min-w-[12rem]">
           <p className="font-semibold">{initial.nombre}{!initial.activa && <span className="ml-2 text-xs text-amber-400">desactivada</span>}</p>
-          <p className="text-sm text-teal-300">{rangoLabel(desde, hasta)} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
+          <p className="text-sm text-teal-300">{conHorarioComplejo && !initial.horario_propio ? "Horario del complejo" : rangoLabel(desde, hasta)}{conHorarioComplejo && initial.horario_propio ? " (horario propio)" : ""} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
           <p className="text-xs text-teal-500">{initial.reserva_online ? "Recibe reservas online" : "Solo turnos cargados por el complejo"}</p>
         </div>
         <button type="button" onClick={() => { setForm(toForm(initial)); setEditing(true); }} className="text-sm text-lime-400">Editar</button>
@@ -10947,10 +11068,14 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
           <label className="block text-xs text-teal-400 mb-1">Nombre</label>
           <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
         </div>
-        {horaSelect("apertura", "Abre")}
-        {horaSelect("cierre", "Cierra")}
+        {(!conHorarioComplejo || form.horario_propio) && horaSelect("apertura", "Abre")}
+        {(!conHorarioComplejo || form.horario_propio) && horaSelect("cierre", "Cierra")}
       </div>
-      {overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
+      {conHorarioComplejo && (
+        <label className="flex items-center gap-2 text-sm text-teal-200 mb-3"><input type="checkbox" checked={form.horario_propio} onChange={(e) => set("horario_propio", e.target.checked)} />
+          Esta cancha abre en otro horario que el complejo (todos los días, el que pongas acá)</label>
+      )}
+      {(!conHorarioComplejo || form.horario_propio) && overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
       <p className="text-xs text-teal-400 mb-1">Precio por duración (dejá vacío lo que no ofrecés)</p>
       <div className="grid gap-3 grid-cols-3 mb-3">{DURACIONES.map(precioInput)}</div>
       <div className="flex flex-col gap-2 mb-3 text-sm text-teal-200">
@@ -10979,7 +11104,10 @@ function estiloReserva(r) {
 }
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
-function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
+function AgendaReservas({ complejoId, canchas: canchasBase, complejo = null, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
+  // Cada cancha con el horario de ese día (las cerradas ese día quedan marcadas)
+  const canchas = useMemo(() => canchasBase.map((c) => canchaDelDia(c, complejo, fecha) || { ...c, cerradaHoy: true }), [canchasBase, complejo, fecha]);
+  const abiertas = canchas.filter((c) => !c.cerradaHoy);
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -11001,7 +11129,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
     return () => clearInterval(t);
   }, [load]);
 
-  const filas = useMemo(() => filasAgenda(canchas), [canchas]);
+  const filas = useMemo(() => filasAgenda(abiertas.length ? abiertas : canchasBase), [canchas]); // eslint-disable-line react-hooks/exhaustive-deps
   const finGrilla = filas[filas.length - 1] + PASO;
   const lista = useMemo(() => reservas || [], [reservas]);
   // Lo que ocupa cada cancha, con la fila de la agenda donde se dibuja (la de su inicio, o la primera
@@ -11023,7 +11151,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
     const o = porCancha[c.id].find((x) => x.fila === m);
     if (o) return { tipo: "reserva", o, span: Math.max(1, Math.ceil((Math.min(o.hasta, finGrilla) - m) / PASO)) };
     if (porCancha[c.id].some((x) => x.fila < m && x.hasta > m)) return { tipo: "tapada" };
-    if (m < desde || m >= hasta) return { tipo: "cerrada" };
+    if (c.cerradaHoy || m < desde || m >= hasta) return { tipo: "cerrada" };
     return { tipo: "libre" };
   };
 
@@ -11037,11 +11165,12 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
         {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
       </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
+        <button type="button" disabled={abiertas.length === 0} onClick={() => setNueva({ canchaId: abiertas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
         <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
         <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {abiertas.length === 0 && <p className="text-sm text-amber-300 mb-3">El complejo está cerrado este día (según su horario). Lo cambiás en Canchas y precios › Horarios.</p>}
 
       {reservas !== null && (() => {
         const turnos = lista.filter((r) => r.tipo === "turno" && r.estado === "confirmada");
@@ -11118,15 +11247,15 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
       )}
 
       {nueva && (
-        <NuevoTurnoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
+        <NuevoTurnoModal complejoId={complejoId} canchas={abiertas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
           onClose={() => setNueva(null)} onDone={() => { setNueva(null); onChanged(); }} />
       )}
       {bloqueando && (
-        <BloqueoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
+        <BloqueoModal complejoId={complejoId} canchas={abiertas.length ? abiertas : canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
           onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} canchas={canchas} reservas={lista} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} canchas={canchasBase} complejo={complejo} reservas={lista} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
           onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
@@ -11435,7 +11564,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
 
 /* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
    bloquear al jugador si lo pidió online */
-function DetalleReservaModal({ reserva: r, cancha, canchas = [], reservas = [], fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
+function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null, reservas = [], fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
   const dueno = rol === "dueno";
   const [editando, setEditando] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -11508,7 +11637,7 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], reservas = [], 
   return (
     <Modal title={editando ? "Editar turno" : r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
       {editando ? (
-        <EditarTurno r={r} canchas={canchas.length ? canchas : [cancha].filter(Boolean)} fecha={fecha} desdeActual={desde} duracionActual={hasta - desde}
+        <EditarTurno r={r} canchas={canchas.length ? canchas : [cancha].filter(Boolean)} complejo={complejo} fecha={fecha} desdeActual={desde} duracionActual={hasta - desde}
           reservas={reservas} accessToken={accessToken} onCancelar={() => setEditando(false)} onGuardado={async () => { await onChanged(); onClose(); }} />
       ) : (
       <div className="space-y-3 text-sm" style={F.body}>
@@ -11613,10 +11742,11 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], reservas = [], 
 
 /* Editar un turno ya cargado (ver 20261047_editar_turnos.sql). En un turno fijo pregunta si es solo
    ese o ese y los que siguen. Si lo pidió un jugador por la app, la base le avisa del cambio. */
-function EditarTurno({ r, canchas, fecha, desdeActual, duracionActual, reservas, accessToken, onCancelar, onGuardado }) {
+function EditarTurno({ r, canchas, complejo = null, fecha, desdeActual, duracionActual, reservas, accessToken, onCancelar, onGuardado }) {
   const [nuevaFecha, setNuevaFecha] = useState(fecha);
   const [canchaId, setCanchaId] = useState(r.cancha_id);
-  const cancha = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const canchaBase = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const cancha = canchaDelDia(canchaBase, complejo, nuevaFecha) || canchaBase;
   const [duracion, setDuracion] = useState(duracionActual);
   const [desde, setDesde] = useState(desdeActual);
   const [form, setForm] = useState({ nombre: r.nombre || "", telefono: r.telefono ? formatArPhone(r.telefono) : "", precio: r.precio != null ? String(Math.round(Number(r.precio))) : "", nota: r.nota || "" });
@@ -14945,7 +15075,8 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
       supabaseTable(`cuotas_alumnos?complejo_id=eq.${c}&periodo=eq.${mes}&select=alumno_id,monto,medio`, { accessToken }),
       esDueno ? supabaseTable(`pagos_profes?complejo_id=eq.${c}&periodo=eq.${mes}&select=profe_id,monto`, { accessToken }) : Promise.resolve([]),
       supabaseTable(`horarios_profe?complejo_id=eq.${c}&order=created_at.asc`, { accessToken }).catch(() => null), // null: la base todavía no los tiene
-    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos, horarios]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos, horarios }); setError(""); } })
+      supabaseTable(`complejos?id=eq.${c}&select=*`).then((r) => r[0] || null).catch(() => null),
+    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos, horarios, complejo]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos, horarios, complejo }); setError(""); } })
       .catch(() => { if (vivo) setError("No se pudieron cargar las clases. Revisá la conexión."); });
     return () => { vivo = false; };
   }, [complejoId, accessToken, esDueno, hoy, mes, version]);
@@ -15186,7 +15317,8 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
     try { await fn(); if (ok) setAviso(ok); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Esa cuota ya está cobrada este mes." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const cancha = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const canchaElegida = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const cancha = canchaElegida ? canchaDelDia(canchaElegida, datos.complejo, cargar.fecha) || canchaElegida : null;
   const inicios = cancha ? iniciosPosibles(cancha, Number(cargar.duracion)) : [];
   const cargarClases = async () => {
     if (!cancha || cargar.desde === "" || !cargar.fecha) { setError("Elegí cancha, día y horario."); return; }
