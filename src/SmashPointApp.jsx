@@ -13,6 +13,7 @@ import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.j
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
+import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos } from "./caja.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
 
@@ -10335,7 +10336,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "consumos" && verConsumos ? (
         <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "caja" && verCaja ? (
-        <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
+        <CajaLibro organizer={organizer} complejos={complejos} tournaments={tournaments} venues={venues} />
       ) : seccion === "perfil" && !colaborador ? (
         <div className="grid gap-6 lg:grid-cols-2 items-start" style={F.body}>
           <div className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -13267,6 +13268,636 @@ function conceptoInscripcion(p, tournaments) {
   return ["Inscripción", t?.name || "torneo borrado", c?.name, jugador].filter(Boolean).join(" · ");
 }
 
+/* ---------- Caja nueva: un solo libro de movimientos (ver supabase/migrations/20261045_caja_libro.sql) ----------
+   Si la base todavía no tiene el libro (el real antes de la migración), muestra la Caja de siempre. */
+
+const ERRORES_CAJA = {
+  no_autorizado: "No tenés permiso para esto.",
+  monto_invalido: "Poné un monto mayor a cero.",
+  falta_concepto: "Poné un concepto (al menos 3 letras).",
+  cuenta_invalida: "Elegí una cuenta activa.",
+  misma_cuenta: "La cuenta de origen y la de destino tienen que ser distintas.",
+  categoria_invalida: "Elegí una categoría.",
+  complejo_invalido: "Ese complejo no es tuyo.",
+  socio_invalido: "Elegí un socio activo.",
+  falta_sentido: "Elegí si sobra o falta plata.",
+  fecha_antes_del_saldo_inicial: "La fecha es anterior al saldo inicial de esa cuenta.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
+  ya_anulado: "Ese movimiento ya estaba anulado.",
+  anular_en_origen: "Este movimiento viene de un cobro o una compra: anulalo desde ahí (la venta, el turno, la compra…).",
+  editar_en_origen: "El monto y la fecha de este movimiento se corrigen desde donde se cobró o se pagó.",
+  movimiento_anulado: "Un movimiento anulado ya no se puede cambiar.",
+  cuenta_en_uso_por_un_medio: "Esa cuenta recibe un medio de cobro: primero elegí otra cuenta para ese medio.",
+};
+const errorCaja = (e) => ERRORES_CAJA[e?.code] || (/duplicate|unique/i.test(e?.message || "") ? "Ya existe uno con ese nombre." : "No se pudo guardar. Revisá la conexión.");
+const enPesos = (c) => conSigno(Number(c || 0) / 100);
+const CLASES_CUENTA = [["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["banco", "Banco"], ["otra", "Otra"]];
+const BOTONES_MOVIMIENTO = [
+  ["ingreso", "+ Ingreso", "#9fe022"], ["gasto", "+ Gasto", "#f87171"], ["retiro_socio", "Retiro de socio", "#f59e0b"],
+  ["aporte_socio", "Aporte de socio", "#22d3ee"], ["transferencia_interna", "Pasar entre cuentas", "#94a3b8"], ["ajuste", "Ajuste", "#94a3b8"],
+];
+
+function CajaLibro({ organizer, complejos = [], tournaments = [], venues = [] }) {
+  const hoy = hoyArgentina();
+  const accessToken = organizer.accessToken;
+  const [hayLibro, setHayLibro] = useState(null); // null = averiguando, false = la base no lo tiene
+  const [tipo, setTipo] = useState("mes");
+  const [rango, setRango] = useState(() => rangoPeriodo("mes", hoy));
+  const [base, setBase] = useState(null); // { cuentas, categorias, socios, medios, saldos }
+  const [movs, setMovs] = useState(null);
+  const [error, setError] = useState("");
+  const [vista, setVista] = useState("movimientos"); // movimientos | configurar
+  const [nuevo, setNuevo] = useState(null); // tipo del formulario abierto
+  const [abierto, setAbierto] = useState(null); // id del movimiento con el detalle abierto
+  const [complejo, setComplejo] = useState("");
+  const [filtros, setFiltros] = useState({ buscar: "", tipo: "", cuenta: "", categoria: "", quien: "", verAnulados: false });
+
+  useEffect(() => {
+    supabaseRpc("preparar_mi_caja", {}, accessToken)
+      .then(() => setHayLibro(true))
+      .catch((e) => setHayLibro(e.pgCode === "PGRST202" || e.pgCode === "42883" ? false : true));
+  }, [accessToken]);
+
+  const cargarBase = useCallback(async () => {
+    const yo = organizer.id;
+    const [cuentas, categorias, socios, medios, saldos] = await Promise.all([
+      supabaseTable(`cuentas_caja?dueno_id=eq.${yo}&order=orden.asc,nombre.asc`, { accessToken }),
+      supabaseTable(`categorias_caja?dueno_id=eq.${yo}&order=tipo.asc,orden.asc,nombre.asc`, { accessToken }),
+      supabaseTable(`socios_caja?dueno_id=eq.${yo}&order=nombre.asc`, { accessToken }),
+      supabaseTable(`cuenta_por_medio?dueno_id=eq.${yo}`, { accessToken }),
+      supabaseRpc("saldos_cuentas", {}, accessToken),
+    ]);
+    setBase({ cuentas, categorias, socios, medios, saldos });
+  }, [organizer.id, accessToken]);
+
+  const cargarMovs = useCallback(async () => {
+    const { desde, hasta } = rango;
+    if (!desde || !hasta || hasta < desde) { setMovs(null); setError("Revisá las fechas: \"hasta\" tiene que ser el mismo día o después de \"desde\"."); return; }
+    setMovs(await traerTodo(`movimientos?dueno_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,cargado_at.desc,id.asc`, accessToken));
+  }, [rango, organizer.id, accessToken]);
+
+  const recargar = useCallback(async () => {
+    try { await Promise.all([cargarBase(), cargarMovs()]); setError(""); }
+    catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [cargarBase, cargarMovs]);
+
+  useEffect(() => { if (hayLibro) { setMovs(null); recargar(); } }, [hayLibro, recargar]);
+
+  if (hayLibro === false) return <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />;
+  if (hayLibro === null) return <p className="text-sm opacity-60" style={F.body}>Cargando…</p>;
+
+  const elegirTipo = (t) => { setTipo(t); if (t !== "rango") setRango(rangoPeriodo(t, hoy)); };
+  const chip = (key, label) => (
+    <button key={key} type="button" onClick={() => elegirTipo(key)} className={`px-3 py-1.5 rounded-full text-sm border ${tipo === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+  const cuentaDe = (id) => base?.cuentas.find((c) => c.id === id);
+  const categoriaDe = (id) => base?.categorias.find((c) => c.id === id);
+  const socioDe = (id) => base?.socios.find((s) => s.id === id);
+  const complejoNombre = (id) => (id ? venues.find((v) => v.id === id)?.name || "Complejo" : "");
+  const delComplejo = (movs || []).filter((m) => !complejo || m.complejo_id === complejo);
+  const resumen = resumenLibro(delComplejo);
+  const visibles = filtrarMovimientos(delComplejo, filtros, organizer.id);
+  const saldosActivos = (base?.saldos || []).filter((s) => s.activa || Number(s.saldo) !== 0);
+  const totalSaldos = saldosActivos.reduce((s, x) => s + Number(x.saldo), 0);
+
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Categoría", "Concepto", "Cuenta", "Destino", "Complejo", "Medio", "Monto", "Anulado"], ...visibles.map((m) => [
+      m.fecha, TIPOS_MOVIMIENTO[m.tipo], categoriaDe(m.categoria_id)?.nombre || "", m.concepto, cuentaDe(m.cuenta_id)?.nombre || "",
+      cuentaDe(m.cuenta_destino_id)?.nombre || "", complejoNombre(m.complejo_id), m.medio ? medioCobroLabel(m.medio) : "",
+      String((signoMovimiento(m) || 1) * Number(m.monto) / 100).replace(".", ","), m.anulado_at ? `Sí: ${m.anulado_motivo}` : "",
+    ])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-${rango.desde}-al-${rango.hasta}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const barrasIng = base ? barrasPorCategoria(resumen.porCategoria.ingreso, base.categorias) : [];
+  const barrasGas = base ? barrasPorCategoria(resumen.porCategoria.gasto, base.categorias) : [];
+  const Barras = ({ titulo, filas, color }) => (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-2 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <h2 className="text-xs uppercase tracking-wide text-teal-400">{titulo}</h2>
+      {filas.length === 0 ? <p className="text-teal-600 text-xs">Nada en este período.</p> : filas.map((f) => (
+        <button key={f.id} type="button" onClick={() => setFiltros((x) => ({ ...x, categoria: x.categoria === f.id ? "" : f.id }))} className="block w-full text-left">
+          <div className="flex justify-between gap-2 text-teal-200"><span className="truncate">{f.nombre}</span><span className="tabular-nums shrink-0">{enPesos(f.monto)}</span></div>
+          <div className="h-2 rounded-full mt-1" style={{ backgroundColor: "#134e4a" }}><div className="h-2 rounded-full" style={{ width: `${Math.max(2, f.pct)}%`, backgroundColor: color, opacity: filtros.categoria && filtros.categoria !== f.id ? 0.35 : 1 }} /></div>
+        </button>
+      ))}
+    </section>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap items-center gap-2">
+        {[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["rango", "Elegir fechas"]].map(([k, l]) => chip(k, l))}
+        {complejos.length > 1 && (
+          <select value={complejo} onChange={(e) => setComplejo(e.target.value)} aria-label="Complejo" className="px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+            <option value="">Todos los complejos</option>
+            {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+          </select>
+        )}
+        <button type="button" onClick={() => setVista(vista === "configurar" ? "movimientos" : "configurar")} className="ml-auto px-3 py-1.5 rounded-lg border border-teal-700 text-teal-300 hover:text-lime-400">
+          {vista === "configurar" ? "← Volver a la caja" : "⚙ Configurar"}
+        </button>
+      </div>
+      {tipo === "rango" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" value={rango.desde} onChange={(e) => setRango({ ...rango, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+          <span className="text-teal-400">al</span>
+          <input type="date" value={rango.hasta} onChange={(e) => setRango({ ...rango, hasta: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Hasta" />
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período anterior">‹</button>
+          <span className="font-semibold text-teal-100">{etiquetaPeriodo(tipo, rango)}</span>
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período siguiente">›</button>
+        </div>
+      )}
+
+      {error && <p className="text-red-400">{error}</p>}
+      {base === null || movs === null ? (!error && <p className="opacity-60">Cargando…</p>) : vista === "configurar" ? (
+        <ConfigCaja base={base} accessToken={accessToken} onCambio={recargar} />
+      ) : (
+        <>
+          {/* Saldos de hoy, por cuenta */}
+          <section>
+            <div className="flex items-baseline justify-between mb-2">
+              <h2 className="text-xs uppercase tracking-wide text-teal-500">Saldos hoy</h2>
+              <span className="text-xs text-teal-400">Total <span className="font-semibold tabular-nums text-slate-100">{enPesos(totalSaldos)}</span></span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+              {saldosActivos.map((s) => (
+                <button key={s.cuenta_id} type="button" onClick={() => setFiltros((x) => ({ ...x, cuenta: x.cuenta === s.cuenta_id ? "" : s.cuenta_id }))}
+                  className={`rounded-xl border p-3 text-left min-w-0 ${filtros.cuenta === s.cuenta_id ? "border-lime-400" : "border-teal-800"}`} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                  <p className="text-xs text-teal-400 truncate">{s.nombre}{!s.activa && " (archivada)"}</p>
+                  <p className="text-lg font-semibold tabular-nums truncate" style={{ color: Number(s.saldo) < 0 ? "#f87171" : "#f1f5f9" }}>{enPesos(s.saldo)}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* Resultado del período */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={enPesos(resumen.ingresos)} detalle={etiquetaPeriodo(tipo, rango)} />
+            <TarjetaResumen titulo="Gastos" tono="rojo" valor={enPesos(resumen.gastos)} detalle={etiquetaPeriodo(tipo, rango)} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Resultado" tono={resumen.resultado < 0 ? "rojo" : "cyan"} valor={enPesos(resumen.resultado)} detalle="Ingresos − gastos" /></div>
+          </div>
+          {(resumen.retiros > 0 || resumen.aportes > 0 || resumen.ajustes !== 0) && (
+            <p className="text-xs text-teal-400">
+              {[resumen.retiros > 0 && `Retiros de socios ${enPesos(resumen.retiros)}`, resumen.aportes > 0 && `Aportes de socios ${enPesos(resumen.aportes)}`,
+                resumen.ajustes !== 0 && `Ajustes ${enPesos(resumen.ajustes)}`].filter(Boolean).join(" · ")}
+              <span className="text-teal-600"> (no cuentan como ingreso ni gasto)</span>
+            </p>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <Barras titulo="Ingresos por origen" filas={barrasIng} color={BRAND.lime} />
+            <Barras titulo="Gastos por categoría" filas={barrasGas} color="#f87171" />
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {BOTONES_MOVIMIENTO.map(([t, label, color]) => (
+              <button key={t} type="button" onClick={() => { setNuevo(nuevo === t ? null : t); setAbierto(null); }}
+                className="px-3 py-2 rounded-lg border font-semibold" style={{ borderColor: color, color, backgroundColor: nuevo === t ? `${color}22` : "transparent" }}>{label}</button>
+            ))}
+          </div>
+          {nuevo && (
+            <FormMovimiento tipo={nuevo} base={base} complejos={complejos} complejoNombre={complejoNombre} accessToken={accessToken} hoy={hoy}
+              onCancelar={() => setNuevo(null)} onGuardado={() => { setNuevo(null); recargar(); }} onConfigurar={() => { setNuevo(null); setVista("configurar"); }} />
+          )}
+
+          <GastosFijos organizer={organizer} mes={rango.hasta.slice(0, 7)} onChanged={recargar} />
+
+          {/* Lista de movimientos */}
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <p className="text-xs uppercase tracking-wide text-teal-500 mr-auto">Movimientos ({visibles.length})</p>
+              <input value={filtros.buscar} onChange={(e) => setFiltros({ ...filtros, buscar: e.target.value })} placeholder="Buscar concepto" aria-label="Buscar concepto" className="w-full sm:w-44 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+              <select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })} aria-label="Tipo" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todos los tipos</option>
+                {Object.entries(TIPOS_MOVIMIENTO).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <select value={filtros.cuenta} onChange={(e) => setFiltros({ ...filtros, cuenta: e.target.value })} aria-label="Cuenta" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todas las cuentas</option>
+                {base.cuentas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+              <select value={filtros.categoria} onChange={(e) => setFiltros({ ...filtros, categoria: e.target.value })} aria-label="Categoría" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todas las categorías</option>
+                {base.categorias.map((c) => <option key={c.id} value={c.id}>{c.tipo === "gasto" ? "Gasto · " : "Ingreso · "}{c.nombre}</option>)}
+              </select>
+              <select value={filtros.quien} onChange={(e) => setFiltros({ ...filtros, quien: e.target.value })} aria-label="Quién cargó" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Cargado por cualquiera</option>
+                <option value="yo">Cargado por mí</option>
+                <option value="otros">Cargado por empleados</option>
+              </select>
+              <label className="flex items-center gap-1.5 text-xs text-teal-300"><input type="checkbox" checked={filtros.verAnulados} onChange={(e) => setFiltros({ ...filtros, verAnulados: e.target.checked })} /> Ver anulados</label>
+              {visibles.length > 0 && <button type="button" onClick={descargar} className="text-xs text-teal-300 underline">Descargar planilla</button>}
+            </div>
+            {visibles.length === 0 ? (
+              <p className="text-teal-400">{delComplejo.length === 0 ? "No hay movimientos en este período." : "No hay movimientos con ese filtro."}</p>
+            ) : (
+              <ul className="rounded-xl border border-teal-800 divide-y divide-teal-900/70 overflow-hidden">
+                {visibles.map((m) => {
+                  const signo = signoMovimiento(m);
+                  const color = m.anulado_at ? "#64748b" : signo > 0 ? BRAND.lime : signo < 0 ? "#f87171" : "#cbd5e1";
+                  const cat = categoriaDe(m.categoria_id);
+                  return (
+                    <li key={m.id}>
+                      <button type="button" onClick={() => { setAbierto(abierto === m.id ? null : m.id); setNuevo(null); }} className={`w-full text-left px-3 py-2.5 flex items-start gap-3 hover:bg-white/5 ${abierto === m.id ? "bg-white/5" : ""}`}>
+                        <span className="text-xs text-teal-400 tabular-nums w-11 shrink-0 pt-0.5">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                        <span className="flex-1 min-w-0">
+                          <span className={`block truncate ${m.anulado_at ? "line-through text-slate-500" : "text-slate-100"}`}>{m.concepto}</span>
+                          <span className="block text-xs text-teal-500 truncate">
+                            {[cat?.nombre || TIPOS_MOVIMIENTO[m.tipo],
+                              m.tipo === "transferencia_interna" ? `${cuentaDe(m.cuenta_id)?.nombre} → ${cuentaDe(m.cuenta_destino_id)?.nombre}` : cuentaDe(m.cuenta_id)?.nombre,
+                              socioDe(m.socio_id)?.nombre, complejos.length > 1 && complejoNombre(m.complejo_id),
+                              m.cargado_por !== organizer.id && "empleado", m.anulado_at && "ANULADO"].filter(Boolean).join(" · ")}
+                          </span>
+                        </span>
+                        <span className="font-semibold tabular-nums whitespace-nowrap" style={{ color }}>{signo > 0 ? "+" : signo < 0 ? "−" : ""}{formatoPrecio(Number(m.monto) / 100)}</span>
+                      </button>
+                      {abierto === m.id && (
+                        <DetalleMovimiento m={m} base={base} complejos={complejos} complejoNombre={complejoNombre} accessToken={accessToken} esMio={m.cargado_por === organizer.id}
+                          onCerrar={() => setAbierto(null)} onCambio={recargar} />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Formulario de un movimiento a mano (ingreso, gasto, retiro/aporte de socio, pase entre cuentas, ajuste) */
+function FormMovimiento({ tipo, base, complejos, complejoNombre, accessToken, hoy, onCancelar, onGuardado, onConfigurar }) {
+  const activas = base.cuentas.filter((c) => c.activa);
+  const efectivo = activas.find((c) => c.clase === "efectivo")?.id || activas[0]?.id || "";
+  const categorias = base.categorias.filter((c) => c.tipo === tipo && c.activa);
+  const socios = base.socios.filter((s) => s.activo);
+  const [f, setF] = useState({
+    monto: "", fecha: hoy, concepto: "", cuenta: efectivo, destino: activas.find((c) => c.id !== efectivo)?.id || "",
+    categoria: "", complejo: complejos.length === 1 ? complejos[0].id : "", socio: socios.length === 1 ? socios[0].id : "", sentido: "1",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const titulo = { ingreso: "Nuevo ingreso", gasto: "Nuevo gasto", retiro_socio: "Retiro de socio (la plata sale del negocio)", aporte_socio: "Aporte de socio (la plata entra al negocio)", transferencia_interna: "Pasar plata de una cuenta a otra", ajuste: "Ajuste (para corregir un saldo)" }[tipo];
+  const guardar = async () => {
+    const monto = aCentavos(f.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      if (tipo === "transferencia_interna") {
+        await supabaseRpc("transferir_entre_cuentas", { p_origen: f.cuenta, p_destino: f.destino, p_monto: monto, p_concepto: f.concepto, p_fecha: f.fecha }, accessToken);
+      } else {
+        await supabaseRpc("registrar_movimiento", {
+          p_tipo: tipo, p_monto: monto, p_cuenta: f.cuenta, p_concepto: f.concepto, p_fecha: f.fecha,
+          p_categoria: f.categoria || null, p_complejo: f.complejo || null, p_medio: null,
+          p_socio: f.socio || null, p_sentido: tipo === "ajuste" ? Number(f.sentido) : null,
+        }, accessToken);
+      }
+      onGuardado();
+    } catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded-lg border text-base";
+  const etiqueta = "block text-xs text-teal-400 mb-1";
+  return (
+    <div className="rounded-xl border border-teal-700 p-3 space-y-3">
+      <p className="font-semibold text-teal-100">{titulo}</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block"><span className={etiqueta}>Monto</span><input inputMode="decimal" value={f.monto} onChange={(e) => setF({ ...f, monto: e.target.value })} placeholder="$" className={campo} style={adminInput} /></label>
+        <label className="block"><span className={etiqueta}>Fecha</span><input type="date" value={f.fecha} onChange={(e) => setF({ ...f, fecha: e.target.value })} className={campo} style={adminInput} /></label>
+        <label className="block sm:col-span-2"><span className={etiqueta}>Concepto</span><input value={f.concepto} onChange={(e) => setF({ ...f, concepto: e.target.value })} maxLength={120}
+          placeholder={{ ingreso: "Ej: sponsor de la fecha", gasto: "Ej: factura de luz de octubre", retiro_socio: "Ej: retiro de fin de mes", aporte_socio: "Ej: plata para comprar pelotas", transferencia_interna: "Ej: depósito en el banco", ajuste: "Ej: diferencia al contar la caja" }[tipo]} className={campo} style={adminInput} /></label>
+        <label className="block"><span className={etiqueta}>{tipo === "transferencia_interna" ? "Sale de" : tipo === "ingreso" || tipo === "aporte_socio" ? "Entra a" : tipo === "ajuste" ? "Cuenta" : "Sale de"}</span>
+          <select value={f.cuenta} onChange={(e) => setF({ ...f, cuenta: e.target.value })} className={campo} style={adminInput}>{activas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}</select></label>
+        {tipo === "transferencia_interna" && (
+          <label className="block"><span className={etiqueta}>Entra a</span>
+            <select value={f.destino} onChange={(e) => setF({ ...f, destino: e.target.value })} className={campo} style={adminInput}>{activas.filter((c) => c.id !== f.cuenta).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}</select></label>
+        )}
+        {(tipo === "ingreso" || tipo === "gasto") && (
+          <label className="block"><span className={etiqueta}>Categoría</span>
+            <select value={f.categoria} onChange={(e) => setF({ ...f, categoria: e.target.value })} className={campo} style={adminInput}>
+              <option value="">Elegí…</option>
+              {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select></label>
+        )}
+        {(tipo === "retiro_socio" || tipo === "aporte_socio") && (
+          socios.length ? (
+            <label className="block"><span className={etiqueta}>Socio</span>
+              <select value={f.socio} onChange={(e) => setF({ ...f, socio: e.target.value })} className={campo} style={adminInput}>
+                <option value="">Sin indicar</option>
+                {socios.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+              </select></label>
+          ) : <p className="text-xs text-teal-400 self-end pb-2">No cargaste socios. <button type="button" onClick={onConfigurar} className="underline text-teal-300">Cargalos en Configurar</button> para saber quién retiró.</p>
+        )}
+        {tipo === "ajuste" && (
+          <div><span className={etiqueta}>¿Qué pasó?</span>
+            <div className="flex gap-2">
+              {[["1", "Sobra plata"], ["-1", "Falta plata"]].map(([v, l]) => (
+                <button key={v} type="button" onClick={() => setF({ ...f, sentido: v })} className={`px-3 py-2 rounded-lg border ${f.sentido === v ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+              ))}
+            </div></div>
+        )}
+        {complejos.length > 1 && tipo !== "transferencia_interna" && (
+          <label className="block"><span className={etiqueta}>Complejo</span>
+            <select value={f.complejo} onChange={(e) => setF({ ...f, complejo: e.target.value })} className={campo} style={adminInput}>
+              <option value="">Todo el negocio</option>
+              {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+            </select></label>
+        )}
+      </div>
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* Detalle de un movimiento: datos, editar, anular con motivo e historial */
+function DetalleMovimiento({ m, base, complejos, complejoNombre, accessToken, esMio, onCerrar, onCambio }) {
+  const auto = m.ref_tipo && m.ref_tipo !== "caja_vieja";
+  const [modo, setModo] = useState(null); // editar | anular
+  const [f, setF] = useState({ monto: centavosATexto(Number(m.monto)), fecha: m.fecha, concepto: m.concepto, cuenta: m.cuenta_id, categoria: m.categoria_id || "", socio: m.socio_id || "", complejo: m.complejo_id || "" });
+  const [motivo, setMotivo] = useState("");
+  const [historial, setHistorial] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    supabaseTable(`movimientos_historial?movimiento_id=eq.${m.id}&order=hecho_at.desc`, { accessToken }).then(setHistorial).catch(() => setHistorial([]));
+  }, [m.id, accessToken]);
+  const cuenta = (id) => base.cuentas.find((c) => c.id === id)?.nombre || "—";
+  const guardar = async () => {
+    setBusy(true); setError("");
+    try {
+      const cambios = { cuenta_id: f.cuenta, concepto: f.concepto };
+      if (m.tipo === "ingreso" || m.tipo === "gasto") cambios.categoria_id = f.categoria;
+      if (!auto) {
+        const monto = aCentavos(f.monto);
+        if (!monto) { setError("Poné el monto."); setBusy(false); return; }
+        Object.assign(cambios, { monto, fecha: f.fecha, complejo_id: f.complejo || null });
+        if (m.tipo === "retiro_socio" || m.tipo === "aporte_socio") cambios.socio_id = f.socio || null;
+      }
+      await supabaseRpc("editar_movimiento", { p_id: m.id, p_cambios: cambios }, accessToken);
+      setModo(null); onCambio();
+    } catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const anular = async () => {
+    setBusy(true); setError("");
+    try { await supabaseRpc("anular_movimiento", { p_id: m.id, p_motivo: motivo }, accessToken); onCerrar(); onCambio(); }
+    catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded-lg border text-base";
+  const etiqueta = "block text-xs text-teal-400 mb-1";
+  const fila = (k, v) => v ? <p className="text-xs"><span className="text-teal-500">{k}: </span><span className="text-slate-200">{v}</span></p> : null;
+  return (
+    <div className="px-3 pb-3 pt-1 space-y-3" style={{ backgroundColor: "rgba(255,255,255,0.03)" }}>
+      <div className="grid gap-1 sm:grid-cols-2">
+        {fila("Tipo", TIPOS_MOVIMIENTO[m.tipo])}
+        {fila("Categoría", base.categorias.find((c) => c.id === m.categoria_id)?.nombre)}
+        {fila(m.tipo === "transferencia_interna" ? "De → a" : "Cuenta", m.tipo === "transferencia_interna" ? `${cuenta(m.cuenta_id)} → ${cuenta(m.cuenta_destino_id)}` : cuenta(m.cuenta_id))}
+        {fila("Medio", m.medio && medioCobroLabel(m.medio))}
+        {fila("Socio", base.socios.find((s) => s.id === m.socio_id)?.nombre)}
+        {fila("Complejo", complejoNombre(m.complejo_id))}
+        {auto ? fila("Cobrado", esMio ? "por vos" : "por un empleado") : fila("Cargado", `${fechaCorta(fechaArgentina(m.cargado_at))} ${new Date(m.cargado_at).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Argentina/Buenos_Aires" })}${esMio ? " por vos" : " por un empleado"}`)}
+        {auto && fila("Origen", `Viene de ${ORIGENES_LIBRO[m.ref_tipo]} (se anotó solo)`)}
+        {m.anulado_at && fila("Anulado", `${fechaCorta(fechaArgentina(m.anulado_at))} · ${m.anulado_motivo}`)}
+      </div>
+
+      {!m.anulado_at && modo === null && (
+        <div className="flex flex-wrap gap-3">
+          <button type="button" onClick={() => setModo("editar")} className="text-teal-300 hover:text-lime-400">Editar</button>
+          {auto ? <span className="text-xs text-teal-600 self-center">Para anularlo, anulá {ORIGENES_LIBRO[m.ref_tipo]} desde donde se cargó.</span>
+            : <button type="button" onClick={() => setModo("anular")} className="text-red-400">Anular</button>}
+          <button type="button" onClick={onCerrar} className="text-teal-500 ml-auto">Cerrar</button>
+        </div>
+      )}
+
+      {modo === "editar" && (
+        <div className="space-y-3">
+          {auto && <p className="text-xs text-teal-400">El monto y la fecha se corrigen desde donde se cobró o se pagó. Acá podés cambiar la cuenta, la categoría y el concepto.</p>}
+          <div className="grid gap-3 sm:grid-cols-2">
+            {!auto && <label className="block"><span className={etiqueta}>Monto</span><input inputMode="decimal" value={f.monto} onChange={(e) => setF({ ...f, monto: e.target.value })} className={campo} style={adminInput} /></label>}
+            {!auto && <label className="block"><span className={etiqueta}>Fecha</span><input type="date" value={f.fecha} onChange={(e) => setF({ ...f, fecha: e.target.value })} className={campo} style={adminInput} /></label>}
+            <label className="block sm:col-span-2"><span className={etiqueta}>Concepto</span><input value={f.concepto} onChange={(e) => setF({ ...f, concepto: e.target.value })} maxLength={120} className={campo} style={adminInput} /></label>
+            <label className="block"><span className={etiqueta}>Cuenta</span>
+              <select value={f.cuenta} onChange={(e) => setF({ ...f, cuenta: e.target.value })} className={campo} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa || c.id === m.cuenta_id).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select></label>
+            {(m.tipo === "ingreso" || m.tipo === "gasto") && (
+              <label className="block"><span className={etiqueta}>Categoría</span>
+                <select value={f.categoria} onChange={(e) => setF({ ...f, categoria: e.target.value })} className={campo} style={adminInput}>
+                  {base.categorias.filter((c) => c.tipo === m.tipo && (c.activa || c.id === m.categoria_id)).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select></label>
+            )}
+            {!auto && (m.tipo === "retiro_socio" || m.tipo === "aporte_socio") && (
+              <label className="block"><span className={etiqueta}>Socio</span>
+                <select value={f.socio} onChange={(e) => setF({ ...f, socio: e.target.value })} className={campo} style={adminInput}>
+                  <option value="">Sin indicar</option>
+                  {base.socios.filter((s) => s.activo || s.id === m.socio_id).map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                </select></label>
+            )}
+            {!auto && complejos.length > 1 && m.tipo !== "transferencia_interna" && (
+              <label className="block"><span className={etiqueta}>Complejo</span>
+                <select value={f.complejo} onChange={(e) => setF({ ...f, complejo: e.target.value })} className={campo} style={adminInput}>
+                  <option value="">Todo el negocio</option>
+                  {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+                </select></label>
+            )}
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar cambios"}</button>
+            <button type="button" onClick={() => setModo(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {modo === "anular" && (
+        <div className="space-y-2">
+          <p className="text-xs text-teal-400">El movimiento no se borra: queda tachado, con el motivo, y deja de contar en los saldos.</p>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} maxLength={120} placeholder="Motivo (ej: se cargó dos veces)" className={campo} style={adminInput} />
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={anular} className="px-4 py-2 rounded-lg font-semibold border border-red-400 text-red-300 disabled:opacity-50">{busy ? "Anulando…" : "Anular movimiento"}</button>
+            <button type="button" onClick={() => setModo(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+
+      {historial?.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-teal-500 mb-1">Historial</p>
+          <ul className="space-y-1">
+            {historial.map((h) => {
+              const cambios = h.accion === "anulacion" ? [`anulado: ${h.motivo}`] : ["monto", "fecha", "concepto", "cuenta_id", "categoria_id", "socio_id", "complejo_id", "medio"]
+                .filter((k) => JSON.stringify(h.antes[k]) !== JSON.stringify(h.despues[k]))
+                .map((k) => {
+                  const ver = (v) => (k === "monto" ? formatoPrecio(Number(v) / 100) : k === "cuenta_id" ? cuenta(v) : k === "categoria_id" ? base.categorias.find((c) => c.id === v)?.nombre || "—"
+                    : k === "socio_id" ? base.socios.find((s) => s.id === v)?.nombre || "—" : k === "complejo_id" ? complejoNombre(v) || "todo el negocio" : v ?? "—");
+                  return `${{ monto: "monto", fecha: "fecha", concepto: "concepto", cuenta_id: "cuenta", categoria_id: "categoría", socio_id: "socio", complejo_id: "complejo", medio: "medio" }[k]}: ${ver(h.antes[k])} → ${ver(h.despues[k])}`;
+                });
+              return <li key={h.id} className="text-xs text-teal-300"><span className="text-teal-500">{fechaCorta(fechaArgentina(h.hecho_at))}</span> · {cambios.join(" · ") || "cambio"}</li>;
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Configurar la caja: cuentas (saldo inicial, archivar), a qué cuenta va cada medio, categorías y socios */
+function ConfigCaja({ base, accessToken, onCambio }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [editCuenta, setEditCuenta] = useState(null); // {id|null, nombre, clase, saldo, fecha, activa}
+  const [nuevaCat, setNuevaCat] = useState({ ingreso: "", gasto: "" });
+  const [editCat, setEditCat] = useState(null); // {id, nombre}
+  const [nuevoSocio, setNuevoSocio] = useState("");
+  const [editSocio, setEditSocio] = useState(null);
+  const llamar = async (fn, params, despues) => {
+    setBusy(true); setError("");
+    try { await supabaseRpc(fn, params, accessToken); despues?.(); await onCambio(); }
+    catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const saldoDe = (id) => base.saldos.find((s) => s.cuenta_id === id)?.saldo;
+  const medioCuenta = (medio) => base.medios.find((x) => x.complejo_id === "" && x.medio === medio)?.cuenta_id || "";
+  const caja = "rounded-xl border border-teal-800 p-4 space-y-3 min-w-0";
+  const fondo = { backgroundColor: "rgba(8,18,24,0.6)" };
+  const campo = "px-3 py-2 rounded-lg border text-sm";
+  const guardarCuenta = () => {
+    const saldo = editCuenta.saldo.trim() === "" ? 0 : (editCuenta.saldo.trim().startsWith("-") ? -1 : 1) * (aCentavos(editCuenta.saldo.replace("-", "")) || 0);
+    llamar("guardar_cuenta_caja", { p_id: editCuenta.id, p_nombre: editCuenta.nombre, p_clase: editCuenta.clase, p_saldo_inicial: saldo, p_saldo_fecha: editCuenta.fecha || null, p_activa: editCuenta.activa }, () => setEditCuenta(null));
+  };
+  return (
+    <div className="space-y-4">
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Cuentas</h2>
+          <p className="text-xs text-teal-500">Dónde está la plata. El saldo inicial es lo que había en esa cuenta el día que empezás a usar la caja.</p>
+          <ul className="divide-y divide-teal-900/70">
+            {base.cuentas.map((c) => (
+              <li key={c.id} className="py-2">
+                {editCuenta?.id === c.id ? null : (
+                  <div className="flex items-center gap-2">
+                    <span className={`flex-1 min-w-0 truncate ${c.activa ? "text-slate-100" : "text-slate-500 line-through"}`}>{c.nombre}</span>
+                    <span className="text-xs text-teal-500 hidden sm:inline">inicial {enPesos(c.saldo_inicial)} el {fechaCorta(c.saldo_inicial_fecha)}</span>
+                    <span className="tabular-nums text-teal-200">{enPesos(saldoDe(c.id))}</span>
+                    <button type="button" onClick={() => setEditCuenta({ id: c.id, nombre: c.nombre, clase: c.clase, saldo: (c.saldo_inicial < 0 ? "-" : "") + centavosATexto(Math.abs(c.saldo_inicial)), fecha: c.saldo_inicial_fecha, activa: c.activa })} className="text-xs text-teal-300 hover:text-lime-400">Editar</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          {editCuenta ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{editCuenta.id ? "Editar cuenta" : "Cuenta nueva"}</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={editCuenta.nombre} onChange={(e) => setEditCuenta({ ...editCuenta, nombre: e.target.value })} maxLength={40} placeholder="Nombre (ej: Banco Nación)" className={campo} style={adminInput} />
+                <select value={editCuenta.clase} onChange={(e) => setEditCuenta({ ...editCuenta, clase: e.target.value })} className={campo} style={adminInput}>{CLASES_CUENTA.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                <label className="block"><span className="block text-xs text-teal-400 mb-1">Saldo inicial</span><input inputMode="decimal" value={editCuenta.saldo} onChange={(e) => setEditCuenta({ ...editCuenta, saldo: e.target.value })} placeholder="$0" className={`w-full ${campo}`} style={adminInput} /></label>
+                <label className="block"><span className="block text-xs text-teal-400 mb-1">Al día</span><input type="date" value={editCuenta.fecha} onChange={(e) => setEditCuenta({ ...editCuenta, fecha: e.target.value })} className={`w-full ${campo}`} style={adminInput} /></label>
+              </div>
+              {editCuenta.id && (
+                <label className="flex items-center gap-2 text-xs text-teal-300"><input type="checkbox" checked={!editCuenta.activa} onChange={(e) => setEditCuenta({ ...editCuenta, activa: !e.target.checked })} /> Archivarla (no se borra: sus movimientos quedan)</label>
+              )}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy || editCuenta.nombre.trim().length < 2} onClick={guardarCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setEditCuenta(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setEditCuenta({ id: null, nombre: "", clase: "banco", saldo: "", fecha: hoyArgentina(), activa: true })} className="text-teal-300 hover:text-lime-400">+ Agregar cuenta</button>
+          )}
+        </section>
+
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Medios de cobro</h2>
+          <p className="text-xs text-teal-500">A qué cuenta va la plata de cada medio cuando se cobra un turno, una venta, una inscripción, etc.</p>
+          {MEDIOS_VENTA.map(([medio, label]) => (
+            <label key={medio} className="flex items-center gap-3">
+              <span className="w-32 text-teal-200">{label}</span>
+              <select value={medioCuenta(medio)} disabled={busy} onChange={(e) => llamar("elegir_cuenta_medio", { p_medio: medio, p_cuenta: e.target.value, p_complejo: "" })} className={`flex-1 ${campo}`} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa || c.id === medioCuenta(medio)).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+            </label>
+          ))}
+          <p className="text-xs text-teal-600">Vale para los cobros nuevos; los anteriores quedan donde estaban.</p>
+        </section>
+
+        {["ingreso", "gasto"].map((t) => (
+          <section key={t} className={caja} style={fondo}>
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">{t === "ingreso" ? "Categorías de ingresos" : "Categorías de gastos"}</h2>
+            <ul className="divide-y divide-teal-900/70">
+              {base.categorias.filter((c) => c.tipo === t).map((c) => (
+                <li key={c.id} className="py-1.5 flex items-center gap-2">
+                  {editCat?.id === c.id ? (
+                    <>
+                      <input value={editCat.nombre} onChange={(e) => setEditCat({ ...editCat, nombre: e.target.value })} maxLength={40} className={`flex-1 ${campo}`} style={adminInput} />
+                      <button type="button" disabled={busy || editCat.nombre.trim().length < 2} onClick={() => llamar("guardar_categoria_caja", { p_id: c.id, p_tipo: t, p_nombre: editCat.nombre, p_activa: c.activa }, () => setEditCat(null))} className="text-xs text-lime-400 disabled:opacity-50">Guardar</button>
+                      <button type="button" onClick={() => setEditCat(null)} className="text-xs text-teal-400">Cancelar</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className={`flex-1 min-w-0 truncate ${c.activa ? "text-slate-100" : "text-slate-500 line-through"}`}>{c.nombre}{c.clave && <span className="text-[10px] text-teal-600 ml-1">automática</span>}</span>
+                      <button type="button" onClick={() => setEditCat({ id: c.id, nombre: c.nombre })} className="text-xs text-teal-300 hover:text-lime-400">Renombrar</button>
+                      {!c.clave && <button type="button" disabled={busy} onClick={() => llamar("guardar_categoria_caja", { p_id: c.id, p_tipo: t, p_nombre: c.nombre, p_activa: !c.activa })} className="text-xs text-teal-400 hover:text-red-400">{c.activa ? "Desactivar" : "Activar"}</button>}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <input value={nuevaCat[t]} onChange={(e) => setNuevaCat({ ...nuevaCat, [t]: e.target.value })} maxLength={40} placeholder={t === "ingreso" ? "Ej: Alquiler del salón" : "Ej: Seguridad"} className={`flex-1 ${campo}`} style={adminInput} />
+              <button type="button" disabled={busy || nuevaCat[t].trim().length < 2} onClick={() => llamar("guardar_categoria_caja", { p_id: null, p_tipo: t, p_nombre: nuevaCat[t], p_activa: true }, () => setNuevaCat({ ...nuevaCat, [t]: "" }))} className="px-3 rounded-lg border border-lime-400 text-lime-400 disabled:opacity-40">Agregar</button>
+            </div>
+          </section>
+        ))}
+
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Socios</h2>
+          <p className="text-xs text-teal-500">Para anotar quién retira o pone plata.</p>
+          {base.socios.length === 0 && <p className="text-xs text-teal-600">Todavía no cargaste socios.</p>}
+          <ul className="divide-y divide-teal-900/70">
+            {base.socios.map((s) => (
+              <li key={s.id} className="py-1.5 flex items-center gap-2">
+                {editSocio?.id === s.id ? (
+                  <>
+                    <input value={editSocio.nombre} onChange={(e) => setEditSocio({ ...editSocio, nombre: e.target.value })} maxLength={40} className={`flex-1 ${campo}`} style={adminInput} />
+                    <button type="button" disabled={busy || editSocio.nombre.trim().length < 2} onClick={() => llamar("guardar_socio", { p_id: s.id, p_nombre: editSocio.nombre, p_activo: s.activo }, () => setEditSocio(null))} className="text-xs text-lime-400 disabled:opacity-50">Guardar</button>
+                    <button type="button" onClick={() => setEditSocio(null)} className="text-xs text-teal-400">Cancelar</button>
+                  </>
+                ) : (
+                  <>
+                    <span className={`flex-1 min-w-0 truncate ${s.activo ? "text-slate-100" : "text-slate-500 line-through"}`}>{s.nombre}</span>
+                    <button type="button" onClick={() => setEditSocio({ id: s.id, nombre: s.nombre })} className="text-xs text-teal-300 hover:text-lime-400">Renombrar</button>
+                    <button type="button" disabled={busy} onClick={() => llamar("guardar_socio", { p_id: s.id, p_nombre: s.nombre, p_activo: !s.activo })} className="text-xs text-teal-400 hover:text-red-400">{s.activo ? "Dar de baja" : "Reactivar"}</button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-2">
+            <input value={nuevoSocio} onChange={(e) => setNuevoSocio(e.target.value)} maxLength={40} placeholder="Nombre del socio" className={`flex-1 ${campo}`} style={adminInput} />
+            <button type="button" disabled={busy || nuevoSocio.trim().length < 2} onClick={() => llamar("guardar_socio", { p_id: null, p_nombre: nuevoSocio, p_activo: true }, () => setNuevoSocio(""))} className="px-3 rounded-lg border border-lime-400 text-lime-400 disabled:opacity-40">Agregar</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
   const hoy = hoyArgentina();
   const [tipo, setTipo] = useState("mes"); // hoy | semana | mes | rango
@@ -14806,7 +15437,12 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
 
           {datos.productos.length > 0 && (
             <section className="rounded-xl border border-teal-800 p-4 space-y-2" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
-              <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+                {datos.productos.some((x) => x.conCosto) && (
+                  <p className="text-xs text-teal-400">Ganancia en productos: <span className="font-semibold" style={{ color: BRAND.lime }}>{conSigno(datos.productos.reduce((g, x) => g + x.ganancia, 0))}</span> <span className="text-teal-600">(precio menos costo, de los que tienen costo cargado)</span></p>
+                )}
+              </div>
               <ul className="divide-y divide-teal-900/70">
                 {datos.productos.slice(0, 12).map((x, i) => (
                   <li key={x.descripcion} className="py-1.5 flex items-center gap-3">
