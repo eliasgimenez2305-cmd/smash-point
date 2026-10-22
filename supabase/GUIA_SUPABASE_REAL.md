@@ -98,6 +98,8 @@ Y [`migrations/20261044_mail_avisos.sql`](migrations/20261044_mail_avisos.sql) (
 > 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-mail', 'mail_url');`
 > 5. Volver a publicar `admin-organizers` (muestra el mail de avisos de cada organizador en el panel del creador).
 
+Y [`migrations/20261045_caja_libro.sql`](migrations/20261045_caja_libro.sql) (Caja nueva, etapa 1: un solo libro de movimientos con cuentas, categorías y socios; cada cobro, venta, compra o pago escribe el libro solo; pasa todo lo que ya existe y controla mes a mes que dé igual que la Caja de hoy, si no aborta sin cambiar nada) → **Run** → **Success**. Va junto con la pantalla nueva de la Caja (etapa 2); sola no cambia nada de lo que se ve.
+
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 > **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 
