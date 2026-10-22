@@ -323,6 +323,9 @@ const RESERVA_ERRORES = {
   telefono_invalido: "Revisá el WhatsApp: número de Argentina con característica.",
   cancha_invalida: "Elegí una cancha del complejo.",
   turno_no_vigente: "Ese turno ya no está vigente (se canceló o venció).",
+  faltan_dias: "Elegí al menos un día.",
+  horario_invalido: "Revisá el horario: el \"hasta\" tiene que ser después del \"desde\".",
+  profe_invalido: "Ese profe no es de este complejo.",
   abrir_caja_primero: "Para cobrar en efectivo abrí tu caja del día (sección Caja del día).",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
@@ -11574,13 +11577,16 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], reservas = [], 
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">Entendido</button>
                   </p>
                 ) : confirmCancel ? (
-                  <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
-                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
-                    {r.serie_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
+                  <p className="text-red-300">{r.tipo === "clase" ? "¿Cancelar esta clase? El horario queda libre para alquilar." : "¿Cancelar este turno? El horario queda libre."}{" "}
+                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id && !r.horario_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
+                    {r.serie_id && !r.horario_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
                   </p>
                 ) : (
-                  <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>Cancelar turno</button>
+                  <>
+                    <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>{r.tipo === "clase" ? "Cancelar clase (el profe no viene)" : "Cancelar turno"}</button>
+                    {r.horario_id && <p className="text-xs text-teal-500">Es parte del horario fijo del profe: para cambiarlo o terminarlo, entrá a Clases.</p>}
+                  </>
                 )}
               </>
             )}
@@ -14938,11 +14944,12 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
     Promise.all([
       supabaseTable(`profes_complejo?complejo_id=eq.${c}&order=activo.desc,nombre.asc`, { accessToken }),
       supabaseTable(`canchas?complejo_id=eq.${c}&activa=eq.true&order=orden.asc,created_at.asc`),
-      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id&order=fecha.asc`, accessToken),
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id,horario_id&order=fecha.asc`, accessToken),
       supabaseTable(`alumnos?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
       supabaseTable(`cuotas_alumnos?complejo_id=eq.${c}&periodo=eq.${mes}&select=alumno_id,monto,medio`, { accessToken }),
       esDueno ? supabaseTable(`pagos_profes?complejo_id=eq.${c}&periodo=eq.${mes}&select=profe_id,monto`, { accessToken }) : Promise.resolve([]),
-    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos }); setError(""); } })
+      supabaseTable(`horarios_profe?complejo_id=eq.${c}&order=created_at.asc`, { accessToken }).catch(() => null), // null: la base todavía no los tiene
+    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos, horarios]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos, horarios }); setError(""); } })
       .catch(() => { if (vivo) setError("No se pudieron cargar las clases. Revisá la conexión."); });
     return () => { vivo = false; };
   }, [complejoId, accessToken, esDueno, hoy, mes, version]);
@@ -15044,6 +15051,120 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
   );
 }
 
+/* Horario fijo del profe (ver 20261048_horarios_profes.sql): días + desde-hasta + cancha. La base
+   mantiene reservadas las próximas 8 semanas, sin pisar turnos ya cargados. */
+const DIAS_SEMANA = [[1, "Lun"], [2, "Mar"], [3, "Mié"], [4, "Jue"], [5, "Vie"], [6, "Sáb"], [0, "Dom"]];
+const horaFin = (m) => (m === 1440 ? "24:00" : etiquetaHora(m));
+const diasTexto = (dias) => DIAS_SEMANA.filter(([d]) => dias.includes(d)).map(([, l]) => l).join(" · ");
+const fechasOcupadas = (lista) => (lista || []).map((f) => etiquetaFecha(f)).join(", ");
+
+function HorariosProfe({ profe, horarios, canchas, accessToken, hoy, onChanged }) {
+  const [form, setForm] = useState(null); // { id?, dias, desde, hasta, canchaId, fecha }
+  const [terminando, setTerminando] = useState(null); // { id, fecha }
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const vigentes = horarios.filter((h) => !h.vigente_hasta || h.vigente_hasta >= hoy);
+  const terminados = horarios.filter((h) => h.vigente_hasta && h.vigente_hasta < hoy);
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const horas = Array.from({ length: 49 }, (_, i) => i * 30);
+  const nuevo = () => setForm({ dias: [], desde: 7 * 60, hasta: 12 * 60, canchaId: canchas[0].id, fecha: hoy });
+  const cambiar = (h) => setForm({ id: h.id, dias: [...h.dias], desde: h.desde, hasta: h.hasta, canchaId: h.cancha_id, fecha: hoy });
+  const correr = async (fn) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); await onChanged(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const guardar = () => {
+    if (!form.dias.length) { setError("Elegí al menos un día."); return; }
+    if (form.hasta <= form.desde) { setError("El \"hasta\" tiene que ser después del \"desde\"."); return; }
+    correr(async () => {
+      const params = { p_cancha: form.canchaId, p_dias: form.dias, p_desde: form.desde, p_hasta: form.hasta };
+      const r = form.id
+        ? await supabaseRpc("cambiar_horario_profe", { p_id: form.id, ...params, p_desde_fecha: form.fecha }, accessToken)
+        : await supabaseRpc("crear_horario_profe", { p_profe: profe.id, ...params, p_vigente_desde: form.fecha }, accessToken);
+      const ocupadas = r?.ocupadas || [];
+      setAviso((form.id ? "Horario cambiado." : `Listo: se reservaron ${r.creadas} clase${r.creadas === 1 ? "" : "s"} de las próximas 8 semanas, y se van a seguir reservando solas.`)
+        + (ocupadas.length ? ` No se pudieron reservar (la cancha estaba ocupada): ${fechasOcupadas(ocupadas)}.` : ""));
+      setForm(null);
+    });
+  };
+  const terminar = () => correr(async () => {
+    const n = await supabaseRpc("terminar_horario_profe", { p_id: terminando.id, p_desde: terminando.fecha }, accessToken);
+    setAviso(`Horario terminado: se liberaron ${n} clase${n === 1 ? "" : "s"}.`);
+    setTerminando(null);
+  });
+  const sel = "px-2 py-2 rounded-lg border text-base min-w-0";
+  return (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm uppercase tracking-wide text-teal-400">Horario fijo</h3>
+        {!form && <button type="button" onClick={nuevo} className="text-xs text-lime-400 font-semibold">+ Horario fijo</button>}
+      </div>
+      {vigentes.length === 0 && !form && <p className="text-teal-400">No tiene horario fijo. Cargalo una vez (por ejemplo, lunes, miércoles y viernes de 7 a 12) y las clases se reservan solas.</p>}
+      <ul className="space-y-2">
+        {vigentes.map((h) => (
+          <li key={h.id} className="rounded-lg border border-teal-900 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-slate-100 font-semibold">{diasTexto(h.dias)}, {etiquetaHora(h.desde)} a {horaFin(h.hasta)} · {nombreCancha(h.cancha_id)}</span>
+              <span className="flex gap-3 text-xs">
+                <button type="button" onClick={() => { cambiar(h); setTerminando(null); }} className="text-teal-300 hover:text-lime-400">Cambiar</button>
+                <button type="button" onClick={() => { setTerminando({ id: h.id, fecha: hoy }); setForm(null); }} className="text-teal-400 hover:text-red-400">Terminar</button>
+              </span>
+            </div>
+            <p className="text-xs text-teal-500">Desde {fechaCorta(h.vigente_desde)}{h.vigente_hasta ? ` hasta ${fechaCorta(h.vigente_hasta)}` : " · se renueva solo"}</p>
+            {terminando?.id === h.id && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label className="text-xs text-teal-300">Sin clases desde el <input type="date" value={terminando.fecha} min={hoy} onChange={(e) => setTerminando({ ...terminando, fecha: e.target.value })} className="ml-1 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+                <button type="button" disabled={busy} onClick={terminar} className="px-3 py-1.5 rounded-lg border border-red-400 text-red-300 text-xs disabled:opacity-50">Terminar y liberar las canchas</button>
+                <button type="button" onClick={() => setTerminando(null)} className="text-xs text-teal-400">Cancelar</button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      {form && (
+        <div className="rounded-lg border border-teal-700 p-3 space-y-3">
+          <p className="font-semibold text-teal-100">{form.id ? "Cambiar el horario" : "Nuevo horario fijo"}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {DIAS_SEMANA.map(([d, l]) => (
+              <button key={d} type="button" onClick={() => setForm({ ...form, dias: form.dias.includes(d) ? form.dias.filter((x) => x !== d) : [...form.dias, d] })}
+                className={`px-3 py-1.5 rounded-lg border text-sm ${form.dias.includes(d) ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+            ))}
+          </div>
+          <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
+            <label className="text-xs text-teal-400">De
+              <select value={form.desde} onChange={(e) => setForm({ ...form, desde: Number(e.target.value) })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {horas.filter((m) => m < 1440).map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">A
+              <select value={form.hasta} onChange={(e) => setForm({ ...form, hasta: Number(e.target.value) })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {horas.filter((m) => m > form.desde).map((m) => <option key={m} value={m}>{horaFin(m)}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">Cancha
+              <select value={form.canchaId} onChange={(e) => setForm({ ...form, canchaId: e.target.value })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">{form.id ? "Cambia desde el" : "Empieza el"}
+              <input type="date" value={form.fecha} min={hoy} onChange={(e) => setForm({ ...form, fecha: e.target.value })} className={`block mt-1 w-full ${sel}`} style={adminInput} /></label>
+          </div>
+          {profe.modo === "alquila" && profe.precio_hora != null && form.hasta > form.desde && (
+            <p className="text-xs text-teal-400">Cada día: {formatoPrecio(Math.round((Number(profe.precio_hora) * (form.hasta - form.desde)) / 60))} de alquiler ({(form.hasta - form.desde) / 60} h).</p>
+          )}
+          {form.id && <p className="text-xs text-teal-500">Las clases que vienen se rehacen con el horario nuevo. Las que ya pasaron, las cobradas y los días que cancelaste quedan como están.</p>}
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : form.id ? "Guardar cambio" : "Reservar el horario"}</button>
+            <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+      {terminados.length > 0 && <p className="text-xs text-teal-600">Terminados: {terminados.map((h) => `${diasTexto(h.dias)} ${etiquetaHora(h.desde)}-${horaFin(h.hasta)} (hasta ${fechaCorta(h.vigente_hasta)})`).join(" · ")}</p>}
+    </section>
+  );
+}
+
 function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esDueno, hoy, mes, onBack, onChanged, onEditar }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -15133,11 +15254,15 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
       {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
       {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
 
+      {datos.horarios && datos.canchas.length > 0 && (
+        <HorariosProfe profe={p} horarios={datos.horarios.filter((h) => h.profe_id === p.id)} canchas={datos.canchas} accessToken={accessToken} hoy={hoy} onChanged={onChanged} />
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <section className={seccion} style={fondo}>
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm uppercase tracking-wide text-teal-400">Próximas clases</h3>
-            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">+ Cargar clases</button>}
+            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">{datos.horarios ? "+ Clase suelta" : "+ Cargar clases"}</button>}
           </div>
           {cargar && (
             <div className="rounded-lg border border-teal-700 p-3 space-y-2">
@@ -15167,9 +15292,9 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
             </div>
           )}
           {proximas.length === 0 ? <p className="text-teal-400">No tiene clases cargadas.</p> : (
-            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
+            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{(r.horario_id || r.serie_id) && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
           )}
-          <p className="text-xs text-teal-500">Para cancelar una clase, tocála en la Agenda.</p>
+          <p className="text-xs text-teal-500">Si el profe falta un día, tocá esa clase en la Agenda y cancelala: el horario queda libre para alquilar.</p>
         </section>
 
         {p.modo === "alquila" ? (
