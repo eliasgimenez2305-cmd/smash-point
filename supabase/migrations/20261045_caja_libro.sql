@@ -644,7 +644,8 @@ create policy "Dueño ve el historial" on public.movimientos_historial for selec
   using (exists (select 1 from movimientos m where m.id = movimiento_id and m.dueno_id = auth.uid()));
 
 -- ============================================================================================
--- 7. Control: ingresos y gastos por dueño y por mes, libro vs. Caja de hoy (mismas reglas que la pantalla)
+-- 7. Control: ingresos y gastos por dueño y por mes, libro vs. Caja de hoy (mismas reglas que la pantalla).
+--    Del libro cuenta solo lo que viene de las tablas de siempre (lo cargado en la Caja nueva no está en la vieja).
 -- ============================================================================================
 create or replace function public.control_libro_caja()
 returns table (dueno_id uuid, mes text, tipo text, caja_hoy bigint, libro bigint)
@@ -675,7 +676,7 @@ language sql stable security definer set search_path = public as $$
     select d, to_char(f, 'YYYY-MM') mes, t, round(sum(m) * 100)::bigint total from vieja where d is not null and m > 0 group by 1, 2, 3
   ), l as (
     select dueno_id d, to_char(fecha, 'YYYY-MM') mes, tipo t, sum(monto)::bigint total from movimientos
-    where anulado_at is null and tipo in ('ingreso', 'gasto') group by 1, 2, 3
+    where anulado_at is null and tipo in ('ingreso', 'gasto') and ref_tipo is not null group by 1, 2, 3
   )
   select coalesce(v.d, l.d), coalesce(v.mes, l.mes), coalesce(v.t, l.t), coalesce(v.total, 0), coalesce(l.total, 0)
   from v full join l on l.d = v.d and l.mes = v.mes and l.t = v.t

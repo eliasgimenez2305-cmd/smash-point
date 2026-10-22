@@ -319,6 +319,7 @@ const RESERVA_ERRORES = {
   plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
   tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
   funcion_apagada: "Esta función todavía no está habilitada.",
+  abrir_caja_primero: "Para cobrar en efectivo abrí tu caja del día (sección Caja del día).",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
 
@@ -13327,7 +13328,8 @@ function CajaLibro({ organizer, complejos = [], tournaments = [], venues = [] })
       supabaseTable(`cuenta_por_medio?dueno_id=eq.${yo}`, { accessToken }),
       supabaseRpc("saldos_cuentas", {}, accessToken),
     ]);
-    setBase({ cuentas, categorias, socios, medios, saldos });
+    const config = await supabaseTable(`caja_config?dueno_id=eq.${yo}`, { accessToken }).then((r) => r[0] || {}).catch(() => null);
+    setBase({ cuentas, categorias, socios, medios, saldos, config });
   }, [organizer.id, accessToken]);
 
   const cargarMovs = useCallback(async () => {
@@ -13834,6 +13836,16 @@ function ConfigCaja({ base, accessToken, onCambio }) {
             </label>
           ))}
           <p className="text-xs text-teal-600">Vale para los cobros nuevos; los anteriores quedan donde estaban.</p>
+          {base.config && (
+            <label className="block pt-2 border-t border-teal-900">
+              <span className="block text-teal-200">Caja del día</span>
+              <span className="block text-xs text-teal-500 mb-1">Al cerrar, el efectivo contado pasa a esta cuenta (y de acá sale el fondo al abrir).</span>
+              <select value={base.config.cuenta_guardado || base.cuentas.find((c) => c.nombre === "Caja fuerte" && c.activa)?.id || ""} disabled={busy}
+                onChange={(e) => llamar("elegir_cuenta_guardado", { p_cuenta: e.target.value })} className={`w-full ${campo}`} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa && c.nombre !== "Efectivo").map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+            </label>
+          )}
         </section>
 
         {["ingreso", "gasto"].map((t) => (
@@ -15888,7 +15900,36 @@ const CAJA_ERRORES = {
   caja_cerrada: "Esa caja ya está cerrada.",
   no_autorizado: "No tenés permiso para manejar esta caja.",
   datos_invalidos: "Revisá los montos.",
+  ya_tiene_otra_abierta: "Esa persona ya abrió otra caja: primero tiene que cerrarla.",
+  caja_abierta: "Esa caja ya está abierta.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
+  cuenta_invalida: "Elegí una cuenta activa.",
+  socio_invalido: "Elegí un socio activo.",
 };
+// Billetes del contador de la caja (ver 20261046_caja_arqueo.sql)
+const BILLETES = [20000, 10000, 2000, 1000, 500, 200, 100];
+const totalConteo = (c) => BILLETES.reduce((s, b) => s + b * (Number(c?.[b]) || 0), 0);
+const conteoParaBase = (c) => Object.fromEntries(BILLETES.filter((b) => Number(c?.[b]) > 0).map((b) => [String(b), Number(c[b])]));
+const faltaFuncion = (e) => e?.pgCode === "PGRST202" || e?.pgCode === "42883";
+
+/* Contador de billetes: cuántos de cada uno y el total */
+function ContadorBilletes({ conteo, onChange, autoFocus = false }) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {BILLETES.map((b, i) => (
+          <label key={b} className="flex items-center gap-2 rounded-lg border border-teal-800 px-2 py-1.5">
+            <span className="text-xs text-teal-300 w-16 shrink-0 tabular-nums">{formatoPrecio(b)}</span>
+            <input inputMode="numeric" value={conteo[b] ?? ""} autoFocus={autoFocus && i === 0}
+              onChange={(e) => onChange({ ...conteo, [b]: e.target.value.replace(/[^\d]/g, "").slice(0, 5) })}
+              placeholder="0" aria-label={`Billetes de ${formatoPrecio(b)}`} className="w-full min-w-0 px-2 py-1 rounded border text-base text-right" style={adminInput} />
+          </label>
+        ))}
+      </div>
+      <p className="text-teal-200">Total contado: <span className="font-semibold tabular-nums text-slate-100">{formatoPrecio(totalConteo(conteo)) || "$0"}</span></p>
+    </div>
+  );
+}
 const cajaErrorText = (e) => CAJA_ERRORES[e?.code] || reservaErrorText(e);
 /* id de quien está logueado (el "sub" del token); el empleado entra con su propia cuenta */
 function uidDeToken(token) {
@@ -15901,7 +15942,9 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [cajas, setCajas] = useState(null); // las del complejo que ve (las suyas; el dueño, todas)
   const [error, setError] = useState("");
-  const [fondo, setFondo] = useState("");
+  const [fondo, setFondo] = useState({});
+  const [sinCaja, setSinCaja] = useState([]); // efectivo que el dueño cobró hoy sin caja abierta
+  const [reabriendo, setReabriendo] = useState(null); // { id, motivo }
   const [busy, setBusy] = useState(false);
   const [viendo, setViendo] = useState(null); // id de una caja de otro (solo el dueño)
   const yo = uidDeToken(accessToken);
@@ -15910,9 +15953,12 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const load = useCallback(async () => {
     try {
       setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&or=(cerrada_at.is.null,abierta_at.gte.${encodeURIComponent(new Date(Date.now() - 60 * 86400000).toISOString())})&order=abierta_at.desc&limit=200`, { accessToken }));
+      if (esDueno) {
+        setSinCaja(await supabaseTable(`movimientos?cargado_por=eq.${uidDeToken(accessToken)}&complejo_id=eq.${encodeURIComponent(complejoId)}&medio=eq.efectivo&caja_turno_id=is.null&anulado_at=is.null&ref_tipo=in.(turno,cuenta,venta,cuota_clase)&fecha=eq.${hoyArgentina()}&select=id,concepto,monto&order=cargado_at.desc`, { accessToken }).catch(() => []));
+      }
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
-  }, [complejoId, accessToken]);
+  }, [complejoId, accessToken, esDueno]);
   useEffect(() => { setCajas(null); setViendo(null); load(); }, [load]);
 
   const mia = (cajas || []).find((c) => c.usuario === yo && !c.cerrada_at);
@@ -15921,8 +15967,9 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const abrir = async () => {
     setBusy(true); setError("");
     try {
-      await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: leerPrecio(fondo) || 0 }, accessToken);
-      setFondo("");
+      try { await supabaseRpc("abrir_caja_conteo", { p_complejo: complejoId, p_conteo: conteoParaBase(fondo) }, accessToken); }
+      catch (e) { if (!faltaFuncion(e)) throw e; await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: totalConteo(fondo) }, accessToken); }
+      setFondo({});
       await load();
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
@@ -15939,17 +15986,21 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
       {cajas === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
         <>
           {mia ? (
-            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia onChanged={load} />
+            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia esDueno={esDueno} onChanged={load} />
           ) : (
             <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400">Tu caja está cerrada</h2>
-              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.</p>
-              <div className="flex flex-wrap items-end gap-2">
-                <label className="text-xs text-teal-400">Efectivo con el que arrancás (fondo)
-                  <input inputMode="numeric" value={fondo} onChange={(e) => setFondo(e.target.value)} placeholder="$0" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-                </label>
-                <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
-              </div>
+              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.{!esDueno && " Sin la caja abierta no podés cobrar en efectivo."}</p>
+              <p className="text-xs text-teal-400">Contá los billetes con los que arrancás (el fondo). Si no hay, dejalo en cero.</p>
+              <ContadorBilletes conteo={fondo} onChange={setFondo} />
+              <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
+            </section>
+          )}
+
+          {esDueno && !mia && sinCaja.length > 0 && (
+            <section className="rounded-xl border p-3 space-y-1" style={{ borderColor: "#f59e0b88", backgroundColor: "#f59e0b11" }}>
+              <p className="text-amber-300 font-semibold">Hoy cobraste {formatoPrecio(sinCaja.reduce((s, m) => s + Number(m.monto), 0) / 100)} en efectivo sin tener la caja abierta</p>
+              <p className="text-xs text-teal-300">Está en la cuenta Efectivo de la Caja, pero no en ninguna caja del día. {sinCaja.slice(0, 4).map((m) => m.concepto).join(" · ")}{sinCaja.length > 4 ? " · …" : ""}</p>
             </section>
           )}
 
@@ -15957,7 +16008,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
             <section className="space-y-2">
               <h2 className="text-sm uppercase tracking-wide text-teal-400">Cajas abiertas de tus empleados</h2>
               {abiertasDeOtros.map((c) => viendo === c.id ? (
-                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
+                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} esDueno={esDueno} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
               ) : (
                 <button key={c.id} type="button" onClick={() => setViendo(c.id)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-teal-800 px-4 py-3 text-left hover:bg-white/5">
                   <span className="min-w-0"><span className="block truncate text-slate-100">{c.usuario_email}</span><span className="block text-xs text-teal-500">Abierta desde {fechaHoraAr(c.abierta_at)} · fondo {formatoPrecio(c.fondo) || "$0"}</span></span>
@@ -15972,6 +16023,33 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
 
           <section className="space-y-2">
             <h2 className="text-sm uppercase tracking-wide text-teal-400">{esDueno ? "Cierres" : "Tus cierres"}</h2>
+            {esDueno && (() => {
+              const conDif = {};
+              for (const c of cerradas) if (Number(c.contado) !== Number(c.esperado)) conDif[c.usuario_email || "?"] = (conDif[c.usuario_email || "?"] || 0) + 1;
+              const filas = Object.entries(conDif).sort((a, b) => b[1] - a[1]);
+              return filas.length > 0 && (
+                <div className="rounded-lg border p-3 space-y-1" style={{ borderColor: "#f8717188", backgroundColor: "#f8717111" }}>
+                  <p className="text-red-300 font-semibold text-xs uppercase tracking-wide">Cierres con diferencia (últimos 60 días)</p>
+                  {filas.map(([quien, n]) => <p key={quien} className="text-teal-200 break-all">⚠ {quien}: {n} {n === 1 ? "cierre" : "cierres"} con diferencia</p>)}
+                </div>
+              );
+            })()}
+            {reabriendo && (
+              <div className="rounded-lg border border-amber-500/60 p-3 space-y-2">
+                <p className="text-amber-300 font-semibold">Reabrir la caja</p>
+                <p className="text-xs text-teal-400">Se anulan la diferencia y el pase de efectivo del cierre, y la caja vuelve a quedar abierta para contarla de nuevo.</p>
+                <input value={reabriendo.motivo} onChange={(e) => setReabriendo({ ...reabriendo, motivo: e.target.value })} maxLength={120} placeholder="Motivo (ej: contó mal los billetes)" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <div className="flex gap-3 items-center">
+                  <button type="button" disabled={busy} onClick={async () => {
+                    setBusy(true); setError("");
+                    try { await supabaseRpc("reabrir_caja", { p_turno: reabriendo.id, p_motivo: reabriendo.motivo }, accessToken); setReabriendo(null); await load(); }
+                    catch (e) { setError(cajaErrorText(e)); }
+                    finally { setBusy(false); }
+                  }} className="px-4 py-2 rounded-lg font-semibold border border-amber-400 text-amber-300 disabled:opacity-50">{busy ? "Reabriendo…" : "Reabrir"}</button>
+                  <button type="button" onClick={() => setReabriendo(null)} className="text-teal-400">Cancelar</button>
+                </div>
+              </div>
+            )}
             {cerradas.length === 0 ? <p className="text-teal-400">Todavía no hay cajas cerradas.</p> : (
               <>
                 {/* PC: tabla; celular: tarjetas */}
@@ -15995,7 +16073,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                             {esDueno && <td className="px-3 py-2.5 text-teal-200 break-all">{c.usuario_email}</td>}
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.esperado) || "$0"}</td>
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.contado) || "$0"}</td>
-                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} /></td>
+                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} />{c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="block ml-auto mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}</td>
                           </tr>
                         );
                       })}
@@ -16014,6 +16092,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                         {esDueno && <p className="text-xs text-teal-400 break-all">{c.usuario_email}</p>}
                         <p className="text-xs text-teal-500">Debía haber {formatoPrecio(c.esperado) || "$0"} · contó {formatoPrecio(c.contado) || "$0"}</p>
                         {c.nota && <p className="text-xs text-teal-400 italic">“{c.nota}”</p>}
+                        {c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}
                       </li>
                     );
                   })}
@@ -16033,7 +16112,7 @@ function DiferenciaCaja({ dif }) {
 }
 
 /* Una caja abierta: lo cobrado hasta ahora, movimientos y cierre */
-function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerrarVista }) {
+function CajaTurnoDetalle({ caja, accessToken, propia = false, esDueno = false, onChanged, onCerrarVista }) {
   const [resumen, setResumen] = useState(null);
   const [movs, setMovs] = useState([]);
   const [error, setError] = useState("");
@@ -16065,12 +16144,28 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
   };
+  const empezarCierre = async () => {
+    load();
+    setCierre({ conteo: {}, nota: "", confirmados: [], destino: "guardado", cuenta: "", socio: "", cobros: null, cuentas: [], socios: [], conLibro: true });
+    const [cobros, cuentas, socios] = await Promise.all([
+      supabaseRpc("cobros_para_confirmar", { p_turno: caja.id }, accessToken).catch((e) => (faltaFuncion(e) ? null : [])),
+      esDueno ? supabaseTable("cuentas_caja?activa=eq.true&order=orden.asc", { accessToken }).catch(() => []) : [],
+      esDueno ? supabaseTable("socios_caja?activo=eq.true&order=nombre.asc", { accessToken }).catch(() => []) : [],
+    ]);
+    setCierre((c) => c && { ...c, cobros: cobros || [], conLibro: cobros !== null, cuentas, socios, cuenta: cuentas.find((x) => x.nombre !== "Efectivo")?.id || "" });
+  };
   const cerrar = async () => {
-    const contado = leerPrecio(cierre.contado);
-    if (contado == null) { setError("Poné cuánto efectivo contaste."); return; }
+    const contado = totalConteo(cierre.conteo);
     setBusy(true); setError("");
     try {
-      setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+      if (cierre.conLibro) {
+        setResultado(await supabaseRpc("cerrar_caja_conteo", {
+          p_turno: caja.id, p_conteo: conteoParaBase(cierre.conteo), p_nota: cierre.nota.trim() || null, p_confirmados: cierre.confirmados,
+          p_destino: cierre.destino, p_cuenta: cierre.destino === "cuenta" ? cierre.cuenta : null, p_socio: cierre.destino === "socio" ? cierre.socio || null : null,
+        }, accessToken));
+      } else {
+        setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+      }
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
   };
@@ -16082,6 +16177,7 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
         <h2 className="text-sm uppercase tracking-wide" style={{ color: BRAND.lime }}>Caja cerrada ✓</h2>
         <p className="text-teal-200">Debía haber {formatoPrecio(resultado.efectivo_esperado) || "$0"} en efectivo y se contaron {formatoPrecio(resultado.contado) || "$0"}.</p>
         <DiferenciaCaja dif={dif} />
+        {Number(resultado.sin_confirmar) > 0 && <p className="text-amber-300 text-xs">{resultado.sin_confirmar} cobro{Number(resultado.sin_confirmar) === 1 ? "" : "s"} con Mercado Pago, transferencia o tarjeta quedaron sin tildar.</p>}
         <div><button type="button" onClick={onChanged} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Listo</button></div>
       </section>
     );
@@ -16089,7 +16185,7 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
 
   const esperado = Number(resumen?.efectivo_esperado || 0);
   const totalCobrado = Object.values(resumen?.por_medio || {}).reduce((s, n) => s + Number(n), 0);
-  const contadoNum = cierre ? leerPrecio(cierre.contado) : null;
+  const contadoNum = cierre ? totalConteo(cierre.conteo) : null;
 
   return (
     <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -16162,20 +16258,50 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
           {cierre ? (
             <div className="rounded-lg border p-3 space-y-3" style={{ borderColor: "#f59e0b88" }}>
               <p className="font-semibold text-amber-300">Cerrar la caja</p>
-              <label className="block text-xs text-teal-400">Contá el efectivo que hay en la caja
-                <input inputMode="numeric" value={cierre.contado} onChange={(e) => setCierre({ ...cierre, contado: e.target.value })} placeholder="$" className="block mt-1 w-48 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
-              </label>
-              {contadoNum != null && (
-                <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              <p className="text-xs text-teal-400">Contá los billetes que hay en la caja.</p>
+              <ContadorBilletes conteo={cierre.conteo} onChange={(conteo) => setCierre({ ...cierre, conteo })} autoFocus />
+              <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              {cierre.cobros === null ? <p className="text-xs opacity-60">Cargando cobros…</p> : cierre.cobros.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs text-teal-400">Tildá los cobros con Mercado Pago, transferencia o tarjeta que viste entrar:</p>
+                  {cierre.cobros.map((c) => (
+                    <label key={c.id} className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={cierre.confirmados.includes(c.id)} onChange={(e) => setCierre({ ...cierre, confirmados: e.target.checked ? [...cierre.confirmados, c.id] : cierre.confirmados.filter((x) => x !== c.id) })} />
+                      <span className="flex-1 min-w-0 truncate text-teal-200">{horaAr(c.cargado_at)} · {c.concepto} · {medioCobroLabel(c.medio)}</span>
+                      <span className="tabular-nums shrink-0">{formatoPrecio(Number(c.monto) / 100)}</span>
+                    </label>
+                  ))}
+                </div>
               )}
+              {cierre.conLibro && (esDueno ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-teal-400">La caja queda en $0: ¿adónde va el efectivo contado?</p>
+                  <div className="flex flex-wrap gap-2">
+                    {[["guardado", "Cuenta de guardado"], ["cuenta", "Otra cuenta"], ["socio", "Me lo llevo (retiro de socio)"]].map(([k, l]) => (
+                      <button key={k} type="button" onClick={() => setCierre({ ...cierre, destino: k })} className={`px-3 py-1.5 rounded-lg border text-sm ${cierre.destino === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                    ))}
+                  </div>
+                  {cierre.destino === "cuenta" && (
+                    <select value={cierre.cuenta} onChange={(e) => setCierre({ ...cierre, cuenta: e.target.value })} className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                      {cierre.cuentas.filter((c) => c.nombre !== "Efectivo").map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                    </select>
+                  )}
+                  {cierre.destino === "socio" && cierre.socios.length > 0 && (
+                    <select value={cierre.socio} onChange={(e) => setCierre({ ...cierre, socio: e.target.value })} className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                      <option value="">Sin indicar el socio</option>
+                      {cierre.socios.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                    </select>
+                  )}
+                </div>
+              ) : <p className="text-xs text-teal-400">La caja queda en $0: el efectivo contado pasa a la cuenta que eligió el dueño (por ejemplo, la caja fuerte).</p>)}
               <input value={cierre.nota} onChange={(e) => setCierre({ ...cierre, nota: e.target.value })} maxLength={200} placeholder="Nota (opcional, ej: por qué falta)" aria-label="Nota" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
               <div className="flex gap-3 items-center">
-                <button type="button" disabled={busy || contadoNum == null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
+                <button type="button" disabled={busy || cierre.cobros === null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
                 <button type="button" onClick={() => setCierre(null)} className="text-teal-400">Cancelar</button>
               </div>
             </div>
           ) : !mov && (
-            <button type="button" onClick={() => { load(); setCierre({ contado: "", nota: "" }); }} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
+            <button type="button" onClick={empezarCierre} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
           )}
         </>
       )}
