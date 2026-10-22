@@ -45,6 +45,9 @@ const SUPABASE_URL = import.meta.env?.VITE_SUPABASE_URL || "https://cfaapvyttzed
 const SUPABASE_ANON_KEY = import.meta.env?.VITE_SUPABASE_ANON_KEY || "sb_publishable_D6uARuXOiMKEmpOr2evMsQ_r7V3d9wh";
 // Clave pública de las notificaciones push (ver supabase/functions/enviar-push). Sin ella no se ofrece el botón.
 const VAPID_PUBLICA = import.meta.env?.VITE_VAPID_PUBLICA || "";
+/* "Avisos por mail" queda oculto hasta tener dominio propio en Resend (sin dominio solo llega al mail
+   de la cuenta de Resend). Para prenderlo: VITE_AVISOS_MAIL=1 en .env.local / Netlify. */
+const AVISOS_POR_MAIL = import.meta.env?.VITE_AVISOS_MAIL === "1";
 
 async function supabaseSignIn(email, password) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -10003,9 +10006,45 @@ function Campanita({ token, onIr, conMail = false }) {
             ))}
           </div>
           <AvisosEnEsteAparato token={token} />
-          {conMail && <MailAvisos token={token} />}
+          {conMail && AVISOS_POR_MAIL && <MailAvisos token={token} />}
         </div>
       )}
+      <InstalarEnIphone />
+    </div>
+  );
+}
+
+/* Cartel abajo para quien tiene cuenta y entra desde el navegador del iPhone: ahí no llegan los
+   avisos push hasta agregar Smash Point a la pantalla de inicio. "Ahora no" lo esconde 14 días. */
+const INSTALAR_IPHONE_KEY = "smashpoint:instalar-iphone-hasta";
+function InstalarEnIphone() {
+  const [ver, setVer] = useState(() => {
+    if (!VAPID_PUBLICA || typeof window === "undefined") return false;
+    const esIphone = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const instalada = window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+    if (!esIphone || instalada) return false;
+    try { return Date.now() > Number(localStorage.getItem(INSTALAR_IPHONE_KEY) || 0); } catch { return true; }
+  });
+  if (!ver) return null;
+  const cerrar = () => {
+    try { localStorage.setItem(INSTALAR_IPHONE_KEY, String(Date.now() + 14 * 86400000)); } catch {}
+    setVer(false);
+  };
+  return (
+    <div role="dialog" aria-label="Instalá Smash Point" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
+      <div className="max-w-md mx-auto rounded-xl p-3 text-sm" style={{ ...neonStyle(BRAND.lime), backgroundColor: "#1b2027", color: "#ecfccb" }}>
+        <div className="flex items-start gap-3">
+          <img src="/icono-192.png" alt="" className="w-10 h-10 rounded-lg shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold">Instalá Smash Point</p>
+            <p className="text-xs text-teal-300 mt-0.5">Para recibir los avisos en el iPhone: tocá <b>Compartir</b> <span aria-hidden="true">(el cuadrado con la flecha)</span> › <b>Agregar a inicio</b> y entrá desde ese ícono.</p>
+          </div>
+          <button type="button" onClick={cerrar} className="text-teal-300 shrink-0" aria-label="Cerrar">✕</button>
+        </div>
+        <div className="text-right mt-2">
+          <button type="button" onClick={cerrar} className="text-xs text-teal-400 hover:text-lime-400">Ahora no</button>
+        </div>
+      </div>
     </div>
   );
 }
