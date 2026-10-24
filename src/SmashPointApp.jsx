@@ -8287,35 +8287,41 @@ function AdRow({ ad, onUpdate, onDelete, accessToken, cliente, clics, oculta }) 
   }
 
   return (
-    <div className="border border-teal-800 rounded-lg p-3 flex gap-3 items-center">
-      {ad.imageUrl ? (
-        <img src={ad.imageUrl} alt={ad.name} className="w-24 h-14 object-cover rounded border border-teal-800" />
-      ) : (
-        <div className="w-24 h-14 rounded border border-teal-800 flex items-center justify-center text-[10px] text-teal-500">Sin imagen</div>
-      )}
-      <div className="flex-1 min-w-0">
-        <p className="font-medium truncate" style={F.body}>{ad.name}</p>
-        <p className="text-xs text-teal-500 truncate" style={F.body}>{ad.linkUrl || "Sin link de destino"}</p>
-        <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px]" style={F.body}>
-          {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente: cargalo en Caja → Clientes para cobrarle</span>}
-          {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
-          <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
-          {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+    // En el celular: imagen y nombre arriba, los datos a todo el ancho y los botones en su propia fila;
+    // en la compu los botones vuelven al costado
+    <div className="border border-teal-800 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-3" style={F.body}>
+      <div className="flex gap-3 flex-1 min-w-0">
+        {ad.imageUrl ? (
+          <img src={ad.imageUrl} alt={ad.name} className="w-24 h-14 shrink-0 object-cover rounded border border-teal-800" />
+        ) : (
+          <div className="w-24 h-14 shrink-0 rounded border border-teal-800 flex items-center justify-center text-[10px] text-teal-500">Sin imagen</div>
+        )}
+        <div className="flex-1 min-w-0">
+          <p className="font-medium break-words leading-snug">{ad.name}</p>
+          <p className="text-xs text-teal-500 truncate">{ad.linkUrl || "Sin link de destino"}</p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px]">
+            {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente (cargalo en Caja → Clientes)</span>}
+            {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
+            <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
+            {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+          </div>
         </div>
       </div>
-      <label className="flex items-center gap-1 text-xs text-teal-300" style={F.body}>
-        <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} />
-        Activo
-      </label>
-      <button type="button" onClick={() => setEditing(true)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar</button>
-      {!confirmingDelete ? (
-        <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
-      ) : (
-        <span className="text-sm whitespace-nowrap">
-          <button type="button" onClick={() => onDelete(ad.id)} className="text-red-400 font-semibold mr-2" style={F.body}>Confirmar</button>
-          <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400" style={F.body}>Cancelar</button>
-        </span>
-      )}
+      <div className="flex items-center gap-4 pt-2 border-t border-teal-900 sm:pt-0 sm:border-t-0 sm:shrink-0">
+        <label className="flex items-center gap-1.5 text-sm text-teal-300">
+          <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} className="w-4 h-4" />
+          Activo
+        </label>
+        <button type="button" onClick={() => setEditing(true)} className="text-sm text-teal-300 hover:text-lime-400 ml-auto sm:ml-0">Editar</button>
+        {!confirmingDelete ? (
+          <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400">Eliminar</button>
+        ) : (
+          <span className="text-sm whitespace-nowrap">
+            <button type="button" onClick={() => onDelete(ad.id)} className="text-red-400 font-semibold mr-2">Confirmar</button>
+            <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400">Cancelar</button>
+          </span>
+        )}
+      </div>
     </div>
   );
 }
