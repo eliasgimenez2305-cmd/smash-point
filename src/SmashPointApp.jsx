@@ -596,12 +596,13 @@ function withRegistrationOpen(t, open) {
 }
 
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
-   categorías llenas), "cerradas" (el organizador las cerró: cartel) o "cerrado" (nunca tuvo, o ya
-   terminó: no se muestra nada) */
+   categorías llenas), "cerradas" (el organizador las cerró antes de empezar: cartel) o "cerrado"
+   (nunca tuvo, o ya empezó o terminó: no se muestra nada) */
 function registrationStatus(t0) {
   if (isInfoOnly(t0)) return "cerrado";
   const t = withAutoStatus(t0); // empezado el torneo, las inscripciones quedan cerradas
-  if (t.status === STATUS.FINALIZADO) return "cerrado";
+  // En curso o terminado ya no hace falta el cartel: la barra de abajo queda libre para los horarios
+  if (t.status !== STATUS.PROXIMO) return "cerrado";
   // Tuvo inscripciones y el organizador las cerró: se muestra el cartel "Inscripciones cerradas"
   if (!t.inscripcionesAbiertas) return t.inscripcionesCerradas ? "cerradas" : "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
