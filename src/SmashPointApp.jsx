@@ -1178,7 +1178,11 @@ function buildSuper8Group(format, orderedIds) {
     };
     matches = rounds.flatMap((round, ri) => round.map(([t1, t2]) => ({ id: uid(), pairA: teamFor(t1), pairB: teamFor(t2), sets: [], round: ri + 1 })));
   } else {
-    matches = super8EnOrden(buildCircleRounds(posiciones), orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
+    // Por Parejas, el mismo orden de la planilla: cada "1-2" es el partido pareja 1 vs pareja 2
+    const base = orderedIds.length === SUPER8_PLANILLA_INDIVIDUAL.length + 1
+      ? SUPER8_PLANILLA_INDIVIDUAL.map((round) => round.flatMap((match) => match.map(([a, b]) => [a - 1, b - 1])))
+      : buildCircleRounds(posiciones);
+    matches = super8EnOrden(base, orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
   }
   return { group: { id: uid(), name: "Súper 8", pairIds: orderedIds, format: "super8", matches }, teams };
 }
