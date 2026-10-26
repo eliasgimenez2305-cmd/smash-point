@@ -1410,10 +1410,10 @@ function buildPlaceholderBracket(groups) {
 /* La llave de una categoría con grupos se arma sola, en borrador:
    - Apenas hay grupos, el esqueleto con "1° Grupo A"... y sus horarios (si cambian los grupos y la
      llave todavía no tiene resultados, se vuelve a armar).
-   - Cuando termina un grupo, sus lugares se completan con las parejas que clasificaron (y se
-     corrigen si cambia un resultado, mientras ese cruce no se haya jugado).
-   - Con todos los lugares completos deja de ser esqueleto: desde ahí, si cambian los clasificados,
-     avisa y ofrece rearmarla (ver bracketQualifiersChange).
+   - Cuando termina un grupo, sus lugares se completan con las parejas que clasificaron.
+   - La llave sigue a sus grupos siempre (ver fillSkeletonBracket): si se corrige un resultado, el
+     lugar cambia solo, y si el grupo vuelve a quedar sin terminar, el lugar vuelve a "1° Grupo A".
+     Solo queda fijo lo que ya se jugó y lo que el organizador cambió a mano ("Editar cruces").
    tournament: el torneo con el que se arman los horarios (con los grupos ya ubicados). */
 function withAutoBracket(tournament, category) {
   if (isSuper8(category) || !(category.groups || []).length) return category;
@@ -1427,7 +1427,14 @@ function withAutoBracket(tournament, category) {
   if (!c.bracket || outdated) {
     c = autoScheduleBracket(tournament, { ...c, bracket: skeleton, bracketIsSkeleton: true, bracketSeeding: null, bracketPublished: !!c.bracket && !!c.bracketPublished });
   }
-  return c.bracketIsSkeleton ? fillSkeletonBracket(c, format) : c;
+  return bracketLinkedToGroups(c) ? fillSkeletonBracket(c, format) : c;
+}
+
+/* ¿La primera ronda de la llave sale de los lugares de los grupos ("1° Grupo A")? Las llaves
+   armadas así siguen a los grupos; las armadas sin lugares (sin grupos, o rearmadas antes de que
+   existiera esto) no. */
+function bracketLinkedToGroups(category) {
+  return !!category.bracket && (category.groups || []).length > 0 && (category.bracket[0] || []).some((m) => m.placeholderA || m.placeholderB);
 }
 
 /* Lo que se deduce de los resultados, recalculado al leer un torneo: los cruces de ganadores y
@@ -1439,12 +1446,17 @@ function withDerivedResults(category, format) {
   const groups = (category.groups || []).map((g) => (g.format === "bracket4" && g.matches.length >= 4 ? { ...g, matches: propagateGroupBracket4(g.matches, format) } : g));
   let c = { ...category, groups };
   if (c.bracket) c = { ...c, bracket: propagateBracket(c.bracket, format) };
-  if (c.bracket && c.bracketIsSkeleton && groups.length > 0) c = fillSkeletonBracket(c, format);
+  if (bracketLinkedToGroups(c)) c = fillSkeletonBracket(c, format);
   return c;
 }
 
-/* Completa los lugares de la primera ronda de un esqueleto con los clasificados de los grupos que
-   ya terminaron (ver withAutoBracket) */
+/* Pone en cada lugar de la primera ronda ("1° Grupo A") a la pareja que va en ese puesto, solo si
+   su grupo terminó; si no, el lugar queda vacío ("a definir"). Se recalcula siempre, así una
+   corrección de resultado nunca deja una llave publicada con cruces viejos. Quedan fijos:
+   - un cruce que ya tiene resultado, y una pareja con bye que ya jugó el partido siguiente;
+   - un cruce cambiado a mano con "Editar cruces" (manual), o que en una llave vieja no coincide
+     con los cruces que daban los grupos al completarse (bracketSeeding): también fue a mano.
+   Con algún lugar vacío la llave vuelve a ser esqueleto (bracketIsSkeleton). */
 function fillSkeletonBracket(category, format) {
   const pairsById = categoryEntitiesById(category);
   const finished = Object.fromEntries(category.groups
@@ -1454,27 +1466,37 @@ function fillSkeletonBracket(category, format) {
     const [, n, name] = /^(\d+)° (.+)$/.exec(label || "") || [];
     return n && finished[name] ? finished[name][Number(n) - 1] || null : null;
   };
+  const seeding = !category.bracketIsSkeleton ? category.bracketSeeding : null;
+  const aMano = (m, i) => m.manual || (!!seeding?.[i] && ((seeding[i][0] || null) !== (m.pairA || null) || (seeding[i][1] || null) !== (m.pairB || null)));
+  const fijo = (m, i) => {
+    if (matchHasScore(m) || aMano(m, i)) return true;
+    const siguiente = category.bracket[1]?.[Math.floor(i / 2)];
+    return !!m.placeholderA !== !!m.placeholderB && !!siguiente && matchHasScore(siguiente); // bye que ya jugó la ronda siguiente
+  };
+  // Una pareja que quedó fija en un cruce no se pone en otro lugar (si un resultado de grupo se
+  // corrige después de jugado ese cruce, la llave queda como está y avisa: ver bracketQualifiersChange)
+  const yaFijas = new Set(category.bracket[0].flatMap((m, i) => (fijo(m, i) ? [m.pairA, m.pairB] : [])).filter(Boolean));
+  const ubicar = (label, actual) => {
+    const p = place(label);
+    return p && yaFijas.has(p) ? actual : p;
+  };
   let changed = false;
-  const round1 = category.bracket[0].map((m) => {
-    if (matchHasScore(m)) return m;
-    const pairA = m.placeholderA ? place(m.placeholderA) : m.pairA;
-    const pairB = m.placeholderB ? place(m.placeholderB) : m.pairB;
+  const round1 = category.bracket[0].map((m, i) => {
+    if (fijo(m, i)) return m;
+    const pairA = m.placeholderA ? ubicar(m.placeholderA, m.pairA) : m.pairA;
+    const pairB = m.placeholderB ? ubicar(m.placeholderB, m.pairB) : m.pairB;
     if (pairA === m.pairA && pairB === m.pairB) return m;
     changed = true;
     return { ...m, pairA, pairB };
   });
   const rounds = changed ? propagateBracket([round1, ...category.bracket.slice(1)], format) : category.bracket;
   const complete = rounds[0].every((m) => (!m.placeholderA || m.pairA) && (!m.placeholderB || m.pairB));
-  if (!changed && !complete) return category;
+  if (!changed && complete === !category.bracketIsSkeleton) {
+    return complete && !category.bracketSeeding ? { ...category, bracketSeeding: buildKnockoutSeeding(category.groups, pairsById, format) } : category;
+  }
   return complete
     ? { ...category, bracket: rounds, bracketIsSkeleton: false, bracketSeeding: buildKnockoutSeeding(category.groups, pairsById, format) }
-    : { ...category, bracket: rounds };
-}
-
-/* Como buildBracket, pero a partir de los cruces de ronda 1 que arma buildKnockoutSeeding (las
-   parejas con bye van contra un lugar vacío y pasan solas a la ronda siguiente). */
-function buildSeededBracket(round1Pairs) {
-  return buildBracket(round1Pairs.flat());
+    : { ...category, bracket: rounds, bracketIsSkeleton: true };
 }
 
 
@@ -1504,10 +1526,13 @@ function roundStageLabel(totalRounds, roundIndex) {
 function swapBracketPairs(bracket, pairIdA, pairIdB, format) {
   const rounds = bracket.map((r) => r.map((m) => ({ ...m })));
   rounds[0].forEach((m) => {
+    const antes = `${m.pairA}|${m.pairB}`;
     if (m.pairA === pairIdA) m.pairA = pairIdB;
     else if (m.pairA === pairIdB) m.pairA = pairIdA;
     if (m.pairB === pairIdA) m.pairB = pairIdB;
     else if (m.pairB === pairIdB) m.pairB = pairIdA;
+    // Cambiado a mano: ya no lo mueve un cambio de resultados en los grupos (ver fillSkeletonBracket)
+    if (`${m.pairA}|${m.pairB}` !== antes) m.manual = true;
   });
   return propagateBracket(rounds, format);
 }
@@ -12445,19 +12470,27 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
     }));
   };
 
-  const generateBracketFromGroups = () => {
-    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
-    const realBracket = carrySkeletonSchedules(category.bracketIsSkeleton ? category.bracket : null, buildSeededBracket(seeding));
-    const withBracket = { ...category, bracket: realBracket, bracketSeeding: seeding, bracketIsSkeleton: false, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false };
-    onUpdateCategory(autoScheduleBracket(tournament, withBracket));
+  // La llave desde los grupos siempre se arma con los lugares ("1° Grupo A") y se completa con los
+  // grupos terminados: así queda enganchada a ellos (ver fillSkeletonBracket)
+  const linkedBracketFromGroups = (prev) => {
+    const lugares = buildPlaceholderBracket(category.groups);
+    if (!lugares) return null;
+    return fillSkeletonBracket({ ...category, bracket: carrySkeletonSchedules(prev, lugares), bracketIsSkeleton: true, bracketSeeding: null }, format);
   };
 
-  // Rearma la llave con los clasificados actuales (si cambiaron después de armarla), sin perder
-  // los horarios ya puestos ni si estaba publicada. Solo se ofrece si la llave no tiene resultados.
+  const generateBracketFromGroups = () => {
+    const linked = linkedBracketFromGroups(category.bracketIsSkeleton ? category.bracket : null);
+    if (!linked) return;
+    onUpdateCategory(autoScheduleBracket(tournament, { ...linked, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false }));
+  };
+
+  // Rearma la llave con los clasificados actuales (llaves viejas, armadas antes de que la llave
+  // siguiera a los grupos), sin perder los horarios ya puestos ni si estaba publicada. Solo se
+  // ofrece si la llave no tiene resultados.
   const rebuildBracketFromGroups = () => {
-    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
-    const realBracket = carrySkeletonSchedules(category.bracket, buildSeededBracket(seeding));
-    onUpdateCategory(autoScheduleBracket(tournament, { ...category, bracket: realBracket, bracketSeeding: seeding }));
+    const linked = linkedBracketFromGroups(category.bracket);
+    if (!linked) return;
+    onUpdateCategory(autoScheduleBracket(tournament, linked));
   };
   const qualifiersChange = bracketQualifiersChange(category, pairsById, format);
   const bracketHasScores = !!category.bracket && category.bracket.some((round) => round.some(matchHasScore));
