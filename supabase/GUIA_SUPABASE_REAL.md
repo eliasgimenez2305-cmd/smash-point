@@ -75,8 +75,41 @@ Y [`migrations/20261034_planes_en_la_app.sql`](migrations/20261034_planes_en_la_
 Y [`migrations/20261035_publicidades.sql`](migrations/20261035_publicidades.sql) (publicidades que se ocultan solas si su cliente vence y contador de clics) → **Run** → **Success**.
 Y [`migrations/20261036_creditos.sql`](migrations/20261036_creditos.sql) (pago por torneo: organizadores "Por torneo" que usan un crédito al publicar cada torneo) → **Run** → **Success**.
 Y [`migrations/20261037_funciones.sql`](migrations/20261037_funciones.sql) (funciones en prueba: Reservas, Cuentas y empleados, y Cantina/caja quedan **apagadas**; se prenden desde el panel del creador › Funciones) → **Run** → **Success**. **No** descomentar la última línea (`update public.funciones set activa = true`): esa es solo para PRUEBA.
+Y [`migrations/20261038_perfiles_jugador.sql`](migrations/20261038_perfiles_jugador.sql) (perfiles de jugador con ID fijo y teléfono privado: el organizador anota con teléfono, el nombre se completa solo y el ranking del circuito suma por jugador) → **Run** → **Success**.
+Y [`migrations/20261039_inscripcion_perfiles.sql`](migrations/20261039_inscripcion_perfiles.sql) (inscripción pública con los dos jugadores por separado, sus teléfonos y a quién contactar; al aceptarla cada jugador queda con su perfil. La inscripción vieja sigue andando, así que se puede correr antes de publicar la app) → **Run** → **Success**.
+Y [`migrations/20261040_cuenta_por_telefono.sql`](migrations/20261040_cuenta_por_telefono.sql) (cuentas de jugador con teléfono: al crear la cuenta reclama su perfil). Para que se puedan crear cuentas hace falta además activar **Phone** en Authentication con el proveedor (Twilio, canal WhatsApp) → **Run** → **Success**.
+Y [`migrations/20261041_telefonos_empleados.sql`](migrations/20261041_telefonos_empleados.sql) (empleados por teléfono, cambio de teléfono del jugador y corrección de teléfonos por el organizador) → **Run** → **Success**.
+Y [`migrations/20261042_avisos.sql`](migrations/20261042_avisos.sql) (la campanita: avisos de pedidos de turno, confirmaciones, cancelaciones e inscripciones, y el recordatorio 2 h antes con una tarea programada de pg_cron cada 10 minutos) → **Run** → **Success**.
+Y [`migrations/20261043_push.sql`](migrations/20261043_push.sql) (avisos al celular: los aparatos que activan "Recibir avisos en este celular" y el disparador que llama a la función `enviar-push`) → **Run** → **Success**. Sin los pasos de abajo no manda nada, pero tampoco molesta.
+
+> **Avisos al celular (push), una sola vez en el real:**
+> 1. Generar un par de claves VAPID **nuevo para el real** (no usar las de PRUEBA): `npx web-push generate-vapid-keys`.
+> 2. **Edge Functions** › crear `enviar-push` con el código de `supabase/functions/enviar-push/index.ts` y, en Settings, apagar **Verify JWT**.
+> 3. **Edge Functions › Secrets**: `VAPID_PUBLICA`, `VAPID_PRIVADA` y `PUSH_SECRETO` (una clave larga al azar).
+> 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-push', 'push_url');` y `select vault.create_secret('<el mismo PUSH_SECRETO>', 'push_secreto');`
+> 5. **Netlify › Environment variables**: `VITE_VAPID_PUBLICA` con la clave pública, y volver a publicar. Sin esa variable la app no muestra el botón.
+
+Y [`migrations/20261044_mail_avisos.sql`](migrations/20261044_mail_avisos.sql) (avisos por mail: el "mail para recibir avisos" aparte del de entrar, confirmado con un link, y el mail si un pedido o cancelación de turno queda 15 minutos sin leer; tarea programada 'smashpoint-mails' cada 5 minutos) → **Run** → **Success**. Sin los pasos de abajo la campanita dice que los mails "todavía no están disponibles".
+
+> **Avisos por mail, una sola vez en el real (necesita dominio propio):**
+> 1. En **Resend**: verificar el dominio (registros DNS que indica Resend) y crear una API key.
+> 2. **Edge Functions** › crear `enviar-mail` con el código de `supabase/functions/enviar-mail/index.ts` y apagar **Verify JWT**.
+> 3. **Edge Functions › Secrets**: `RESEND_API_KEY`, `MAIL_REMITENTE` (por ejemplo `Smash Point <avisos@smashpoint.com.ar>`) y `APP_URL` (la dirección pública de la app). Usa el mismo `PUSH_SECRETO` de los avisos al celular.
+> 4. **SQL Editor**: `select vault.create_secret('https://cfaapvyttzedackbmkpt.supabase.co/functions/v1/enviar-mail', 'mail_url');`
+> 5. Volver a publicar `admin-organizers` (muestra el mail de avisos de cada organizador en el panel del creador).
+> 6. **Netlify › Environment variables**: `VITE_AVISOS_MAIL` = `1` y volver a publicar. Hasta entonces la app no muestra "Avisos por mail" en la campanita.
+
+Y [`migrations/20261045_caja_libro.sql`](migrations/20261045_caja_libro.sql) (Caja nueva, etapa 1: un solo libro de movimientos con cuentas, categorías y socios; cada cobro, venta, compra o pago escribe el libro solo; pasa todo lo que ya existe y controla mes a mes que dé igual que la Caja de hoy, si no aborta sin cambiar nada) → **Run** → **Success**. Va junto con la pantalla nueva de la Caja (etapa 2); sola no cambia nada de lo que se ve.
+Y [`migrations/20261046_caja_arqueo.sql`](migrations/20261046_caja_arqueo.sql) (Caja nueva, etapa 3: abrir y cerrar la caja del día contando billetes, la diferencia queda como ajuste, el efectivo contado pasa a la cuenta de guardado y la caja queda en $0, cobros con MP/transferencia para tildar, reabrir solo el dueño; con Cantina/caja prendida un empleado no cobra en efectivo sin su caja abierta) → **Run** → **Success**.
+Y [`migrations/20261047_editar_turnos.sql`](migrations/20261047_editar_turnos.sql) (editar un turno ya cargado: día, hora, cancha, duración y datos; en turnos fijos, solo ese o ese y los que siguen; al jugador que lo pidió por la app le llega "Te cambiaron el turno") → **Run** → **Success**.
+Y [`migrations/20261048_horarios_profes.sql`](migrations/20261048_horarios_profes.sql) (horario fijo de cada profe: días + desde-hasta + cancha; mantiene reservadas las próximas 8 semanas con una tarea programada 'smashpoint-horarios' todas las mañanas, sin pisar turnos, y avisa al dueño si una cancha estaba ocupada) → **Run** → **Success**.
+Y [`migrations/20261049_cobrar_en_mostrador.sql`](migrations/20261049_cobrar_en_mostrador.sql) (cobrar desde el Mostrador un turno —cancha + consumos— o la inscripción de un jugador —y su cuenta—, con pago dividido) → **Run** → **Success**.
+Y [`migrations/20261050_horarios_complejo.sql`](migrations/20261050_horarios_complejo.sql) (horario del complejo y horario de reservas online por día de la semana; canchas con horario propio; el pedido online valida con el horario online del día. Sin cargar, todo sigue como antes) → **Run** → **Success**.
+
+Y [`migrations/20261051_devolver_venta.sql`](migrations/20261051_devolver_venta.sql) (devolver una venta del mostrador que ya quedó en un cierre de caja: el ingreso de ese día no se toca y la devolución se anota hoy, de la caja abierta, la Caja fuerte o la cuenta que se elija; categoría de gasto Devoluciones) → **Run** → **Success**.
 
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
+> **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 
 ### Verificación (solo lectura, no cambia nada)
 

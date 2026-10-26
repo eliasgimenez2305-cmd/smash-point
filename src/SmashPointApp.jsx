@@ -11,9 +11,11 @@ import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtC
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
+import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
+import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos, separarPagos, unMedioAlcanza } from "./caja.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
-import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries } from "./reservas.js";
+import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries, canchaDelDia } from "./reservas.js";
 
 /* ---------- Utilidades de datos ---------- */
 
@@ -41,6 +43,11 @@ const STORAGE_KEY_EVENTS = "sp:events";
    .env.local (no se sube) con VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY. */
 const SUPABASE_URL = import.meta.env?.VITE_SUPABASE_URL || "https://cfaapvyttzedackbmkpt.supabase.co";
 const SUPABASE_ANON_KEY = import.meta.env?.VITE_SUPABASE_ANON_KEY || "sb_publishable_D6uARuXOiMKEmpOr2evMsQ_r7V3d9wh";
+// Clave pública de las notificaciones push (ver supabase/functions/enviar-push). Sin ella no se ofrece el botón.
+const VAPID_PUBLICA = import.meta.env?.VITE_VAPID_PUBLICA || "";
+/* "Avisos por mail" queda oculto hasta tener dominio propio en Resend (sin dominio solo llega al mail
+   de la cuenta de Resend). Para prenderlo: VITE_AVISOS_MAIL=1 en .env.local / Netlify. */
+const AVISOS_POR_MAIL = import.meta.env?.VITE_AVISOS_MAIL === "1";
 
 async function supabaseSignIn(email, password) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -315,6 +322,14 @@ const RESERVA_ERRORES = {
   plan_vencido: "El plan está vencido: quedó en solo lectura. Escribinos a smashpoint.arg@gmail.com para renovarlo.",
   tope_empleados: "Llegaste al tope de empleados de tu plan. Para sumar más, escribinos a smashpoint.arg@gmail.com.",
   funcion_apagada: "Esta función todavía no está habilitada.",
+  falta_nombre: "Poné el nombre de quien reserva.",
+  telefono_invalido: "Revisá el WhatsApp: número de Argentina con característica.",
+  cancha_invalida: "Elegí una cancha del complejo.",
+  turno_no_vigente: "Ese turno ya no está vigente (se canceló o venció).",
+  faltan_dias: "Elegí al menos un día.",
+  horario_invalido: "Revisá el horario: el \"hasta\" tiene que ser después del \"desde\".",
+  profe_invalido: "Ese profe no es de este complejo.",
+  abrir_caja_primero: "Para cobrar en efectivo abrí tu caja del día (sección Caja del día).",
 };
 const reservaErrorText = (e) => RESERVA_ERRORES[e?.code] || RESERVA_ERRORES[e?.pgCode] || "No se pudo guardar. Revisá la conexión y probá de nuevo.";
 
@@ -346,6 +361,15 @@ const volverA = () => `?redirect_to=${encodeURIComponent(window.location.origin 
    no avisa (para no revelar quién está registrado): responde sin identidades. */
 const supabaseSignUp = (email, password) => supabaseAuthPost(`signup${volverA()}`, { email, password });
 const supabaseResendConfirm = (email) => supabaseAuthPost(`resend${volverA()}`, { type: "signup", email });
+
+/* Jugadores: cuenta con teléfono y contraseña (ver 20261040_cuenta_por_telefono.sql). El código para
+   crear la cuenta o recuperar la contraseña lo manda Supabase con el proveedor configurado. */
+const CANAL_CODIGO = "sms"; // "whatsapp" cuando esté lista la cuenta de WhatsApp de Meta (Twilio)
+const supabaseSignUpTelefono = (phone, password) => supabaseAuthPost("signup", { phone, password, channel: CANAL_CODIGO });
+const supabaseReenviarAlta = (phone) => supabaseAuthPost("resend", { type: "sms", phone });
+const supabasePedirCodigo = (phone) => supabaseAuthPost("otp", { phone, create_user: false, channel: CANAL_CODIGO });
+const supabaseVerificarCodigo = (phone, token) => supabaseAuthPost("verify", { type: "sms", phone, token });
+const supabaseSignInTelefono = (phone, password) => supabaseAuthPost("token?grant_type=password", { phone, password });
 async function supabaseGetUser(accessToken) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error("La sesión no es válida.");
@@ -361,6 +385,19 @@ async function supabaseUpdatePassword(accessToken, password) {
   if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo cambiar la contraseña."), { code: data.error_code || data.code, status: res.status });
   return data;
 }
+/* Cambio de teléfono: Supabase manda un código al número nuevo; se confirma con verify (phone_change) */
+async function supabasePedirCambioTelefono(accessToken, phone) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ phone, channel: CANAL_CODIGO }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.msg || data.message || "No se pudo pedir el cambio."), { code: data.error_code || data.code, status: res.status });
+  return data;
+}
+const supabaseConfirmarCambioTelefono = (phone, token) => supabaseAuthPost("verify", { type: "phone_change", phone, token });
+
 /* Lo que traen los links de los mails en la dirección (#access_token=…&type=signup|recovery, o
    #error=…). Se lee una vez al abrir la página y se borra de la dirección. */
 function leerLinkDeMail() {
@@ -383,9 +420,15 @@ const CUENTA_ERRORES = {
   same_password: "Es la misma contraseña que tenías: elegí otra.",
   over_email_send_rate_limit: "Mandamos muchos mails seguidos. Esperá un rato y probá de nuevo.",
   over_request_rate_limit: "Demasiados intentos. Esperá un minuto y probá de nuevo.",
-  otp_expired: "El link del mail ya venció o ya se usó. Pedí uno nuevo.",
+  otp_expired: "El código no es correcto o ya venció. Pedí uno nuevo.",
+  phone_not_confirmed: "Todavía no confirmaste tu teléfono con el código.",
+  phone_exists: "Ese teléfono ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\".",
+  user_already_exists: "Ese teléfono ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\".",
+  sms_send_failed: "No pudimos mandarte el código. Revisá el número y probá de nuevo en un rato.",
+  over_sms_send_rate_limit: "Pediste muchos códigos seguidos. Esperá un rato y probá de nuevo.",
+  otp_disabled: "Ese teléfono no tiene cuenta. Tocá \"Crear cuenta\".",
 };
-const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : "No se pudo completar. Revisá la conexión y probá de nuevo.");
+const cuentaErrorText = (e) => CUENTA_ERRORES[e?.code] || (e?.status === 429 ? CUENTA_ERRORES.over_request_rate_limit : /invalid login/i.test(e?.message || "") ? CUENTA_ERRORES.invalid_credentials : /phone not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.phone_not_confirmed : /not confirmed/i.test(e?.message || "") ? CUENTA_ERRORES.email_not_confirmed : /expired|invalid.*(token|otp)/i.test(e?.message || "") ? CUENTA_ERRORES.otp_expired : /already registered/i.test(e?.message || "") ? CUENTA_ERRORES.phone_exists : "No se pudo completar. Revisá la conexión y probá de nuevo.");
 
 const PEDIDO_ERRORES = {
   sin_sesion: "Tu sesión venció: volvé a entrar.",
@@ -428,7 +471,7 @@ function useJugador() {
     writeStoredJugador(j ? { refreshToken: j.refreshToken } : null);
   }, []);
   const fromAuth = useCallback(async (auth) => {
-    const base = { id: auth.user.id, email: auth.user.email, ...authFields(auth) };
+    const base = { id: auth.user.id, email: auth.user.email || null, phone: auth.user.phone || null, ...authFields(auth) };
     const rows = await supabaseTable(`jugadores?id=eq.${base.id}&select=*`, { accessToken: base.accessToken });
     return { ...base, perfil: rows?.[0] || null };
   }, []);
@@ -463,13 +506,21 @@ function useJugador() {
     });
     setJugador({ ...ref.current, perfil: rows[0] });
   }, [token, setJugador]);
+  // Después de completar la cuenta (ver completar_cuenta): vuelve a leer sus datos
+  const recargarPerfil = useCallback(async () => {
+    const accessToken = await token();
+    const rows = await supabaseTable(`jugadores?id=eq.${ref.current.id}&select=*`, { accessToken });
+    const next = { ...ref.current, perfil: rows?.[0] || null };
+    setJugador(next);
+    return next;
+  }, [token, setJugador]);
   const logout = useCallback(() => {
     const j = ref.current;
     setJugador(null);
     if (j) fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${j.accessToken}` } }).catch(() => {});
   }, [setJugador]);
 
-  return useMemo(() => ({ jugador, token, login, savePerfil, logout }), [jugador, token, login, savePerfil, logout]);
+  return useMemo(() => ({ jugador, token, login, savePerfil, recargarPerfil, logout }), [jugador, token, login, savePerfil, recargarPerfil, logout]);
 }
 
 /* Link de WhatsApp con un mensaje ya escrito */
@@ -545,12 +596,13 @@ function withRegistrationOpen(t, open) {
 }
 
 /* Estado de las inscripciones de un torneo para la vista pública: "abierto", "completo" (todas las
-   categorías llenas), "cerradas" (el organizador las cerró: cartel) o "cerrado" (nunca tuvo, o ya
-   terminó: no se muestra nada) */
+   categorías llenas), "cerradas" (el organizador las cerró antes de empezar: cartel) o "cerrado"
+   (nunca tuvo, o ya empezó o terminó: no se muestra nada) */
 function registrationStatus(t0) {
   if (isInfoOnly(t0)) return "cerrado";
   const t = withAutoStatus(t0); // empezado el torneo, las inscripciones quedan cerradas
-  if (t.status === STATUS.FINALIZADO) return "cerrado";
+  // En curso o terminado ya no hace falta el cartel: la barra de abajo queda libre para los horarios
+  if (t.status !== STATUS.PROXIMO) return "cerrado";
   // Tuvo inscripciones y el organizador las cerró: se muestra el cartel "Inscripciones cerradas"
   if (!t.inscripcionesAbiertas) return t.inscripcionesCerradas ? "cerradas" : "cerrado";
   const categories = (t.categories || []).filter(categoryAcceptsRegistrations);
@@ -1085,12 +1137,40 @@ function buildSuper8IndividualRounds(ids) {
    En el Individual, cada lado de un partido es un "equipo" de 2 jugadores que se guarda en
    category.teams; los partidos apuntan a esos equipos en pairA/pairB, así el resto de la app
    (resultados, WO, horarios) los trata igual que a una pareja. */
+/* Renumera un cuadro para que la ronda 1 vaya en el orden de los números: en el Individual
+   1-2 vs 3-4 y 5-6 vs 7-8; por Parejas 1 vs 2, 3 vs 4… Solo cambia los números, así cada uno
+   sigue jugando una vez con cada compañero y contra cada rival las mismas veces.
+   rounds: el cuadro armado con las posiciones 0..n-1; devuelve el mismo cuadro con los ids. */
+function super8EnOrden(rounds, orderedIds) {
+  const enRonda1 = rounds[0].flat(2);
+  const lugar = new Map(enRonda1.map((pos, k) => [pos, k]));
+  const id = (pos) => orderedIds[lugar.get(pos)];
+  return rounds.map((round) => round.map((match) => match.map((lado) => (Array.isArray(lado) ? lado.map(id) : id(lado)))));
+}
+
+/* La planilla que se usa en los clubes para el Súper 8 Individual de 8 jugadores (números del 1 al 8):
+   14 partidos de a 2 por ronda. Cada uno juega una vez con cada otro como compañero. */
+const SUPER8_PLANILLA_INDIVIDUAL = [
+  [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+  [[[1, 3], [5, 7]], [[2, 4], [6, 8]]],
+  [[[1, 4], [5, 8]], [[2, 3], [6, 7]]],
+  [[[1, 5], [2, 6]], [[3, 7], [4, 8]]],
+  [[[1, 6], [4, 7]], [[2, 5], [3, 8]]],
+  [[[1, 7], [2, 8]], [[3, 5], [4, 6]]],
+  [[[1, 8], [3, 6]], [[2, 7], [4, 5]]],
+];
+
 function buildSuper8Group(format, orderedIds) {
   const teams = [];
+  const posiciones = orderedIds.map((_, i) => i);
   let matches;
   if (format === "super8_individual") {
-    const rounds = buildSuper8IndividualRounds(orderedIds);
-    if (!rounds) return null;
+    // Con 8 jugadores, la planilla de siempre; con otra cantidad, el cuadro calculado en orden
+    const base = orderedIds.length === SUPER8_PLANILLA_INDIVIDUAL.length + 1
+      ? SUPER8_PLANILLA_INDIVIDUAL.map((round) => round.map((match) => match.map((lado) => lado.map((n) => n - 1))))
+      : buildSuper8IndividualRounds(posiciones);
+    if (!base) return null;
+    const rounds = super8EnOrden(base, orderedIds);
     const teamFor = (playerIds) => {
       const team = { id: uid(), playerIds };
       teams.push(team);
@@ -1098,7 +1178,11 @@ function buildSuper8Group(format, orderedIds) {
     };
     matches = rounds.flatMap((round, ri) => round.map(([t1, t2]) => ({ id: uid(), pairA: teamFor(t1), pairB: teamFor(t2), sets: [], round: ri + 1 })));
   } else {
-    matches = buildCircleRounds(orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
+    // Por Parejas, el mismo orden de la planilla: cada "1-2" es el partido pareja 1 vs pareja 2
+    const base = orderedIds.length === SUPER8_PLANILLA_INDIVIDUAL.length + 1
+      ? SUPER8_PLANILLA_INDIVIDUAL.map((round) => round.flatMap((match) => match.map(([a, b]) => [a - 1, b - 1])))
+      : buildCircleRounds(posiciones);
+    matches = super8EnOrden(base, orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
   }
   return { group: { id: uid(), name: "Súper 8", pairIds: orderedIds, format: "super8", matches }, teams };
 }
@@ -1168,11 +1252,12 @@ function tournamentSummary(t) {
       const light = { ...c };
       HEAVY_CATEGORY_FIELDS.forEach((k) => delete light[k]);
       const names = Object.fromEntries((c.pairs || []).map((p) => [p.id, p.name]));
+      const players = Object.fromEntries((c.pairs || []).filter((p) => p.players).map((p) => [p.id, p.players]));
       return {
         ...light,
         _pairsCount: (c.pairs || []).length,
         _groupsCount: (c.groups || []).length,
-        _placements: isSuper8(c) || isInfoOnly(t) ? [] : categoryPlacements(c, t.matchFormat).map(({ pairId, tier }) => ({ name: names[pairId], tier })).filter((p) => p.name),
+        _placements: isSuper8(c) || isInfoOnly(t) ? [] : categoryPlacements(c, t.matchFormat).map(({ pairId, tier }) => ({ name: names[pairId], ...(players[pairId] ? { players: players[pairId] } : {}), tier })).filter((p) => p.name),
       };
     }),
     _stats: { progress: tournamentProgress(t), matchesByDate },
@@ -1357,10 +1442,10 @@ function buildPlaceholderBracket(groups) {
 /* La llave de una categoría con grupos se arma sola, en borrador:
    - Apenas hay grupos, el esqueleto con "1° Grupo A"... y sus horarios (si cambian los grupos y la
      llave todavía no tiene resultados, se vuelve a armar).
-   - Cuando termina un grupo, sus lugares se completan con las parejas que clasificaron (y se
-     corrigen si cambia un resultado, mientras ese cruce no se haya jugado).
-   - Con todos los lugares completos deja de ser esqueleto: desde ahí, si cambian los clasificados,
-     avisa y ofrece rearmarla (ver bracketQualifiersChange).
+   - Cuando termina un grupo, sus lugares se completan con las parejas que clasificaron.
+   - La llave sigue a sus grupos siempre (ver fillSkeletonBracket): si se corrige un resultado, el
+     lugar cambia solo, y si el grupo vuelve a quedar sin terminar, el lugar vuelve a "1° Grupo A".
+     Solo queda fijo lo que ya se jugó y lo que el organizador cambió a mano ("Editar cruces").
    tournament: el torneo con el que se arman los horarios (con los grupos ya ubicados). */
 function withAutoBracket(tournament, category) {
   if (isSuper8(category) || !(category.groups || []).length) return category;
@@ -1374,7 +1459,14 @@ function withAutoBracket(tournament, category) {
   if (!c.bracket || outdated) {
     c = autoScheduleBracket(tournament, { ...c, bracket: skeleton, bracketIsSkeleton: true, bracketSeeding: null, bracketPublished: !!c.bracket && !!c.bracketPublished });
   }
-  return c.bracketIsSkeleton ? fillSkeletonBracket(c, format) : c;
+  return bracketLinkedToGroups(c) ? fillSkeletonBracket(c, format) : c;
+}
+
+/* ¿La primera ronda de la llave sale de los lugares de los grupos ("1° Grupo A")? Las llaves
+   armadas así siguen a los grupos; las armadas sin lugares (sin grupos, o rearmadas antes de que
+   existiera esto) no. */
+function bracketLinkedToGroups(category) {
+  return !!category.bracket && (category.groups || []).length > 0 && (category.bracket[0] || []).some((m) => m.placeholderA || m.placeholderB);
 }
 
 /* Lo que se deduce de los resultados, recalculado al leer un torneo: los cruces de ganadores y
@@ -1386,12 +1478,17 @@ function withDerivedResults(category, format) {
   const groups = (category.groups || []).map((g) => (g.format === "bracket4" && g.matches.length >= 4 ? { ...g, matches: propagateGroupBracket4(g.matches, format) } : g));
   let c = { ...category, groups };
   if (c.bracket) c = { ...c, bracket: propagateBracket(c.bracket, format) };
-  if (c.bracket && c.bracketIsSkeleton && groups.length > 0) c = fillSkeletonBracket(c, format);
+  if (bracketLinkedToGroups(c)) c = fillSkeletonBracket(c, format);
   return c;
 }
 
-/* Completa los lugares de la primera ronda de un esqueleto con los clasificados de los grupos que
-   ya terminaron (ver withAutoBracket) */
+/* Pone en cada lugar de la primera ronda ("1° Grupo A") a la pareja que va en ese puesto, solo si
+   su grupo terminó; si no, el lugar queda vacío ("a definir"). Se recalcula siempre, así una
+   corrección de resultado nunca deja una llave publicada con cruces viejos. Quedan fijos:
+   - un cruce que ya tiene resultado, y una pareja con bye que ya jugó el partido siguiente;
+   - un cruce cambiado a mano con "Editar cruces" (manual), o que en una llave vieja no coincide
+     con los cruces que daban los grupos al completarse (bracketSeeding): también fue a mano.
+   Con algún lugar vacío la llave vuelve a ser esqueleto (bracketIsSkeleton). */
 function fillSkeletonBracket(category, format) {
   const pairsById = categoryEntitiesById(category);
   const finished = Object.fromEntries(category.groups
@@ -1401,27 +1498,37 @@ function fillSkeletonBracket(category, format) {
     const [, n, name] = /^(\d+)° (.+)$/.exec(label || "") || [];
     return n && finished[name] ? finished[name][Number(n) - 1] || null : null;
   };
+  const seeding = !category.bracketIsSkeleton ? category.bracketSeeding : null;
+  const aMano = (m, i) => m.manual || (!!seeding?.[i] && ((seeding[i][0] || null) !== (m.pairA || null) || (seeding[i][1] || null) !== (m.pairB || null)));
+  const fijo = (m, i) => {
+    if (matchHasScore(m) || aMano(m, i)) return true;
+    const siguiente = category.bracket[1]?.[Math.floor(i / 2)];
+    return !!m.placeholderA !== !!m.placeholderB && !!siguiente && matchHasScore(siguiente); // bye que ya jugó la ronda siguiente
+  };
+  // Una pareja que quedó fija en un cruce no se pone en otro lugar (si un resultado de grupo se
+  // corrige después de jugado ese cruce, la llave queda como está y avisa: ver bracketQualifiersChange)
+  const yaFijas = new Set(category.bracket[0].flatMap((m, i) => (fijo(m, i) ? [m.pairA, m.pairB] : [])).filter(Boolean));
+  const ubicar = (label, actual) => {
+    const p = place(label);
+    return p && yaFijas.has(p) ? actual : p;
+  };
   let changed = false;
-  const round1 = category.bracket[0].map((m) => {
-    if (matchHasScore(m)) return m;
-    const pairA = m.placeholderA ? place(m.placeholderA) : m.pairA;
-    const pairB = m.placeholderB ? place(m.placeholderB) : m.pairB;
+  const round1 = category.bracket[0].map((m, i) => {
+    if (fijo(m, i)) return m;
+    const pairA = m.placeholderA ? ubicar(m.placeholderA, m.pairA) : m.pairA;
+    const pairB = m.placeholderB ? ubicar(m.placeholderB, m.pairB) : m.pairB;
     if (pairA === m.pairA && pairB === m.pairB) return m;
     changed = true;
     return { ...m, pairA, pairB };
   });
   const rounds = changed ? propagateBracket([round1, ...category.bracket.slice(1)], format) : category.bracket;
   const complete = rounds[0].every((m) => (!m.placeholderA || m.pairA) && (!m.placeholderB || m.pairB));
-  if (!changed && !complete) return category;
+  if (!changed && complete === !category.bracketIsSkeleton) {
+    return complete && !category.bracketSeeding ? { ...category, bracketSeeding: buildKnockoutSeeding(category.groups, pairsById, format) } : category;
+  }
   return complete
     ? { ...category, bracket: rounds, bracketIsSkeleton: false, bracketSeeding: buildKnockoutSeeding(category.groups, pairsById, format) }
-    : { ...category, bracket: rounds };
-}
-
-/* Como buildBracket, pero a partir de los cruces de ronda 1 que arma buildKnockoutSeeding (las
-   parejas con bye van contra un lugar vacío y pasan solas a la ronda siguiente). */
-function buildSeededBracket(round1Pairs) {
-  return buildBracket(round1Pairs.flat());
+    : { ...category, bracket: rounds, bracketIsSkeleton: true };
 }
 
 
@@ -1451,10 +1558,13 @@ function roundStageLabel(totalRounds, roundIndex) {
 function swapBracketPairs(bracket, pairIdA, pairIdB, format) {
   const rounds = bracket.map((r) => r.map((m) => ({ ...m })));
   rounds[0].forEach((m) => {
+    const antes = `${m.pairA}|${m.pairB}`;
     if (m.pairA === pairIdA) m.pairA = pairIdB;
     else if (m.pairA === pairIdB) m.pairA = pairIdA;
     if (m.pairB === pairIdA) m.pairB = pairIdB;
     else if (m.pairB === pairIdB) m.pairB = pairIdA;
+    // Cambiado a mano: ya no lo mueve un cambio de resultados en los grupos (ver fillSkeletonBracket)
+    if (`${m.pairA}|${m.pairB}` !== antes) m.manual = true;
   });
   return propagateBracket(rounds, format);
 }
@@ -2222,8 +2332,8 @@ function categoryPlacements(category, format) {
    (no por pareja, porque puede cambiar de compañero entre fechas) */
 function computeCircuitStandings(circuit, tournaments) {
   const points = circuit.pointsScale || DEFAULT_CIRCUIT_POINTS;
-  const table = {}; // { [categoryName]: { [playerKey]: { name, points, fechas } } }
-  circuit.categoryNames.forEach((cn) => { table[cn] = {}; });
+  const table = {}; // { [categoryName]: [{ players, points }] }, una entrada por pareja y por fecha
+  circuit.categoryNames.forEach((cn) => { table[cn] = []; });
 
   // Un torneo informativo nunca suma puntos, aunque por error quedara asignado a un circuito; uno Próximo
   // tampoco hasta que tenga algún resultado (anotarse no da puntos de "fase de grupos")
@@ -2234,24 +2344,22 @@ function computeCircuitStandings(circuit, tournaments) {
       const matchName = circuit.categoryNames.find((cn) => cn.trim().toLowerCase() === cat.name.trim().toLowerCase());
       if (!matchName) return;
       // Con el resumen (portada) vienen ya los nombres con su instancia
-      const placed = cat._placements || categoryPlacements(cat, t.matchFormat).map(({ pairId, tier }) => ({ name: cat.pairs.find((p) => p.id === pairId)?.name, tier }));
-      placed.forEach(({ name, tier }) => {
+      const placed = cat._placements || categoryPlacements(cat, t.matchFormat).map(({ pairId, tier }) => {
+        const pair = cat.pairs.find((p) => p.id === pairId);
+        return { name: pair?.name, players: pair?.players, tier };
+      });
+      placed.forEach(({ name, players, tier }) => {
         if (!name) return;
-        const pts = points[tier] ?? 0;
-        // "Gómez / Ibáñez" o "Gómez - Ibáñez"; "Ibáñez" e "Ibanez" son la misma persona
-        splitPair(name).forEach((playerName) => {
-          const key = normalizeName(playerName);
-          if (!table[matchName][key]) table[matchName][key] = { name: playerName, points: 0, fechas: 0 };
-          table[matchName][key].points += pts;
-          table[matchName][key].fechas += 1;
-        });
+        // Por jugador: con su ID si se cargó con teléfono; si no, por nombre ("Ibáñez" e "Ibanez" son
+        // la misma persona). Ver rankingPorJugador en jugadores.js
+        table[matchName].push({ players: jugadoresConPerfil({ name, players }), points: points[tier] ?? 0 });
       });
     });
   });
 
   const result = {};
-  Object.entries(table).forEach(([cn, players]) => {
-    result[cn] = Object.values(players).sort((a, b) => b.points - a.points);
+  Object.entries(table).forEach(([cn, entradas]) => {
+    result[cn] = rankingPorJugador(entradas);
   });
   return result;
 }
@@ -2546,12 +2654,22 @@ function OrganizerAvatar({ organizer, size = 48, color = BRAND.cyan }) {
 /* Formulario público de inscripción, en una hoja que sube desde abajo (en la compu, centrada).
    Sin cuenta: se guarda como "pendiente" y el organizador la acepta o rechaza desde su panel.
    Trae un campo trampa (honeypot) oculto para frenar bots y el botón se bloquea mientras envía. */
-function RegistrationSheet({ tournament, organizer, onClose }) {
+function RegistrationSheet({ tournament, organizer, onClose, jugadorApi = null }) {
   const categories = tournament.categories.filter(categoryAcceptsRegistrations);
   const [categoryId, setCategoryId] = useState(categories.length === 1 ? categories[0].id : "");
-  const [player1, setPlayer1] = useState("");
-  const [player2, setPlayer2] = useState("");
-  const [phone, setPhone] = useState("");
+  // Cada jugador por separado (apellido, nombre y teléfono) y a quién le escribe el organizador.
+  // Con los teléfonos, cada jugador queda con su perfil para el ranking (ver 20261039_inscripcion_perfiles.sql)
+  // Con la sesión iniciada (cuenta de teléfono con sus datos), el jugador 1 es el que entró; "Anotar a
+  // otros" vuelve a pedir los dos jugadores
+  const cuenta = jugadorApi?.jugador;
+  const yo = cuenta?.phone && cuenta.perfil ? { apellido: cuenta.perfil.apellido, nombre: cuenta.perfil.nombre, tel: cuenta.phone.slice(3) } : null;
+  const [anotarOtros, setAnotarOtros] = useState(false);
+  const vacio = { apellido: "", nombre: "", tel: "" };
+  const [jugador1, setJugador1] = useState(() => yo || vacio);
+  const usoMiCuenta = !!yo && !anotarOtros;
+  const cambiarAnotarOtros = (otros) => { setAnotarOtros(otros); setJugador1(otros || !yo ? vacio : yo); };
+  const [jugador2, setJugador2] = useState({ apellido: "", nombre: "", tel: "" });
+  const [contacto, setContacto] = useState(1);
   const [website, setWebsite] = useState(""); // honeypot: una persona nunca lo ve ni lo completa
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -2581,30 +2699,33 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
     ? category.format === "super8_individual"
     : categories.length > 0 && categories.every((c) => c.format === "super8_individual");
   const full = category ? categorySpotsLeft(category) === 0 : false;
-  const normalizedPhone = normalizeArPhone(phone);
-  const validName = (n) => n.trim().length >= 3 && n.trim().includes(" ");
-  const ready = category && !full && validName(player1) && (individual || validName(player2)) && normalizedPhone && availabilityOk;
+  const completo = (j) => j.apellido.trim() && j.nombre.trim() && normalizeArPhone(j.tel);
+  const datosOk = completo(jugador1) && (individual || completo(jugador2));
+  const ready = category && !full && datosOk && availabilityOk;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!ready || sending) return;
     setSending(true);
     setError("");
+    const disponibilidad = askAvailability ? { p_disponibilidad: chosenDays, p_cruce_mismo_dia: sameDayBracket } : {};
     const params = {
       p_torneo_id: tournament.id,
       p_categoria_id: category.id,
-      p_jugador1: player1.trim(),
-      p_jugador2: individual ? null : player2.trim(),
-      p_telefono: normalizedPhone,
+      p_j1_apellido: jugador1.apellido.trim(), p_j1_nombre: jugador1.nombre.trim(), p_j1_telefono: normalizeArPhone(jugador1.tel),
+      ...(individual ? {} : { p_j2_apellido: jugador2.apellido.trim(), p_j2_nombre: jugador2.nombre.trim(), p_j2_telefono: normalizeArPhone(jugador2.tel), p_contacto: contacto }),
       p_honeypot: website,
+      ...disponibilidad,
     };
     try {
       try {
-        await supabaseRpc("crear_inscripcion", askAvailability ? { ...params, p_disponibilidad: chosenDays, p_cruce_mismo_dia: sameDayBracket } : params);
+        await supabaseRpc("inscribir_pareja", params);
       } catch (err) {
-        // Si la base todavía no tiene la migración de disponibilidad, se inscribe igual sin ella
-        if (askAvailability && err.pgCode === "PGRST202") await supabaseRpc("crear_inscripcion", params);
-        else throw err;
+        // Si la base todavía no tiene la inscripción nueva, se inscribe como antes (sin perfiles)
+        if (err.pgCode !== "PGRST202") throw err;
+        const quien = (j) => nombreJugador(j);
+        const contactoTel = normalizeArPhone((!individual && contacto === 2 ? jugador2 : jugador1).tel);
+        await supabaseRpc("crear_inscripcion", { p_torneo_id: tournament.id, p_categoria_id: category.id, p_jugador1: quien(jugador1), p_jugador2: individual ? null : quien(jugador2), p_telefono: contactoTel, p_honeypot: website, ...disponibilidad });
       }
       setDone(true);
     } catch (err) {
@@ -2674,23 +2795,59 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
               <p className="text-sm -mt-2">Empieza: <span className="font-semibold text-lime-400">{categoryStartLabel(category)}</span></p>
             )}
 
-            <div>
-              <label className={label} htmlFor="insc-j1">{individual ? "Nombre y apellido" : "Jugador 1 · nombre y apellido"}</label>
-              <input id="insc-j1" value={player1} onChange={(e) => setPlayer1(e.target.value)} autoComplete="name" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Juan Pérez" />
-            </div>
+            {[[jugador1, setJugador1, 1], ...(individual ? [] : [[jugador2, setJugador2, 2]])].map(([j, setJ, n]) => {
+              const telOk = normalizeArPhone(j.tel);
+              if (n === 1 && usoMiCuenta) {
+                return (
+                  <div key={n} className="rounded-xl p-3 flex items-center justify-between gap-3" style={{ border: `1px solid ${BRAND.lime}55` }}>
+                    <div className="min-w-0">
+                      <p className="text-xs text-teal-400">{individual ? "Te anotás vos" : "Jugador 1: vos"}</p>
+                      <p className="font-semibold truncate">{nombreJugador(j)}</p>
+                      <p className="text-xs text-teal-500">{formatArPhone(telOk)}</p>
+                    </div>
+                    <button type="button" onClick={() => cambiarAnotarOtros(true)} className="shrink-0 text-xs underline text-teal-300">Anotar a otros</button>
+                  </div>
+                );
+              }
+              return (
+                <fieldset key={n} className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
+                  <legend className="px-1 text-xs text-teal-300">{individual ? "Tus datos" : `Jugador ${n}`}{n === 1 && yo && anotarOtros && <button type="button" onClick={() => cambiarAnotarOtros(false)} className="ml-2 underline text-lime-400">Anotarme yo</button>}</legend>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className={label} htmlFor={`insc-ap${n}`}>Apellido</label>
+                      <input id={`insc-ap${n}`} value={j.apellido} onChange={(e) => setJ({ ...j, apellido: e.target.value })} autoComplete={n === 1 ? "family-name" : "off"} maxLength={40} className={input} style={inputStyle} placeholder={n === 1 ? "Ej: Pérez" : "Ej: López"} />
+                    </div>
+                    <div>
+                      <label className={label} htmlFor={`insc-no${n}`}>Nombre</label>
+                      <input id={`insc-no${n}`} value={j.nombre} onChange={(e) => setJ({ ...j, nombre: e.target.value })} autoComplete={n === 1 ? "given-name" : "off"} maxLength={40} className={input} style={inputStyle} placeholder={n === 1 ? "Ej: Juan" : "Ej: Martín"} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={label} htmlFor={`insc-tel${n}`}>Teléfono (WhatsApp)</label>
+                    <input id={`insc-tel${n}`} type="tel" inputMode="tel" autoComplete={n === 1 ? "tel" : "off"} value={j.tel} onChange={(e) => setJ({ ...j, tel: e.target.value })} className={input} style={inputStyle} placeholder="Ej: 3446 123456" />
+                    {j.tel && !telOk && <p className="text-[11px] mt-1 text-amber-400">Con característica, sin el 0 ni el 15. Ej: 11 2345 6789</p>}
+                  </div>
+                </fieldset>
+              );
+            })}
             {!individual && (
               <div>
-                <label className={label} htmlFor="insc-j2">Jugador 2 · nombre y apellido</label>
-                <input id="insc-j2" value={player2} onChange={(e) => setPlayer2(e.target.value)} autoComplete="off" maxLength={80} className={input} style={inputStyle} placeholder="Ej: Martín López" />
+                <p className={label}>¿A quién le escribe el organizador por WhatsApp?</p>
+                <div className="flex gap-2">
+                  {[1, 2].map((n) => {
+                    const j = n === 1 ? jugador1 : jugador2;
+                    const texto = nombreJugador(j) || `Jugador ${n}`;
+                    return (
+                      <button key={n} type="button" aria-pressed={contacto === n} onClick={() => setContacto(n)}
+                        className="flex-1 min-w-0 py-2 px-2 rounded-full text-sm font-semibold border truncate"
+                        style={contacto === n ? { backgroundColor: BRAND.lime, color: "#14181f", borderColor: BRAND.lime } : { borderColor: "#475569", color: "#cbd5e1" }}>
+                        {texto}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
-            <div>
-              <label className={label} htmlFor="insc-tel">WhatsApp</label>
-              <input id="insc-tel" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={input} style={inputStyle} placeholder="Ej: 3446 123456" />
-              <p className="text-[11px] mt-1 text-teal-500">
-                {phone && !normalizedPhone ? <span className="text-amber-400">Con característica, sin el 0 ni el 15. Ej: 11 2345 6789</span> : normalizedPhone ? `Te van a escribir al ${formatArPhone(normalizedPhone)}` : "Con característica, sin el 0 ni el 15."}
-              </p>
-            </div>
 
             {askAvailability && (
               <fieldset className="rounded-xl p-3 space-y-2" style={{ border: `1px solid ${BRAND.cyan}40` }}>
@@ -2743,8 +2900,8 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
               <input id="insc-web" name="website" tabIndex={-1} autoComplete="off" value={website} onChange={(e) => setWebsite(e.target.value)} />
             </div>
 
-            {((player1 && !validName(player1)) || (!individual && player2 && !validName(player2))) && (
-              <p className="text-sm text-amber-400">Poné nombre y apellido de {individual ? "quien se inscribe" : "cada jugador"}.</p>
+            {((!usoMiCuenta && (jugador1.apellido || jugador1.nombre)) || jugador2.apellido || jugador2.nombre) && !datosOk && !full && (
+              <p className="text-sm text-amber-400">Completá apellido, nombre y teléfono de {individual ? "quien se inscribe" : "los dos jugadores"}.</p>
             )}
             {full && <p className="text-sm text-amber-400">El cupo de esta categoría ya está completo.</p>}
             {error && <p className="text-sm text-red-400" role="alert">{error}</p>}
@@ -2752,7 +2909,7 @@ function RegistrationSheet({ tournament, organizer, onClose }) {
             <button type="submit" disabled={!ready || sending} className="w-full py-3.5 rounded-full font-semibold text-base disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
               {sending ? "Enviando…" : "Enviar inscripción"}
             </button>
-            <p className="text-[11px] text-teal-600 text-center">Tu WhatsApp solo lo ve el organizador del torneo.</p>
+            <p className="text-[11px] text-teal-600 text-center">{individual ? "Tu teléfono solo lo ven" : "Sus teléfonos solo los ven"} el organizador del torneo y Smash Point, para avisar{individual ? "te" : "les"} de {individual ? "tus" : "sus"} partidos.</p>
           </form>
         )}
       </div>
@@ -4191,9 +4348,11 @@ function StreamLinks({ tournament, date }) {
   const delDia = tournament.streams?.[date] || {};
   const canchas = Object.keys(delDia).filter((c) => linkValido(delDia[c])).sort((a, b) => Number(a) - Number(b));
   if (canchas.length === 0) return null;
+  // "En vivo" solo el día de los partidos; otro día el link queda (puede ser la grabación)
+  const enVivo = date === todayISO() && tournamentStatusOf(tournament) !== STATUS.FINALIZADO;
   return (
     <div className="flex flex-wrap items-center gap-2 mb-2" style={F.body}>
-      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>● En vivo</span>
+      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>{enVivo ? "● En vivo" : "Transmisiones"}</span>
       {canchas.map((c) => (
         <a key={c} href={delDia[c]} target="_blank" rel="noopener noreferrer" className="px-3 py-1 rounded-full text-xs font-semibold border" style={{ borderColor: "#f8717199", color: "#fecaca", backgroundColor: "#f871711a" }}>
           ▶ {courtName(tournament, Number(c))}
@@ -5276,12 +5435,14 @@ function SchedulePublicView({ tournament }) {
   }
 
   const slotId = (m) => `slot-${m.schedule.date}-${m.schedule.time.replace(":", "")}`;
-  // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante)
+  // "Ahora": el horario de un partido en curso; si no hay, el primero sin terminar de hoy (o de más adelante).
+  // En un torneo finalizado no va (puede quedar algún partido sin resultado cargado)
   const today = todayISO();
   const pending = scheduled.filter((m) => !m.placeholder && !matchIsPlayed(m, tournament.matchFormat));
-  const nowMatch = scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m, tournament.matchFormat))
-    || pending.find((m) => m.schedule.date >= today)
-    || pending[0];
+  const nowMatch = tournamentStatusOf(tournament) === STATUS.FINALIZADO ? null
+    : scheduled.find((m) => m.liveStatus === "en_curso" && !matchIsPlayed(m, tournament.matchFormat))
+      || pending.find((m) => m.schedule.date >= today)
+      || pending[0];
   const goToNow = () => { if (nowMatch) document.getElementById(slotId(nowMatch))?.scrollIntoView({ behavior: "smooth", block: "start" }); };
 
   const byDate = {};
@@ -5543,11 +5704,12 @@ function ContactFooter({ onGoLogin, conCuentas = true }) {
 
 /* Encabezado público: arriba a la derecha "Ingresar" o "Mi cuenta", el logo al medio y debajo las
    pestañas Torneos · Complejos · Entrenamientos */
-function SiteHeader({ tab, onTab, cuenta }) {
+function SiteHeader({ tab, onTab, cuenta, campanita = null }) {
   return (
     <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-3 pb-3">
       {cuenta && (
-        <div className="flex justify-end mb-1">
+        <div className="flex justify-end items-center gap-1 mb-1">
+          {campanita}
           <button type="button" onClick={cuenta.onClick} className="px-3 py-1 rounded-full text-xs font-semibold border hover:border-lime-400" style={{ ...F.body, borderColor: `${BRAND.cyan}66`, color: cuenta.logueado ? BRAND.lime : "#cbd5e1" }}>{cuenta.logueado ? "Mi cuenta" : "Ingresar"}</button>
         </div>
       )}
@@ -6120,7 +6282,8 @@ function BuscadorTurnos({ venues, complejos, organizers = [], sinReservaOnline =
     ? habilitados.map((c) => {
         const venue = venues.find((v) => v.id === c.id);
         const suyas = online.filter((x) => x.complejo_id === c.id);
-        const horarios = horariosConLibres(suyas, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+        const delDia = suyas.map((x) => canchaDelDia(x, c, fecha, true)).filter(Boolean);
+        const horarios = horariosConLibres(delDia, fecha, duracion, ocupado[c.id] || []).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
         return {
           venue, complejo: c, horarios, canchasSuyas: suyas,
           totalCanchas: canchas.filter((x) => x.complejo_id === c.id).length,
@@ -6347,7 +6510,7 @@ function FichaComplejoForm({ complejoId, nombre, accessToken }) {
 
 /* Tarjeta de un complejo con reserva online: portada, logo, datos, precio, horarios libres en grilla
    (Mañana / Tarde / Noche, con cuántas canchas quedan) y, al elegir uno, el resumen con "Reservar" */
-function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
+function TarjetaComplejo({ venue, complejo = null, horarios, canchasSuyas = [], totalCanchas, ficha, portada, precio, fecha, hoy, ultimoDia, duracion, franja, onReservar, onIrAFecha }) {
   // Si ese día no hay lugar: el primer turno libre de los días siguientes (undefined = buscando, null = no hay)
   const [proximo, setProximo] = useState(undefined);
   useEffect(() => {
@@ -6358,7 +6521,8 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
       for (let d = sumarDias(fecha, 1); d <= ultimoDia; d = sumarDias(d, 1)) {
         try {
           const ocupado = ((await supabaseRpc("disponibilidad_canchas", { p_complejo: venue.id, p_fecha: d })) || []).map((r) => ({ ...r, estado: "confirmada" }));
-          const libres = horariosConLibres(canchasSuyas, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
+          const delDia = canchasSuyas.map((x) => canchaDelDia(x, complejo, d, true)).filter(Boolean);
+          const libres = horariosConLibres(delDia, d, duracion, ocupado).filter((h) => franja === "todo" || franjaDe(h.desde) === franja);
           if (libres.length > 0) { if (vigente) setProximo({ fecha: d, desde: libres[0].desde }); return; }
         } catch { break; }
         if (!vigente) return;
@@ -6506,87 +6670,142 @@ function TarjetaComplejo({ venue, horarios, canchasSuyas = [], totalCanchas, fic
    onEntro(jugador, contraseña) se llama con la sesión ya iniciada. */
 function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
   const { cuentas: conCuentas } = React.useContext(FuncionesContext);
-  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar"); // entrar | crear | recuperar | enviado
-  const [email, setEmail] = useState("");
+  // entrar | crear | recuperar | enviado (mail) | codigo-alta | codigo-recupero | nueva-clave | reclamar
+  const [modo, setModo] = useState(conCuentas ? modoInicial : "entrar");
+  const [usuario, setUsuario] = useState(""); // teléfono (jugadores) o mail (organizadores)
   const [password, setPassword] = useState("");
+  const [codigo, setCodigo] = useState("");
   const [ver, setVer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
   const [sinConfirmar, setSinConfirmar] = useState(false);
-  const mail = email.trim().toLowerCase();
+  const esMail = usuario.includes("@");
+  const mail = usuario.trim().toLowerCase();
   const mailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail);
-  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); };
+  const telefono = esMail ? null : normalizeArPhone(usuario);
+  const cambiar = (m) => { setModo(m); setError(""); setAviso(""); setSinConfirmar(false); setCodigo(""); };
+  const conPerfil = async (j) => {
+    // Cuenta con teléfono sin sus datos todavía: primero reclama su perfil (o se crea uno)
+    if (j.phone && !j.perfil) { cambiar("reclamar"); setBusy(false); return; }
+    await onEntro(j, password);
+  };
 
   const entrar = async () => {
-    if (!mailOk || !password) { setError("Completá mail y contraseña."); return; }
+    if (!password || (esMail ? !mailOk : !telefono)) { setError(esMail ? "Completá mail y contraseña." : "Completá tu teléfono (con característica) y tu contraseña."); return; }
     setBusy(true); setError(""); setSinConfirmar(false);
     try {
-      const j = await jugadorApi.login(await supabaseSignIn(mail, password));
-      await onEntro(j, password);
+      const j = await jugadorApi.login(esMail ? await supabaseSignIn(mail, password) : await supabaseSignInTelefono(telefono, password));
+      await conPerfil(j);
     } catch (e) {
       const texto = cuentaErrorText(e);
-      setError(texto);
-      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed);
+      setError(esMail || texto !== CUENTA_ERRORES.invalid_credentials ? texto : "Teléfono o contraseña incorrectos.");
+      setSinConfirmar(texto === CUENTA_ERRORES.email_not_confirmed || texto === CUENTA_ERRORES.phone_not_confirmed);
       setBusy(false);
     }
   };
   const crear = async () => {
-    if (!mailOk) { setError("Revisá el mail."); return; }
+    if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15. Ej: 3446 123456"); return; }
     if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
     setBusy(true); setError("");
     try {
-      const r = await supabaseSignUp(mail, password);
-      if (r.access_token) { // sin confirmación por mail: ya entra
-        const j = await jugadorApi.login(r);
-        await onEntro(j, password);
-        return;
-      }
-      const user = r.user || r;
-      if (Array.isArray(user.identities) && user.identities.length === 0) {
-        setError("Ese mail ya tiene una cuenta. Ingresá con tu contraseña o tocá \"Olvidé mi contraseña\" (también si antes entrabas con un código).");
-      } else {
-        cambiar("enviado");
-      }
+      const r = await supabaseSignUpTelefono(telefono, password);
+      if (r.access_token) { await conPerfil(await jugadorApi.login(r)); return; } // sin confirmación por código: ya entra
+      cambiar("codigo-alta");
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
   };
   const recuperar = async () => {
-    if (!mailOk) { setError("Revisá el mail."); return; }
     setBusy(true); setError("");
     try {
-      await supabaseRequestPasswordReset(mail);
-      setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+      if (esMail) {
+        if (!mailOk) { setError("Revisá el mail."); setBusy(false); return; }
+        await supabaseRequestPasswordReset(mail);
+        setAviso("Si ese mail tiene cuenta, te mandamos un link para elegir una contraseña nueva. Puede tardar un minuto; si no llega, revisá el correo no deseado.");
+      } else {
+        if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); setBusy(false); return; }
+        await supabasePedirCodigo(telefono);
+        cambiar("codigo-recupero");
+      }
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
+  };
+  const verificar = async () => {
+    if (!/^\d{6}$/.test(codigo.trim())) { setError("El código tiene 6 números."); return; }
+    setBusy(true); setError("");
+    try {
+      const j = await jugadorApi.login(await supabaseVerificarCodigo(telefono, codigo.trim()));
+      if (modo === "codigo-recupero") { setPassword(""); cambiar("nueva-clave"); setBusy(false); return; }
+      await conPerfil(j);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
   };
   const reenviar = async () => {
     setBusy(true); setError("");
     try {
-      await supabaseResendConfirm(mail);
+      if (esMail) { await supabaseResendConfirm(mail); setAviso("Te mandamos de nuevo el mail para confirmar la cuenta."); }
+      else if (modo === "codigo-recupero") { await supabasePedirCodigo(telefono); setAviso("Te mandamos un código nuevo."); }
+      else { await supabaseReenviarAlta(telefono); setAviso("Te mandamos un código nuevo."); if (modo === "entrar") cambiar("codigo-alta"); }
       setSinConfirmar(false);
-      setAviso("Te mandamos de nuevo el mail para confirmar la cuenta.");
     } catch (e) { setError(cuentaErrorText(e)); }
     setBusy(false);
   };
-  const enviar = modo === "crear" ? crear : modo === "recuperar" ? recuperar : entrar;
+  const guardarClave = async () => {
+    if (password.length < 8) { setError("La contraseña tiene que tener al menos 8 caracteres."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseUpdatePassword(await jugadorApi.token(), password);
+      await conPerfil(jugadorApi.jugador);
+    } catch (e) { setError(cuentaErrorText(e)); setBusy(false); }
+  };
+  const enviar = { crear, recuperar, "codigo-alta": verificar, "codigo-recupero": verificar, "nueva-clave": guardarClave }[modo] || entrar;
   const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
   const boton = (texto, ocupado) => (
     <button type="button" disabled={busy} onClick={enviar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? ocupado : texto}</button>
   );
+  const campoClave = (placeholder, nueva) => (
+    <div className="relative">
+      <input type={ver ? "text" : "password"} autoComplete={nueva ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={placeholder} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
+      <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
+    </div>
+  );
 
+  if (modo === "reclamar") {
+    return <ReclamarPerfil jugadorApi={jugadorApi} onListo={(j) => onEntro(j, password)} />;
+  }
   if (modo === "enviado") {
     return (
       <div className="space-y-3 text-sm" style={F.body}>
         <p className="text-teal-100 font-semibold">¡Ya casi! Revisá tu mail</p>
-        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta. Tocalo y listo: después entrás siempre con tu mail y contraseña.</p>
-        <p className="text-xs text-teal-500">Puede tardar un minuto. Si no llega, revisá el correo no deseado.</p>
+        <p className="text-teal-300">Te mandamos un mail a <span className="text-teal-100 font-semibold break-all">{mail}</span> con un link para confirmar tu cuenta.</p>
         {aviso && <p className="text-lime-400">{aviso}</p>}
         {error && <p className="text-red-400">{error}</p>}
+        <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400">Ya la confirmé: ingresar</button>
+      </div>
+    );
+  }
+  if (modo === "codigo-alta" || modo === "codigo-recupero") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-100 font-semibold">Te mandamos un código</p>
+        <p className="text-teal-300">Escribí el código de 6 números que te llegó al <span className="text-teal-100 font-semibold">{formatArPhone(telefono)}</span>.</p>
+        <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={codigo} onChange={(e) => setCodigo(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="123456" className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
+        {error && <p className="text-red-400">{error}</p>}
+        {aviso && <p className="text-lime-400">{aviso}</p>}
+        {boton("Confirmar", "Confirmando…")}
         <div className="flex justify-between gap-3 text-xs">
-          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Reenviar el mail</button>
-          <button type="button" onClick={() => cambiar("entrar")} className="text-teal-400">Ya la confirmé: ingresar</button>
+          <button type="button" disabled={busy} onClick={reenviar} className="text-teal-400 disabled:opacity-50">Mandarme otro código</button>
+          <button type="button" onClick={() => cambiar(modo === "codigo-alta" ? "crear" : "recuperar")} className="text-teal-400">← Cambiar el número</button>
         </div>
+      </div>
+    );
+  }
+  if (modo === "nueva-clave") {
+    return (
+      <div className="space-y-3 text-sm" style={F.body}>
+        <p className="text-teal-300">Elegí tu contraseña nueva.</p>
+        {campoClave("Contraseña nueva (mínimo 8 caracteres)", true)}
+        {error && <p className="text-red-400">{error}</p>}
+        {boton("Guardar contraseña", "Guardando…")}
       </div>
     );
   }
@@ -6600,23 +6819,91 @@ function CuentaForm({ jugadorApi, onEntro, modoInicial = "entrar" }) {
           ))}
         </div>
       ) : (
-        <p className="text-teal-300">Poné tu mail y te mandamos un link para elegir una contraseña nueva. Si antes entrabas con un código, así te creás la contraseña.</p>
+        <p className="text-teal-300">Poné tu teléfono y te mandamos un código para elegir una contraseña nueva. Si sos organizador, poné tu mail.</p>
       )}
-      <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder="tu@mail.com" className={inputCls} style={adminInput} aria-label="Mail" autoFocus />
-      {modo !== "recuperar" && (
-        <div className="relative">
-          <input type={ver ? "text" : "password"} autoComplete={modo === "crear" ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()} placeholder={modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña"} className={`${inputCls} pr-16`} style={adminInput} aria-label="Contraseña" />
-          <button type="button" onClick={() => setVer((v) => !v)} aria-pressed={ver} className="absolute inset-y-0 right-0 px-3 text-xs text-slate-600">{ver ? "Ocultar" : "Ver"}</button>
-        </div>
-      )}
+      <input
+        type={modo === "crear" ? "tel" : "text"} inputMode={modo === "crear" ? "tel" : undefined} autoComplete={modo === "crear" ? "tel" : "username"}
+        value={usuario} onChange={(e) => setUsuario(e.target.value)} onKeyDown={(e) => e.key === "Enter" && enviar()}
+        placeholder={modo === "crear" ? "Tu teléfono (Ej: 3446 123456)" : conCuentas ? "Teléfono o mail" : "Mail"}
+        className={inputCls} style={adminInput} aria-label={modo === "crear" ? "Teléfono" : "Teléfono o mail"} autoFocus
+      />
+      {modo === "crear" && usuario && !telefono && <p className="text-xs text-amber-400">Con característica, sin el 0 ni el 15. Ej: 3446 123456</p>}
+      {modo !== "recuperar" && campoClave(modo === "crear" ? "Contraseña (mínimo 8 caracteres)" : "Contraseña", modo === "crear")}
+      {modo === "crear" && <p className="text-xs text-teal-500">Te vamos a mandar un código a ese número para confirmar que es tuyo.</p>}
       {error && <p className="text-red-400">{error}</p>}
-      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">Mandarme de nuevo el mail para confirmar</button>}
+      {sinConfirmar && <button type="button" disabled={busy} onClick={reenviar} className="text-xs text-lime-400 underline disabled:opacity-50">{esMail ? "Mandarme de nuevo el mail para confirmar" : "Mandarme el código para confirmar"}</button>}
       {aviso && <p className="text-lime-400">{aviso}</p>}
       {modo === "entrar" && boton("Ingresar", "Ingresando…")}
       {modo === "crear" && boton("Crear mi cuenta", "Creando…")}
-      {modo === "recuperar" && boton("Mandarme el link", "Mandando…")}
+      {modo === "recuperar" && boton(esMail ? "Mandarme el link" : "Mandarme el código", "Mandando…")}
       {modo === "entrar" && <button type="button" onClick={() => cambiar("recuperar")} className="text-xs text-teal-400 hover:text-lime-400">Olvidé mi contraseña</button>}
       {modo === "recuperar" && <button type="button" onClick={() => cambiar("entrar")} className="text-xs text-teal-400 hover:text-lime-400">← Volver a ingresar</button>}
+    </div>
+  );
+}
+
+/* Después de crear la cuenta con teléfono: "¿Sos alguno de estos?" con los perfiles que ya tienen
+   ese número (un organizador lo anotó en un torneo) o "Soy nuevo". Así hereda sus torneos y puntos.
+   Ver completar_cuenta en 20261040_cuenta_por_telefono.sql */
+function ReclamarPerfil({ jugadorApi, onListo }) {
+  const [perfiles, setPerfiles] = useState(null);
+  const [elegido, setElegido] = useState(null); // id del perfil, "nuevo" o null
+  const [form, setForm] = useState({ apellido: "", nombre: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = (await supabaseRpc("mis_perfiles_por_telefono", {}, await jugadorApi.token())) || [];
+        setPerfiles(rows);
+        if (rows.length === 0) setElegido("nuevo");
+      } catch { setPerfiles([]); setElegido("nuevo"); }
+    })();
+  }, [jugadorApi]);
+  const guardar = async () => {
+    if (!elegido) { setError("Elegí quién sos."); return; }
+    if (elegido === "nuevo" && (!form.apellido.trim() || !form.nombre.trim())) { setError("Completá apellido y nombre."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("completar_cuenta", { p_perfil: elegido === "nuevo" ? null : elegido, p_apellido: elegido === "nuevo" ? form.apellido : "", p_nombre: elegido === "nuevo" ? form.nombre : "" }, await jugadorApi.token());
+      await onListo(await jugadorApi.recargarPerfil());
+    } catch { setError("No se pudieron guardar tus datos. Probá de nuevo."); setBusy(false); }
+  };
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  if (perfiles === null) return <p className="text-sm opacity-60" style={F.body}>Cargando…</p>;
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <p className="text-teal-100 font-semibold">¡Listo, tu teléfono quedó confirmado!</p>
+      {perfiles.length > 0 && (
+        <>
+          <p className="text-teal-300">Ya te anotaron en algún torneo con este número. ¿Sos {perfiles.length === 1 ? "vos" : "alguno de estos"}? Así sumás tus torneos y puntos.</p>
+          <div className="space-y-2">
+            {perfiles.map((p) => (
+              <button key={p.id} type="button" onClick={() => setElegido(p.id)} className="w-full text-left px-3 py-2.5 rounded-lg border font-semibold" style={elegido === p.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#e2e8f0" }}>
+                Sí, soy {nombreJugador(p)}
+              </button>
+            ))}
+            <button type="button" onClick={() => setElegido("nuevo")} className="w-full text-left px-3 py-2.5 rounded-lg border" style={elegido === "nuevo" ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>
+              No, soy otra persona
+            </button>
+          </div>
+        </>
+      )}
+      {elegido === "nuevo" && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" htmlFor="rec-apellido">Apellido</label>
+            <input id="rec-apellido" autoComplete="family-name" value={form.apellido} onChange={(e) => setForm({ ...form, apellido: e.target.value })} maxLength={40} className={inputCls} style={adminInput} />
+          </div>
+          <div>
+            <label className="block text-xs text-teal-400 mb-1" htmlFor="rec-nombre">Nombre</label>
+            <input id="rec-nombre" autoComplete="given-name" value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} maxLength={40} className={inputCls} style={adminInput} />
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-teal-500">Tu teléfono solo lo ven los organizadores de tus torneos, los complejos donde reservás y Smash Point. <a href="#privacidad" target="_blank" rel="noopener noreferrer" className="underline text-teal-300">Política de privacidad</a></p>
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" disabled={busy || !elegido} onClick={guardar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Seguir"}</button>
     </div>
   );
 }
@@ -6664,10 +6951,10 @@ function LoginJugadorModal({ jugadorApi, onClose, onDone, conPerfil = true, titu
 }
 
 /* Datos del jugador: nombre, apellido, WhatsApp y (opcional) fecha de nacimiento */
-function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
+function PerfilJugadorForm({ initial, email, submitLabel, onSave, telefonoFijo = null }) {
   const [form, setForm] = useState({
     nombre: initial?.nombre || "", apellido: initial?.apellido || "",
-    telefono: initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
+    telefono: telefonoFijo ? formatArPhone(telefonoFijo) : initial?.telefono ? formatArPhone(initial.telefono) : "", fecha_nacimiento: initial?.fecha_nacimiento || "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -6688,7 +6975,7 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
 
   return (
     <div className="space-y-3 text-sm" style={F.body}>
-      {email && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email}</span>.</p>}
+      {(email || telefonoFijo) && <p className="text-teal-300">Entraste como <span className="text-teal-100">{email || formatArPhone(telefonoFijo)}</span>.</p>}
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nombre">Nombre</label>
@@ -6699,10 +6986,12 @@ function PerfilJugadorForm({ initial, email, submitLabel, onSave }) {
           <input id="jug-apellido" autoComplete="family-name" value={form.apellido} onChange={set("apellido")} maxLength={40} className={inputCls} style={adminInput} />
         </div>
       </div>
-      <div>
-        <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
-        <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
-      </div>
+      {!telefonoFijo && (
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-tel">WhatsApp</label>
+          <input id="jug-tel" type="tel" autoComplete="tel" value={form.telefono} onChange={set("telefono")} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} />
+        </div>
+      )}
       <div>
         <label className="block text-xs text-teal-400 mb-1" htmlFor="jug-nac">Fecha de nacimiento (opcional)</label>
         <input id="jug-nac" type="date" value={form.fecha_nacimiento} onChange={set("fecha_nacimiento")} min="1920-01-02" className={inputCls} style={adminInput} />
@@ -6728,7 +7017,9 @@ function etiquetaDiaCorta(fecha, hoy) {
 /* Reservar en un complejo: día, duración, y los horarios de cada cancha (libres y ocupados) */
 function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReservas }) {
   const hoy = hoyArgentina();
-  const [canchas, setCanchas] = useState(null);
+  const [canchasBase, setCanchas] = useState(null);
+  const [complejo, setComplejo] = useState(null);
+  useEffect(() => { supabaseTable(`complejos?id=eq.${encodeURIComponent(venue.id)}&select=*`).then((r) => setComplejo(r[0] || null)).catch(() => {}); }, [venue.id]);
   const [fecha, setFecha] = useState(inicial?.fecha || hoy);
   const pendienteInicial = useRef(inicial?.desde != null ? inicial : null); // horario del buscador, a abrir apenas carguen los datos
   const [duracion, setDuracion] = useState(null);
@@ -6760,8 +7051,10 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
   }, [venue.id, fecha]);
   useEffect(() => { setOcupado(null); loadOcupado(); }, [loadOcupado]);
 
+  // Cada cancha con el horario online de ese día (las que ese día no reciben pedidos no se muestran)
+  const canchas = canchasBase ? canchasBase.map((c) => canchaDelDia(c, complejo, fecha, true)).filter(Boolean) : null;
   const dias = Array.from({ length: 14 }, (_, i) => sumarDias(hoy, i));
-  const duraciones = DURACIONES.filter((d) => (canchas || []).some((c) => duracionesOfrecidas(c).includes(d)));
+  const duraciones = DURACIONES.filter((d) => (canchasBase || []).some((c) => duracionesOfrecidas(c).includes(d)));
   const ahora = Date.now();
 
   const elegir = (cancha, desde) => {
@@ -6873,7 +7166,7 @@ function ReservarCancha({ venue, inicial = null, jugadorApi, onBack, onMisReserv
             </div>
             <div className="text-teal-300">
               <p>{jugador.perfil.nombre} {jugador.perfil.apellido} · {formatArPhone(jugador.perfil.telefono)}</p>
-              <p className="text-xs text-teal-500">{jugador.email}</p>
+              {jugador.email && <p className="text-xs text-teal-500">{jugador.email}</p>}
             </div>
             <ul className="text-xs text-teal-400 space-y-1 list-disc pl-4">
               <li>El complejo tiene que confirmar tu pedido. Si no lo confirma en 24 h (o antes del turno), vence y el horario se libera.</li>
@@ -7004,7 +7297,7 @@ function MisReservas({ jugadorApi, venues, onBack }) {
     <section className="max-w-3xl mx-auto px-4 sm:px-6 py-6" style={F.body}>
       <button type="button" onClick={onBack} className="text-sm text-teal-400 hover:text-lime-400 mb-4">← Complejos</button>
       <h1 className="text-xl sm:text-2xl uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Mis reservas</h1>
-      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email}</p>
+      <p className="text-sm text-teal-300 mb-5">{jugador.perfil ? `${jugador.perfil.nombre} ${jugador.perfil.apellido}` : jugador.email || formatArPhone(jugador.phone)}</p>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
       {aviso && <p className="text-sm text-lime-400 mb-3">{aviso}</p>}
       {reservas === null ? (
@@ -7030,7 +7323,14 @@ function MisReservas({ jugadorApi, venues, onBack }) {
       </div>
       {editando && (
         <Modal title="Mis datos" onClose={() => setEditando(false)}>
-          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} submitLabel="Guardar" onSave={async (p) => { await jugadorApi.savePerfil(p); setEditando(false); }} />
+          <PerfilJugadorForm initial={jugador.perfil} email={jugador.email} telefonoFijo={jugador.phone} submitLabel="Guardar" onSave={async (p) => {
+            // Cuenta con teléfono: los datos van también a su perfil de jugador (ver completar_cuenta)
+            if (jugador.phone) {
+              await supabaseRpc("completar_cuenta", { p_perfil: null, p_apellido: p.apellido, p_nombre: p.nombre, p_fecha_nacimiento: p.fecha_nacimiento }, await jugadorApi.token());
+              await jugadorApi.recargarPerfil();
+            } else await jugadorApi.savePerfil(p);
+            setEditando(false);
+          }} />
         </Modal>
       )}
     </section>
@@ -7325,12 +7625,16 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />
+      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }}
+        campanita={jugadorApi?.jugador ? <Campanita token={jugadorApi.token} onIr={(d) => {
+          if (d.ir === "mis-reservas") { goTab("canchas"); setMisReservas(true); }
+          else if (d.ir === "torneo-publico" && d.torneo) onOpen(d.torneo);
+        }} /> : null} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
       <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
       {registering && (
-        <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} />
+        <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} jugadorApi={jugadorApi} />
       )}
     </div>
   );
@@ -7590,7 +7894,7 @@ function InfoTournamentDetail({ tournament, onBack }) {
   );
 }
 
-function PublicTournament({ tournament, organizers, onBack }) {
+function PublicTournament({ tournament, organizers, onBack, jugadorApi = null }) {
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
   const usesSchedule = tournamentUsesSchedule(tournament);
   const super8Tournament = tournamentType(tournament) === "super8";
@@ -7616,7 +7920,7 @@ function PublicTournament({ tournament, organizers, onBack }) {
             </div>
           </div>
         )}
-        {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} />}
+        {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} jugadorApi={jugadorApi} />}
         <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
         {tournament.coverImageUrl && (
           <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
@@ -7750,19 +8054,15 @@ function ImageUploadField({ label, value, onChange, accessToken, folder, maxAnch
   };
 
   return (
-    <div>
+    <div className="min-w-0">
       {label && <label className="block text-xs text-teal-400 mb-1" style={F.body}>{label}</label>}
-      <div className="flex flex-wrap gap-2 items-center">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          disabled={uploading}
-          onChange={handleFile}
-          className="text-xs text-teal-300"
-          style={F.body}
-        />
-        {uploading && <span className="text-xs text-teal-400" style={F.body}>Subiendo…</span>}
+      <div className="flex flex-wrap gap-x-3 gap-y-1 items-center">
+        {/* El selector de archivos del navegador va escondido: su texto ("Sin archivos seleccionados") se encimaba */}
+        <input ref={inputRef} type="file" accept="image/*" disabled={uploading} onChange={handleFile} className="hidden" />
+        <button type="button" disabled={uploading} onClick={() => inputRef.current?.click()}
+          className="px-3 py-1.5 rounded-lg border border-lime-400/70 text-lime-400 text-xs font-semibold hover:bg-lime-400/10 disabled:opacity-50" style={F.body}>
+          {uploading ? "Subiendo…" : value ? "Cambiar imagen" : "Subir imagen"}
+        </button>
         {value && !uploading && (
           <button type="button" onClick={() => onChange("")} className="text-xs text-teal-500 hover:text-red-400 underline" style={F.body}>
             Quitar imagen
@@ -7839,7 +8139,7 @@ function NewOrganizerForm({ onCreate }) {
       </button>
       {error && <p className="text-xs text-red-400 mt-2" style={F.body}>{error}</p>}
       {okMsg && <p className="text-xs text-lime-400 mt-2" style={F.body}>{okMsg}</p>}
-      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; después la puede cambiar con "Olvidé mi contraseña" en el login.</p>
+      <p className="text-[11px] text-teal-600 mt-2" style={F.body}>Pasale ese email y esa contraseña al organizador para que inicie sesión; si se la olvida, se la cambiás vos desde "Mail y contraseña".</p>
     </div>
   );
 }
@@ -7854,6 +8154,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [editingAcceso, setEditingAcceso] = useState(false);
 
   const saveProfile = async () => {
     setSaving(true);
@@ -7898,6 +8199,9 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
           <button type="button" onClick={() => setEditingProfile((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
             Nombre y logo
           </button>
+          <button type="button" onClick={() => setEditingAcceso((v) => !v)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>
+            Mail y contraseña
+          </button>
           {!confirmingDelete ? (
             <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
           ) : (
@@ -7912,6 +8216,7 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
         <p className="text-xs text-teal-500 mt-2" style={F.body}>Se borra la cuenta de acceso; sus torneos ya cargados van a quedar en la plataforma pero sin organizador asignado.</p>
       )}
       {deleteError && <p className="text-xs text-red-400 mt-1" style={F.body}>{deleteError}</p>}
+      {editingAcceso && <AccesoOrganizador id={o.id} accessToken={accessToken} onCerrar={() => setEditingAcceso(false)} />}
       {editingProfile && (
         <div className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-teal-900">
           <div>
@@ -7930,6 +8235,72 @@ function OrganizerRow({ o, count, onUpdateOrganizer, onDeleteOrganizer, accessTo
           {saveError && <p className="text-xs text-red-400 w-full" style={F.body}>{saveError}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* Mail de entrada y contraseña de un organizador, desde el panel del creador (los mails de entrada
+   pueden ser inventados, así que el organizador no puede recuperar la clave solo). */
+function AccesoOrganizador({ id, accessToken, onCerrar }) {
+  const [actual, setActual] = useState(null);
+  const [email, setEmail] = useState("");
+  const [clave, setClave] = useState("");
+  const [verClave, setVerClave] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [listo, setListo] = useState("");
+  useEffect(() => {
+    callAdminOrganizers(accessToken, { action: "acceso", id })
+      .then((d) => { setActual(d); setEmail(d.email || ""); })
+      .catch((e) => setError(e.message || "No se pudo leer la cuenta."));
+  }, [id, accessToken]);
+  const cambiaMail = !!actual && !!email.trim() && email.trim().toLowerCase() !== (actual.email || "").toLowerCase();
+  const guardar = async () => {
+    setBusy(true); setError(""); setListo("");
+    try {
+      const d = await callAdminOrganizers(accessToken, { action: "cambiar_acceso", id, email: cambiaMail ? email.trim() : "", password: clave });
+      setActual((a) => ({ ...a, email: d.email }));
+      setEmail(d.email);
+      setListo(clave ? "Listo. Pasale la contraseña nueva al organizador (por WhatsApp, por ejemplo)." : "Listo. Desde ahora entra con ese mail.");
+      setClave("");
+    } catch (e) {
+      setError(e.message || "No se pudo cambiar.");
+    }
+    setBusy(false);
+  };
+  const inputStyle = { backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" };
+  return (
+    <div className="mt-3 pt-3 border-t border-teal-900 space-y-3" style={F.body}>
+      {actual === null && !error ? <p className="text-sm opacity-60">Cargando…</p> : actual && (
+        <>
+          {actual.ultimoIngreso && <p className="text-xs text-teal-500">Último ingreso: {fechaCorta(fechaArgentina(actual.ultimoIngreso))}</p>}
+          <p className="text-xs text-teal-500">
+            Mail de avisos: {!actual.mailAvisos ? "no lo cargó" : <><span className="text-slate-200">{actual.mailAvisos.email}</span>{" · "}{!actual.mailAvisos.confirmado ? <span className="text-amber-400">sin confirmar</span> : actual.mailAvisos.pausado ? "en pausa" : <span className="text-lime-400">confirmado</span>}</>}
+          </p>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="min-w-[240px] flex-1">
+              <label className="block text-xs text-teal-400 mb-1">Mail para entrar</label>
+              <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setListo(""); }} className="w-full px-3 py-2 rounded border outline-none focus:border-lime-400" style={inputStyle} autoComplete="off" />
+            </div>
+            <div className="min-w-[200px] flex-1">
+              <label className="block text-xs text-teal-400 mb-1">Contraseña nueva (vacío = no se cambia)</label>
+              <div className="flex gap-2 items-center">
+                <input type={verClave ? "text" : "password"} value={clave} onChange={(e) => { setClave(e.target.value); setListo(""); }} className="w-full px-3 py-2 rounded border outline-none focus:border-lime-400" style={inputStyle} autoComplete="new-password" placeholder="Mínimo 6 caracteres" />
+                <button type="button" onClick={() => setVerClave((v) => !v)} className="text-xs text-teal-400 hover:text-lime-400 whitespace-nowrap">{verClave ? "Ocultar" : "Ver"}</button>
+              </div>
+            </div>
+          </div>
+          {cambiaMail && <p className="text-xs text-amber-400">El organizador va a tener que entrar con el mail nuevo.</p>}
+          <div className="flex items-center gap-3">
+            <button type="button" disabled={busy || (!cambiaMail && !clave)} onClick={guardar} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>
+              {busy ? "Guardando…" : "Guardar"}
+            </button>
+            <button type="button" onClick={onCerrar} className="text-sm text-teal-400">Cerrar</button>
+          </div>
+        </>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {listo && <p className="text-xs text-lime-400">{listo}</p>}
     </div>
   );
 }
@@ -7973,35 +8344,41 @@ function AdRow({ ad, onUpdate, onDelete, accessToken, cliente, clics, oculta }) 
   }
 
   return (
-    <div className="border border-teal-800 rounded-lg p-3 flex gap-3 items-center">
-      {ad.imageUrl ? (
-        <img src={ad.imageUrl} alt={ad.name} className="w-24 h-14 object-cover rounded border border-teal-800" />
-      ) : (
-        <div className="w-24 h-14 rounded border border-teal-800 flex items-center justify-center text-[10px] text-teal-500">Sin imagen</div>
-      )}
-      <div className="flex-1 min-w-0">
-        <p className="font-medium truncate" style={F.body}>{ad.name}</p>
-        <p className="text-xs text-teal-500 truncate" style={F.body}>{ad.linkUrl || "Sin link de destino"}</p>
-        <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px]" style={F.body}>
-          {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente: cargalo en Caja → Clientes para cobrarle</span>}
-          {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
-          <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
-          {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+    // En el celular: imagen y nombre arriba, los datos a todo el ancho y los botones en su propia fila;
+    // en la compu los botones vuelven al costado
+    <div className="border border-teal-800 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-3" style={F.body}>
+      <div className="flex gap-3 flex-1 min-w-0">
+        {ad.imageUrl ? (
+          <img src={ad.imageUrl} alt={ad.name} className="w-24 h-14 shrink-0 object-cover rounded border border-teal-800" />
+        ) : (
+          <div className="w-24 h-14 shrink-0 rounded border border-teal-800 flex items-center justify-center text-[10px] text-teal-500">Sin imagen</div>
+        )}
+        <div className="flex-1 min-w-0">
+          <p className="font-medium break-words leading-snug">{ad.name}</p>
+          <p className="text-xs text-teal-500 truncate">{ad.linkUrl || "Sin link de destino"}</p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px]">
+            {cliente ? <EstadoPlanBadge cliente={cliente} hoy={hoyArgentina()} /> : <span className="text-slate-400">Sin cliente (cargalo en Caja → Clientes)</span>}
+            {(ad.desde || ad.hasta) && <span className="text-teal-400">Vigencia: {ad.desde ? fechaCorta(ad.desde) : "ya"} → {ad.hasta ? fechaCorta(ad.hasta) : "sin fin"}</span>}
+            <span className="text-teal-300">{clics ? `${clics.desde} clic${Number(clics.desde) === 1 ? "" : "s"} este mes · ${clics.total} en total` : "0 clics"}</span>
+            {oculta && <span className="px-2 py-0.5 rounded-full border border-red-400/60 text-red-300">No se muestra: {oculta}</span>}
+          </div>
         </div>
       </div>
-      <label className="flex items-center gap-1 text-xs text-teal-300" style={F.body}>
-        <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} />
-        Activo
-      </label>
-      <button type="button" onClick={() => setEditing(true)} className="text-sm text-teal-300 hover:text-lime-400" style={F.body}>Editar</button>
-      {!confirmingDelete ? (
-        <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400" style={F.body}>Eliminar</button>
-      ) : (
-        <span className="text-sm whitespace-nowrap">
-          <button type="button" onClick={() => onDelete(ad.id)} className="text-red-400 font-semibold mr-2" style={F.body}>Confirmar</button>
-          <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400" style={F.body}>Cancelar</button>
-        </span>
-      )}
+      <div className="flex items-center gap-4 pt-2 border-t border-teal-900 sm:pt-0 sm:border-t-0 sm:shrink-0">
+        <label className="flex items-center gap-1.5 text-sm text-teal-300">
+          <input type="checkbox" checked={ad.active} onChange={(e) => onUpdate({ ...ad, active: e.target.checked })} className="w-4 h-4" />
+          Activo
+        </label>
+        <button type="button" onClick={() => setEditing(true)} className="text-sm text-teal-300 hover:text-lime-400 ml-auto sm:ml-0">Editar</button>
+        {!confirmingDelete ? (
+          <button type="button" onClick={() => setConfirmingDelete(true)} className="text-sm text-red-400">Eliminar</button>
+        ) : (
+          <span className="text-sm whitespace-nowrap">
+            <button type="button" onClick={() => onDelete(ad.id)} className="text-red-400 font-semibold mr-2">Confirmar</button>
+            <button type="button" onClick={() => setConfirmingDelete(false)} className="text-teal-400">Cancelar</button>
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -9326,6 +9703,7 @@ const PANEL_ICONOS = {
   respaldo: "M12 3v12M7 10l5 5 5-5M4 17v3h16v-3",
   funciones: "M4 8h10M18 8h2M4 16h2M10 16h10M16 6v4M8 14v4",
   menu: "M4 7h16M4 12h16M4 17h16",
+  campana: "M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 003.4 0",
   cerrar: "M6 6l12 12M18 6L6 18",
 };
 function PanelIcono({ nombre, className = "w-5 h-5" }) {
@@ -9338,7 +9716,7 @@ function PanelIcono({ nombre, className = "w-5 h-5" }) {
 
 /* Armado del panel: en la PC, menú fijo a la izquierda; en el celular, una barra arriba con el
    botón ☰ que abre el mismo menú encima. grupos: [{ titulo, items: [[clave, etiqueta, ícono, aviso]] }] */
-function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, children }) {
+function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onLogout, onMiCuenta, titulo, anchoCompleto = false, campanita = null, children }) {
   const [abierto, setAbierto] = useState(false);
   useEffect(() => {
     if (!abierto) return;
@@ -9405,6 +9783,7 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
         </button>
         <p className="flex-1 min-w-0 text-sm font-semibold truncate" style={F.body}>{nombre}</p>
         {grupos.flatMap((g) => g.items).some(([, , , aviso]) => aviso > 0) && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} aria-label="Hay avisos" />}
+        {campanita}
       </div>
       {abierto && (
         <div className="lg:hidden fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Menú">
@@ -9418,9 +9797,318 @@ function PanelLayout({ nombre, logoUrl, subtitulo, grupos, activa, onElegir, onL
         </div>
       )}
       <main className={`px-4 sm:px-6 lg:px-10 py-6 lg:py-8 ${anchoCompleto ? "" : "max-w-5xl"}`}>
+        {campanita && <div className="hidden lg:flex justify-end -mt-4 mb-2">{campanita}</div>}
         {titulo && <h1 className="text-xl lg:text-2xl mb-6" style={F.display}>{titulo.toUpperCase()}</h1>}
         {children}
       </main>
+    </div>
+  );
+}
+
+/* La campanita: los avisos de la cuenta (ver 20261042_avisos.sql). Se actualiza cada minuto y al
+   volver a la pestaña. Al tocar un aviso se marca leído y lleva a donde corresponde (onIr). */
+/* "Recibir avisos en este celular": suscribe este navegador a las notificaciones push (los avisos de la
+   campanita también llegan como notificación). En iPhone solo anda con la app agregada a la pantalla de inicio. */
+function base64AUint8(b64) {
+  const t = (b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+}
+function AvisosEnEsteAparato({ token }) {
+  const soporta = !!VAPID_PUBLICA && typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const esIphone = typeof navigator !== "undefined" && /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const instalada = typeof window !== "undefined" && (window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true);
+  const [estado, setEstado] = useState(soporta ? "cargando" : "no"); // cargando | apagado | activo | bloqueado | no
+  const [ocupado, setOcupado] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!soporta) return;
+    if (Notification.permission === "denied") { setEstado("bloqueado"); return; }
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager.getSubscription())
+      .then((sub) => setEstado(sub && Notification.permission === "granted" ? "activo" : "apagado"))
+      .catch(() => setEstado("apagado"));
+  }, [soporta]);
+  const activar = async () => {
+    setOcupado(true); setError("");
+    try {
+      const permiso = await Notification.requestPermission();
+      if (permiso !== "granted") { setEstado(permiso === "denied" ? "bloqueado" : "apagado"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64AUint8(VAPID_PUBLICA) }));
+      const d = sub.toJSON();
+      await supabaseRpc("guardar_suscripcion", { p_endpoint: d.endpoint, p_p256dh: d.keys?.p256dh, p_auth: d.keys?.auth, p_agente: navigator.userAgent }, await token());
+      setEstado("activo");
+    } catch (e) {
+      setError("No se pudieron activar los avisos. Probá de nuevo.");
+      console.error(e);
+    } finally { setOcupado(false); }
+  };
+  const desactivar = async () => {
+    setOcupado(true); setError("");
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await supabaseRpc("quitar_suscripcion", { p_endpoint: sub.endpoint }, await token()).catch(() => {});
+        await sub.unsubscribe();
+      }
+      setEstado("apagado");
+    } finally { setOcupado(false); }
+  };
+  let contenido;
+  if (!soporta) {
+    if (!VAPID_PUBLICA) return null;
+    contenido = esIphone && !instalada
+      ? <p className="text-xs text-teal-400">Para recibir avisos en el iPhone, abrí Smash Point en Safari, tocá <b>Compartir</b> › <b>Agregar a inicio</b> y entrá desde ese ícono.</p>
+      : <p className="text-xs text-teal-500">Este navegador no permite recibir avisos.</p>;
+  } else if (estado === "cargando") return null;
+  else if (estado === "activo") {
+    contenido = (
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-lime-400">Avisos activados en este aparato.</p>
+        <button type="button" disabled={ocupado} onClick={desactivar} className="text-xs text-teal-400 hover:text-red-400 disabled:opacity-50">Desactivar</button>
+      </div>
+    );
+  } else if (estado === "bloqueado") {
+    contenido = <p className="text-xs text-teal-400">Bloqueaste los avisos de Smash Point. Para recibirlos, permitilos en la configuración del navegador (el candadito al lado de la dirección).</p>;
+  } else {
+    contenido = (
+      <button type="button" disabled={ocupado} onClick={activar} className="w-full rounded-lg py-2 text-sm font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#0b1c24" }}>
+        {ocupado ? "Activando…" : "Recibir avisos en este celular"}
+      </button>
+    );
+  }
+  return (
+    <div className="px-3 py-2.5 border-t border-teal-900">
+      {contenido}
+      {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+    </div>
+  );
+}
+
+/* "Avisos por mail" (al pie de la campanita del panel): un mail aparte del de entrar, que se confirma
+   con un link; si un pedido o cancelación de turno queda 15 minutos sin leer, llega por mail
+   (ver supabase/migrations/20261044_mail_avisos.sql). */
+const ERRORES_MAIL_AVISOS = {
+  mail_invalido: "Ese mail no es válido.",
+  esperar: "Esperá un minuto antes de pedir otro mail.",
+  mail_no_configurado: "Los avisos por mail todavía no están disponibles.",
+};
+function MailAvisos({ token }) {
+  const [datos, setDatos] = useState(undefined); // undefined = cargando, null = sin mail
+  const [abierto, setAbierto] = useState(false);
+  const [editando, setEditando] = useState(false);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [enviado, setEnviado] = useState(false);
+  const cargar = useCallback(async () => {
+    try { setDatos((await supabaseRpc("mi_mail_avisos", {}, await token())) || null); }
+    catch (e) { setDatos(e.pgCode === "PGRST202" ? "no" : null); }
+  }, [token]);
+  useEffect(() => { cargar(); }, [cargar]);
+  if (datos === undefined || datos === "no") return null;
+  const accion = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); await cargar(); }
+    catch (e) { setError(ERRORES_MAIL_AVISOS[e.code] || "No se pudo completar. Probá de nuevo."); }
+    setBusy(false);
+  };
+  const pedir = (mail) => accion(async () => {
+    await supabaseRpc("pedir_mail_avisos", { p_email: mail.trim() }, await token());
+    setEditando(false); setEnviado(true);
+  });
+  const resumen = !datos ? "Sin cargar" : !datos.confirmado ? "Falta confirmar" : datos.pausado ? "En pausa" : "Activados";
+  const inputCls = "w-full px-2 py-1.5 rounded border text-sm text-slate-900 outline-none focus:border-lime-400";
+  return (
+    <div className="px-3 py-2.5 border-t border-teal-900 text-xs">
+      <button type="button" onClick={() => setAbierto((v) => !v)} className="w-full flex items-center justify-between text-teal-300 hover:text-lime-400">
+        <span>Avisos por mail</span>
+        <span className={datos?.confirmado && !datos.pausado ? "text-lime-400" : "text-teal-500"}>{resumen} {abierto ? "▴" : "▾"}</span>
+      </button>
+      {abierto && (
+        <div className="mt-2 space-y-2">
+          <p className="text-teal-500">Si un pedido o una cancelación de turno queda 15 minutos sin leer, te llega por mail.</p>
+          {(!datos || editando) ? (
+            <form onSubmit={(e) => { e.preventDefault(); if (email.trim()) pedir(email); }} className="space-y-2">
+              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="tu mail real" className={inputCls} style={{ backgroundColor: "#eef2f2" }} />
+              <div className="flex items-center gap-3">
+                <button type="submit" disabled={busy || !email.trim()} className="px-3 py-1.5 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#0b1c24" }}>{busy ? "Enviando…" : "Mandarme el mail de confirmación"}</button>
+                {editando && <button type="button" onClick={() => setEditando(false)} className="text-teal-400">Cancelar</button>}
+              </div>
+            </form>
+          ) : (
+            <>
+              <p className="text-slate-200 break-all">{datos.email}</p>
+              {!datos.confirmado && <p className="text-amber-400">{enviado ? "Te mandamos un mail: tocá el botón \"Confirmar mail\" (mirá también en Spam)." : "Todavía no lo confirmaste: buscá el mail de Smash Point (mirá también en Spam)."}</p>}
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {!datos.confirmado && <button type="button" disabled={busy} onClick={() => pedir(datos.email)} className="text-teal-300 hover:text-lime-400 disabled:opacity-50">Reenviar</button>}
+                {datos.confirmado && <button type="button" disabled={busy} onClick={() => accion(async () => supabaseRpc("pausar_mail_avisos", { p_pausado: !datos.pausado }, await token()))} className="text-teal-300 hover:text-lime-400 disabled:opacity-50">{datos.pausado ? "Reanudar" : "Pausar"}</button>}
+                <button type="button" onClick={() => { setEmail(datos.email); setEditando(true); }} className="text-teal-300 hover:text-lime-400">Cambiar mail</button>
+                <button type="button" disabled={busy} onClick={() => accion(async () => { await supabaseRpc("quitar_mail_avisos", {}, await token()); setEnviado(false); })} className="text-teal-400 hover:text-red-400 disabled:opacity-50">Quitar</button>
+              </div>
+            </>
+          )}
+          {error && <p className="text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Link del mail de confirmación (?confirmar_mail=<token>): confirma el mail de avisos y lo avisa arriba. */
+function ConfirmarMailAvisos() {
+  const [estado, setEstado] = useState(null); // null | {ok, texto}
+  useEffect(() => {
+    let token = null;
+    try { token = new URLSearchParams(window.location.search).get("confirmar_mail"); } catch {}
+    if (!token) return;
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.delete("confirmar_mail");
+      window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+    } catch {}
+    supabaseRpc("confirmar_mail_avisos", { p_token: token })
+      .then((email) => setEstado({ ok: true, texto: `Listo: los avisos te van a llegar a ${email}.` }))
+      .catch(() => setEstado({ ok: false, texto: "El link venció o ya se usó. Pedí otro desde la campanita › Avisos por mail." }));
+  }, []);
+  if (!estado) return null;
+  return (
+    <div role="status" className="fixed inset-x-0 top-0 z-[70] px-4 pt-4">
+      <div className="max-w-md mx-auto rounded-xl p-3 flex items-start gap-3 text-sm" style={{ ...F.body, ...neonStyle(estado.ok ? BRAND.lime : "#fb923c"), backgroundColor: "#1b2027", color: estado.ok ? "#ecfccb" : "#fed7aa" }}>
+        <span className="flex-1">{estado.texto}</span>
+        <button type="button" onClick={() => setEstado(null)} className="text-teal-300 shrink-0" aria-label="Cerrar aviso">✕</button>
+      </div>
+    </div>
+  );
+}
+
+function Campanita({ token, onIr, conMail = false }) {
+  const [avisos, setAvisos] = useState(null);
+  const [abierta, setAbierta] = useState(false);
+  const caja = useRef(null);
+  const cargar = useCallback(async () => {
+    try {
+      const t = await token();
+      if (!t) return;
+      setAvisos((await supabaseTable("notificaciones?select=id,tipo,titulo,texto,destino,creada_at,leida_at&order=creada_at.desc&limit=30", { accessToken: t })) || []);
+    } catch { /* sin conexión o sin la tabla todavía: se reintenta en el próximo minuto */ }
+  }, [token]);
+  useEffect(() => {
+    cargar();
+    const id = setInterval(() => { if (document.visibilityState === "visible") cargar(); }, 60000);
+    const alVolver = () => { if (document.visibilityState === "visible") cargar(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", alVolver); };
+  }, [cargar]);
+  useEffect(() => {
+    if (!abierta) return;
+    const fuera = (e) => { if (caja.current && !caja.current.contains(e.target)) setAbierta(false); };
+    document.addEventListener("mousedown", fuera);
+    return () => document.removeEventListener("mousedown", fuera);
+  }, [abierta]);
+  const [pedido, setPedido] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("aviso"); } catch { return null; }
+  });
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const alMensaje = (e) => { if (e.data?.tipo === "aviso" && e.data.id) { setPedido(e.data.id); cargar(); } };
+    navigator.serviceWorker.addEventListener("message", alMensaje);
+    return () => navigator.serviceWorker.removeEventListener("message", alMensaje);
+  }, [cargar]);
+  useEffect(() => {
+    if (!pedido || !avisos) return;
+    const a = avisos.find((x) => x.id === pedido);
+    setPedido(null);
+    try {
+      const u = new URL(window.location.href);
+      if (u.searchParams.has("aviso")) { u.searchParams.delete("aviso"); window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash); }
+    } catch {}
+    if (!a) return;
+    if (!a.leida_at) marcar(a.id);
+    onIr?.(a.destino || {});
+  }, [pedido, avisos]); // eslint-disable-line react-hooks/exhaustive-deps
+  const sinLeer = (avisos || []).filter((a) => !a.leida_at).length;
+  const marcar = async (filtro) => {
+    const ahora = new Date().toISOString();
+    setAvisos((l) => (l || []).map((a) => (!a.leida_at && (filtro === "todos" || a.id === filtro) ? { ...a, leida_at: ahora } : a)));
+    try {
+      await supabaseTable(`notificaciones?leida_at=is.null${filtro === "todos" ? "" : `&id=eq.${filtro}`}`, { method: "PATCH", body: { leida_at: ahora }, accessToken: await token(), prefer: "return=minimal" });
+    } catch {}
+  };
+  const cuando = (iso) => {
+    const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (min < 1) return "recién";
+    if (min < 60) return `hace ${min} min`;
+    if (min < 1440) return `hace ${Math.round(min / 60)} h`;
+    return fechaCorta(fechaArgentina(iso));
+  };
+  if (avisos === null) return null;
+  return (
+    <div ref={caja} className="relative" style={F.body}>
+      <button type="button" onClick={() => setAbierta((v) => !v)} className="relative p-2 rounded-lg text-slate-200 hover:bg-white/5" aria-label={sinLeer ? `Avisos: ${sinLeer} sin leer` : "Avisos"} aria-expanded={abierta}>
+        <PanelIcono nombre="campana" className="w-6 h-6" />
+        {sinLeer > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full text-[10px] font-bold flex items-center justify-center" style={{ backgroundColor: "#ef4444", color: "#fff" }}>{sinLeer > 9 ? "9+" : sinLeer}</span>}
+      </button>
+      {abierta && (
+        <div className="absolute right-0 mt-2 w-80 max-w-[90vw] rounded-xl border border-teal-800 shadow-xl z-50 overflow-hidden" style={{ backgroundColor: "#071319", colorScheme: "dark" }}>
+          <div className="flex items-center justify-between px-3 py-2 border-b border-teal-900">
+            <p className="text-sm font-semibold text-slate-100">Avisos</p>
+            {sinLeer > 0 && <button type="button" onClick={() => marcar("todos")} className="text-xs text-teal-400 hover:text-lime-400">Marcar todo como leído</button>}
+          </div>
+          <div className="max-h-96 overflow-y-auto">
+            {avisos.length === 0 ? <p className="px-3 py-6 text-sm text-center text-teal-500">No tenés avisos.</p> : avisos.map((a) => (
+              <button key={a.id} type="button" onClick={() => { if (!a.leida_at) marcar(a.id); setAbierta(false); onIr?.(a.destino || {}); }}
+                className="w-full text-left px-3 py-2.5 border-b border-teal-900/60 hover:bg-white/5 flex gap-2">
+                <span className="mt-1.5 w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: a.leida_at ? "transparent" : BRAND.lime }} />
+                <span className="min-w-0">
+                  <span className={`block text-sm ${a.leida_at ? "text-slate-300" : "text-slate-100 font-semibold"}`}>{a.titulo}</span>
+                  {a.texto && <span className="block text-xs text-teal-400">{a.texto}</span>}
+                  <span className="block text-[11px] text-teal-600 mt-0.5">{cuando(a.creada_at)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          <AvisosEnEsteAparato token={token} />
+          {conMail && AVISOS_POR_MAIL && <MailAvisos token={token} />}
+        </div>
+      )}
+      <InstalarEnIphone />
+    </div>
+  );
+}
+
+/* Cartel abajo para quien tiene cuenta y entra desde el navegador del iPhone: ahí no llegan los
+   avisos push hasta agregar Smash Point a la pantalla de inicio. "Ahora no" lo esconde 14 días. */
+const INSTALAR_IPHONE_KEY = "smashpoint:instalar-iphone-hasta";
+function InstalarEnIphone() {
+  const [ver, setVer] = useState(() => {
+    if (!VAPID_PUBLICA || typeof window === "undefined") return false;
+    const esIphone = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const instalada = window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+    if (!esIphone || instalada) return false;
+    try { return Date.now() > Number(localStorage.getItem(INSTALAR_IPHONE_KEY) || 0); } catch { return true; }
+  });
+  if (!ver) return null;
+  const cerrar = () => {
+    try { localStorage.setItem(INSTALAR_IPHONE_KEY, String(Date.now() + 14 * 86400000)); } catch {}
+    setVer(false);
+  };
+  return (
+    <div role="dialog" aria-label="Instalá Smash Point" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
+      <div className="max-w-md mx-auto rounded-xl p-3 text-sm" style={{ ...neonStyle(BRAND.lime), backgroundColor: "#1b2027", color: "#ecfccb" }}>
+        <div className="flex items-start gap-3">
+          <img src="/icono-192.png" alt="" className="w-10 h-10 rounded-lg shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold">Instalá Smash Point</p>
+            <p className="text-xs text-teal-300 mt-0.5">Para recibir los avisos en el iPhone: tocá <b>Compartir</b> <span aria-hidden="true">(el cuadrado con la flecha)</span> › <b>Agregar a inicio</b> y entrá desde ese ícono.</p>
+          </div>
+          <button type="button" onClick={cerrar} className="text-teal-300 shrink-0" aria-label="Cerrar">✕</button>
+        </div>
+        <div className="text-right mt-2">
+          <button type="button" onClick={cerrar} className="text-xs text-teal-400 hover:text-lime-400">Ahora no</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -9717,6 +10405,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   ].filter((g) => g.items.length > 0);
   const tituloSeccion = grupos.flatMap((g) => g.items).find(([k]) => k === seccion)?.[1] || "Panel";
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Tu complejo";
+  const tokenPanel = useCallback(async () => organizer.accessToken, [organizer.accessToken]);
 
   return (
     <PanelLayout
@@ -9730,6 +10419,10 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       onMiCuenta={onMiCuenta}
       titulo={torneoAbierto ? null : tituloSeccion}
       anchoCompleto={!!torneoAbierto || seccion === "mostrador"}
+      campanita={<Campanita token={tokenPanel} conMail onIr={(d) => {
+        if (d.ir === "agenda" && verReservas) { if (torneoAbierto) onCerrarTorneo(); setSeccion("reservas"); }
+        else if (d.ir === "torneo" && d.torneo) onOpen(d.torneo, d.vista);
+      }} />}
     >
       <PlanAviso filas={filasAviso} colaborador={colaborador} />
       {torneoAbierto ? torneoAbierto : seccion === "inicio" && verInicio ? (
@@ -9750,13 +10443,13 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "cajadia" && verCajaDia ? (
         <CajaDelDia complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} conVentas={verConsumos ? complejosCantina.map((c) => c.id) : []} />
       ) : seccion === "mostrador" && verConsumos ? (
-        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} />
+        <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} tournaments={verTorneos ? tournaments : []} />
       ) : seccion === "productos" && verConsumos ? (
         <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "consumos" && verConsumos ? (
         <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "caja" && verCaja ? (
-        <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />
+        <CajaLibro organizer={organizer} complejos={complejos} tournaments={tournaments} venues={venues} />
       ) : seccion === "perfil" && !colaborador ? (
         <div className="grid gap-6 lg:grid-cols-2 items-start" style={F.body}>
           <div className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -9856,6 +10549,7 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [view, setView] = useState(verAgenda ? "agenda" : "canchas"); // agenda | fijos | canchas
   const [canchas, setCanchas] = useState(null);
+  const [complejo, setComplejo] = useState(null); // { id, horario, horario_online }
   const [error, setError] = useState("");
   const [fecha, setFecha] = useState(hoyArgentina());
   // Sube con cada cambio, para que la agenda y los pedidos pendientes se vuelvan a cargar juntos
@@ -9865,7 +10559,11 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
 
   const loadCanchas = useCallback(async () => {
     try {
-      setCanchas(await supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }));
+      const [cs, [cx]] = await Promise.all([
+        supabaseTable(`canchas?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,created_at.asc`, { accessToken }),
+        supabaseTable(`complejos?id=eq.${encodeURIComponent(complejoId)}&select=*`, { accessToken }),
+      ]);
+      setCanchas(cs); setComplejo(cx || null);
       setError("");
     } catch { setError("No se pudieron cargar las canchas. Revisá la conexión."); }
   }, [complejoId, accessToken]);
@@ -9899,12 +10597,13 @@ function ReservasPanel({ complejos, venues, accessToken, rol = "dueno", permisos
       ) : (view === "canchas" && verCanchas) || activas.length === 0 ? (
         <>
           {view === "agenda" && <p className="text-sm text-teal-300 mb-4">Cargá tus canchas con su horario y sus precios para armar la agenda.</p>}
-          <CanchasConfig complejoId={complejoId} canchas={canchas} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
+          {complejo && <HorariosComplejo complejo={complejo} accessToken={accessToken} editable={dueno} onGuardado={loadCanchas} />}
+          <CanchasConfig complejoId={complejoId} canchas={canchas} complejo={complejo} accessToken={accessToken} onChanged={loadCanchas} puedeBorrar={dueno} />
         </>
       ) : (
         <>
           <PedidosPendientes complejoId={complejoId} canchas={canchas} venueName={nombre(complejoId)} accessToken={accessToken} version={version} onChanged={changed} onVer={(f) => setFecha(f)} />
-          <AgendaReservas complejoId={complejoId} canchas={activas} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
+          <AgendaReservas complejoId={complejoId} canchas={activas} complejo={complejo} venueName={nombre(complejoId)} accessToken={accessToken} fecha={fecha} setFecha={setFecha} version={version} onChanged={changed} rol={rol} verCuentas={!!permisos.consumos} />
         </>
       )}
     </div>
@@ -10043,11 +10742,14 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
     "tu perfil",
   ].filter(Boolean);
   const [lista, setLista] = useState(null);
-  const [form, setForm] = useState({ email: "", nombre: "" });
+  // Los empleados se cargan por teléfono (ver 20261041_telefonos_empleados.sql); los de antes, por
+  // mail, siguen funcionando
+  const [form, setForm] = useState({ telefono: "", nombre: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [quitando, setQuitando] = useState(null);
   const base = `colaboradores?complejo_id=eq.${encodeURIComponent(complejoId)}`;
+  const uno = (c) => `${base}&id=eq.${c.id}`;
 
   const load = useCallback(async () => {
     try { setLista(await supabaseTable(`${base}&order=created_at.asc`, { accessToken })); setError(""); }
@@ -10056,20 +10758,20 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
   useEffect(() => { load(); }, [load]);
 
   const agregar = async () => {
-    const email = form.email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError("Revisá el mail."); return; }
+    const telefono = normalizeArPhone(form.telefono);
+    if (!telefono) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15. Ej: 3446 123456"); return; }
     setBusy(true); setError("");
     try {
-      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, email, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
-      setForm({ email: "", nombre: "" });
+      await supabaseTable("colaboradores", { method: "POST", body: { complejo_id: complejoId, telefono, nombre: form.nombre.trim() || null }, accessToken, prefer: "return=minimal" });
+      setForm({ telefono: "", nombre: "" });
       load();
-    } catch (e) { setError(e.pgCode === "23505" ? "Ese mail ya está en la lista." : reservaErrorText(e)); }
+    } catch (e) { setError(e.pgCode === "23505" ? "Ese teléfono ya está en la lista." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const quitar = async (email) => {
+  const quitar = async (c) => {
     setBusy(true); setError("");
     try {
-      await supabaseTable(`${base}&email=eq.${encodeURIComponent(email)}`, { method: "DELETE", accessToken, prefer: "return=minimal" });
+      await supabaseTable(uno(c), { method: "DELETE", accessToken, prefer: "return=minimal" });
       setQuitando(null);
       load();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -10077,22 +10779,22 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
   };
   const entrada = `${window.location.origin}${window.location.pathname}#complejo`;
   const cambiarPermiso = async (c, campo, valor) => {
-    setLista((l) => l.map((x) => (x.email === c.email ? { ...x, [campo]: valor } : x)));
+    setLista((l) => l.map((x) => (x.id === c.id ? { ...x, [campo]: valor } : x)));
     try {
-      await supabaseTable(`${base}&email=eq.${encodeURIComponent(c.email)}`, { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
+      await supabaseTable(uno(c), { method: "PATCH", body: { [campo]: valor }, accessToken, prefer: "return=minimal" });
     } catch (e) { setError(reservaErrorText(e)); load(); }
   };
 
   return (
     <div className="space-y-4 text-sm">
       <p className="text-teal-300">
-        Tus empleados se crean una cuenta (o usan la que ya tienen) con el mail que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
+        Tus empleados se crean una cuenta (o usan la que ya tienen) con el teléfono que cargues acá, desde "Ingresar" arriba a la derecha del sitio (o directo en <span className="text-teal-100 break-all">{entrada}</span>), y en Mi cuenta les aparece el panel. Con esa misma cuenta pueden reservar turnos en cualquier complejo.
         A cada uno le elegís qué puede hacer. Siempre quedan para vos: {tuyo.slice(0, -1).join(", ")} y {tuyo[tuyo.length - 1]}.
       </p>
       <div className="border border-teal-800 rounded-lg p-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
         <div>
-          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-email">Mail</label>
-          <input id="colab-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="empleado@mail.com" className="w-full px-3 py-2 rounded border" style={adminInput} />
+          <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-tel">Teléfono</label>
+          <input id="colab-tel" type="tel" inputMode="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} onKeyDown={(e) => e.key === "Enter" && agregar()} placeholder="Ej: 3446 123456" className="w-full px-3 py-2 rounded border" style={adminInput} />
         </div>
         <div>
           <label className="block text-xs text-teal-400 mb-1" htmlFor="colab-nombre">Nombre (opcional)</label>
@@ -10108,16 +10810,16 @@ function ColaboradoresConfig({ complejoId, modulos = {}, accessToken }) {
       ) : (
         <ul className="space-y-2">
           {lista.map((c) => (
-            <li key={c.email} className="border border-teal-800 rounded-lg p-3">
+            <li key={c.id} className="border border-teal-800 rounded-lg p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex-1 min-w-[12rem]">
-                  <p className="text-teal-100 font-semibold">{c.nombre || c.email}</p>
-                  {c.nombre && <p className="text-teal-400 break-all">{c.email}</p>}
+                  <p className="text-teal-100 font-semibold">{c.nombre || (c.telefono ? formatArPhone(c.telefono) : c.email)}</p>
+                  {c.nombre && <p className="text-teal-400 break-all">{c.telefono ? formatArPhone(c.telefono) : c.email}</p>}
                 </div>
-                {quitando === c.email ? (
-                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c.email)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
+                {quitando === c.id ? (
+                  <span className="text-red-300">¿Quitarlo? <button type="button" disabled={busy} onClick={() => quitar(c)} className="font-semibold text-red-400 ml-1">Sí, quitar</button> <button type="button" onClick={() => setQuitando(null)} className="text-teal-400 ml-2">No</button></span>
                 ) : (
-                  <button type="button" onClick={() => setQuitando(c.email)} className="text-red-400">Quitar</button>
+                  <button type="button" onClick={() => setQuitando(c.id)} className="text-red-400">Quitar</button>
                 )}
               </div>
               {c.p_agenda !== undefined && (
@@ -10166,7 +10868,7 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
     return (
       <div className="px-6 py-8 max-w-md mx-auto" style={F.body}>
         <h1 className="text-xl mb-4" style={F.display}>MI CUENTA</h1>
-        <p className="text-sm text-teal-300 mb-4">Ingresá con tu mail y contraseña. Si trabajás en un complejo, usá el mail que te cargó el dueño.</p>
+        <p className="text-sm text-teal-300 mb-4">Ingresá con tu teléfono y contraseña. Si trabajás en un complejo, usá el teléfono que te cargó el dueño.</p>
         <button type="button" onClick={onIngresar} className="px-4 py-2.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ingresar o crear cuenta</button>
         <button type="button" onClick={onReservar} className="block mt-6 text-sm text-teal-400 hover:text-lime-400">← Volver al sitio</button>
       </div>
@@ -10185,7 +10887,7 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
         <h1 className="text-xl" style={F.display}>MI CUENTA</h1>
         <button type="button" onClick={onSalir} className="text-sm text-teal-400 hover:text-lime-400">Cerrar sesión</button>
       </div>
-      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email}</p>
+      <p className="text-xs text-teal-500 mb-5 break-all">{jugador.email || formatArPhone(jugador.phone)}</p>
       {aviso && <p className="text-sm text-lime-400 mb-4">{aviso}</p>}
       <div className="space-y-2">
         {opcion("Reservar un turno", "En cualquier complejo, y ver mis reservas", onReservar, "reservar")}
@@ -10196,27 +10898,189 @@ function CuentaHome({ jugadorApi, venues, esOrganizador, conPanelOrganizador, av
         {complejos === null && !error && <p className="text-sm opacity-60">Cargando…</p>}
         {(complejos || []).map((c) => opcion(`Panel de ${nombre(c.complejo_id)}`, "Donde trabajás", () => onEntrarComplejo(c), c.complejo_id))}
       </div>
+      {jugador.phone && <CambiarTelefono jugadorApi={jugadorApi} />}
       {complejos?.length === 0 && !esOrganizador && (
-        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con este mail y vas a ver acá el panel.</p>
+        <p className="text-xs text-teal-500 mt-5">¿Trabajás en un complejo? Pedile al dueño que te agregue con {jugador.phone ? "este número" : "este mail"} y vas a ver acá el panel.</p>
       )}
     </div>
   );
 }
 
+/* Mi cuenta › Cambiar teléfono: el código llega al número nuevo. El ID del jugador no cambia, así que
+   conserva torneos, puntos y reservas (ver sincronizar_mi_telefono en 20261041_telefonos_empleados.sql) */
+function CambiarTelefono({ jugadorApi }) {
+  const [paso, setPaso] = useState(null); // null | "numero" | "codigo" | "listo"
+  const [tel, setTel] = useState("");
+  const [codigo, setCodigo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const nuevo = normalizeArPhone(tel);
+  const inputCls = "w-full px-3 py-2.5 rounded-lg border text-base";
+  const pedir = async () => {
+    if (!nuevo) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); return; }
+    if (nuevo === jugadorApi.jugador?.phone) { setError("Es el mismo teléfono que ya tenés."); return; }
+    setBusy(true); setError("");
+    try { await supabasePedirCambioTelefono(await jugadorApi.token(), nuevo); setCodigo(""); setPaso("codigo"); }
+    catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  const confirmar = async () => {
+    if (!/^\d{6}$/.test(codigo.trim())) { setError("El código tiene 6 números."); return; }
+    setBusy(true); setError("");
+    try {
+      const r = await supabaseConfirmarCambioTelefono(nuevo, codigo.trim());
+      // La sesión pasa a tener el número nuevo; la ficha y el perfil del jugador también
+      await jugadorApi.login(r.access_token ? r : await supabaseRefreshOnce(jugadorApi.jugador.refreshToken));
+      await supabaseRpc("sincronizar_mi_telefono", {}, await jugadorApi.token());
+      await jugadorApi.recargarPerfil();
+      setPaso("listo");
+    } catch (e) { setError(cuentaErrorText(e)); }
+    setBusy(false);
+  };
+  if (!paso) return <button type="button" onClick={() => { setPaso("numero"); setTel(""); setError(""); }} className="block mt-5 text-sm text-teal-400 hover:text-lime-400">Cambiar mi teléfono</button>;
+  if (paso === "listo") return <p className="mt-5 text-sm text-lime-400">Listo: desde ahora entrás con el {formatArPhone(jugadorApi.jugador?.phone)}.</p>;
+  return (
+    <div className="mt-5 space-y-2 text-sm rounded-lg border border-teal-800 p-3" style={F.body}>
+      {paso === "numero" ? (
+        <>
+          <p className="text-teal-300">Escribí tu teléfono nuevo. Te mandamos un código ahí para confirmar que es tuyo.</p>
+          <input type="tel" inputMode="tel" value={tel} onChange={(e) => setTel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pedir()} placeholder="Ej: 3446 123456" className={inputCls} style={adminInput} aria-label="Teléfono nuevo" autoFocus />
+          <button type="button" disabled={busy} onClick={pedir} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Mandando…" : "Mandarme el código"}</button>
+        </>
+      ) : (
+        <>
+          <p className="text-teal-300">Escribí el código de 6 números que te llegó al <span className="text-teal-100 font-semibold">{formatArPhone(nuevo)}</span>.</p>
+          <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={codigo} onChange={(e) => setCodigo(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => e.key === "Enter" && confirmar()} placeholder="123456" className={`${inputCls} tracking-[0.4em] text-center`} style={adminInput} aria-label="Código" autoFocus />
+          <button type="button" disabled={busy} onClick={confirmar} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Confirmando…" : "Confirmar"}</button>
+        </>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      <button type="button" onClick={() => setPaso(null)} className="text-xs text-teal-400">Cancelar</button>
+    </div>
+  );
+}
+
 /* Canchas del complejo: nombre, horario, precio de cada duración y si recibe reservas online */
-function CanchasConfig({ complejoId, canchas, accessToken, onChanged, puedeBorrar = true }) {
+/* Horario del complejo y de reservas online, por día de la semana (ver 20261050_horarios_complejo.sql).
+   { "0": [desde, hasta] | null, … } en minutos; el "hasta" puede pasar de las 24 (cierra de madrugada). */
+const DIAS_HORARIO = [[1, "Lunes"], [2, "Martes"], [3, "Miércoles"], [4, "Jueves"], [5, "Viernes"], [6, "Sábado"], [0, "Domingo"]];
+const horaConDia = (m) => `${etiquetaHora(m)}${m > 1440 ? " (día siguiente)" : ""}`;
+const semanaIgual = (desde, hasta) => Object.fromEntries(DIAS_HORARIO.map(([d]) => [String(d), [desde, hasta]]));
+function resumenSemana(h) {
+  if (!h) return "";
+  return DIAS_HORARIO.map(([d, l]) => `${l.slice(0, 3)} ${Array.isArray(h[d]) ? `${etiquetaHora(h[d][0])}-${etiquetaHora(h[d][1])}` : "cerrado"}`).join(" · ");
+}
+
+function EditorSemana({ valor, onChange, disabled }) {
+  const pasos = Array.from({ length: 48 }, (_, i) => i * 30);
+  const cambiar = (d, v) => onChange({ ...valor, [d]: v });
+  return (
+    <div className="space-y-1.5">
+      {DIAS_HORARIO.map(([d, l]) => {
+        const v = valor[d];
+        const abierto = Array.isArray(v);
+        return (
+          <div key={d} className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 w-32 text-teal-200"><input type="checkbox" checked={abierto} disabled={disabled}
+              onChange={(e) => cambiar(d, e.target.checked ? [480, 1380] : null)} /> {l}</label>
+            {abierto ? (
+              <>
+                <select value={v[0]} disabled={disabled} onChange={(e) => { const desde = Number(e.target.value); cambiar(d, [desde, Math.max(v[1], desde + 30) > desde + 1440 ? desde + 1440 : Math.max(v[1], desde + 30)]); }}
+                  className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label={`${l} desde`}>
+                  {pasos.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+                </select>
+                <span className="text-teal-400">a</span>
+                <select value={v[1]} disabled={disabled} onChange={(e) => cambiar(d, [v[0], Number(e.target.value)])} className="px-2 py-1.5 rounded border text-sm" style={adminInput} aria-label={`${l} hasta`}>
+                  {Array.from({ length: 48 }, (_, i) => v[0] + 30 * (i + 1)).map((m) => <option key={m} value={m}>{horaConDia(m)}</option>)}
+                </select>
+              </>
+            ) : <span className="text-xs text-teal-600">Cerrado</span>}
+          </div>
+        );
+      })}
+      {!disabled && Array.isArray(valor[1]) && (
+        <button type="button" onClick={() => onChange(Object.fromEntries(DIAS_HORARIO.map(([d]) => [String(d), d >= 1 && d <= 5 ? [...valor[1]] : valor[d]])))} className="text-xs text-teal-400 underline">Copiar el lunes a martes, miércoles, jueves y viernes</button>
+      )}
+    </div>
+  );
+}
+
+function HorariosComplejo({ complejo, accessToken, editable, onGuardado }) {
+  const [abierto, setAbierto] = useState(false);
+  const [horario, setHorario] = useState(complejo.horario || null);
+  const [online, setOnline] = useState(complejo.horario_online || null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  useEffect(() => { setHorario(complejo.horario || null); setOnline(complejo.horario_online || null); }, [complejo]);
+  const guardar = async () => {
+    setBusy(true); setError(""); setAviso("");
+    try {
+      await supabaseRpc("guardar_horarios_complejo", { p_complejo: complejo.id, p_horario: horario, p_horario_online: online }, accessToken);
+      setAviso("Horarios guardados.");
+      await onGuardado();
+    } catch (e) { setError(e?.code === "horario_invalido" ? "Revisá los horarios: el cierre tiene que ser después de la apertura." : reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const caja = "rounded-xl border border-teal-800 p-4 space-y-3 mb-4";
+  return (
+    <section className={caja} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <button type="button" onClick={() => setAbierto((v) => !v)} className="w-full flex items-center justify-between gap-2 text-left">
+        <span>
+          <span className="block text-sm uppercase tracking-wide text-teal-400">Horarios del complejo y de reservas online</span>
+          <span className="block text-xs text-teal-500">{complejo.horario ? resumenSemana(complejo.horario) : "Sin cargar: cada cancha usa su propio horario."}</span>
+          {complejo.horario_online && <span className="block text-xs text-cyan-300">Online: {resumenSemana(complejo.horario_online)}</span>}
+        </span>
+        <span className="text-teal-300 shrink-0">{abierto ? "▴" : "▾"}</span>
+      </button>
+      {abierto && (
+        <div className="space-y-4 text-sm">
+          <div className="space-y-2">
+            <p className="font-semibold text-teal-100">Horario del complejo</p>
+            <p className="text-xs text-teal-500">Cuándo está abierto cada día. Con esto se arma la agenda de todas las canchas (las que tienen horario propio usan el suyo).</p>
+            {horario ? (
+              <>
+                <EditorSemana valor={horario} onChange={setHorario} disabled={!editable} />
+                {editable && <button type="button" onClick={() => setHorario(null)} className="text-xs text-teal-500 hover:text-red-400">Quitar el horario del complejo (vuelve el de cada cancha)</button>}
+              </>
+            ) : editable ? (
+              <button type="button" onClick={() => setHorario(semanaIgual(480, 1380))} className="px-3 py-1.5 rounded-lg border border-lime-400 text-lime-400">Cargar el horario del complejo</button>
+            ) : <p className="text-teal-400">Sin cargar.</p>}
+          </div>
+          <div className="space-y-2 border-t border-teal-900 pt-3">
+            <p className="font-semibold text-teal-100">Horario de reservas online</p>
+            <p className="text-xs text-teal-500">Qué horarios pueden pedir los jugadores desde la app. Fuera de este horario la cancha sigue en la agenda para cargar a mano, pero no se ve online.</p>
+            <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={!!online} disabled={!editable}
+              onChange={(e) => setOnline(e.target.checked ? (horario ? JSON.parse(JSON.stringify(horario)) : semanaIgual(840, 1380)) : null)} />
+              Limitar el horario de las reservas online</label>
+            {online ? <EditorSemana valor={online} onChange={setOnline} disabled={!editable} />
+              : <p className="text-xs text-teal-400">Se puede pedir online en todo el horario del complejo.</p>}
+          </div>
+          {error && <p className="text-red-400">{error}</p>}
+          {aviso && <p className="text-lime-400">{aviso}</p>}
+          {editable ? (
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar horarios"}</button>
+          ) : <p className="text-xs text-teal-500">Los horarios los cambia el dueño.</p>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CanchasConfig({ complejoId, canchas, complejo = null, accessToken, onChanged, puedeBorrar = true }) {
   const [adding, setAdding] = useState(false);
   return (
     <div className="space-y-3">
-      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
+      {canchas.map((c) => <CanchaForm key={c.id} initial={c} complejoId={complejoId} complejo={complejo} accessToken={accessToken} onDone={onChanged} puedeBorrar={puedeBorrar} />)}
       {adding
-        ? <CanchaForm initial={null} complejoId={complejoId} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
+        ? <CanchaForm initial={null} complejoId={complejoId} complejo={complejo} accessToken={accessToken} orden={canchas.length} onDone={() => { setAdding(false); onChanged(); }} onCancel={() => setAdding(false)} />
         : <button type="button" onClick={() => setAdding(true)} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Agregar cancha</button>}
     </div>
   );
 }
 
-function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
+function CanchaForm({ initial, complejoId, complejo = null, accessToken, orden = 0, onDone, onCancel, puedeBorrar = true }) {
+  const conHorarioComplejo = !!complejo?.horario;
   const toForm = (c) => ({
     nombre: c?.nombre || `Cancha ${orden + 1}`,
     apertura: c ? etiquetaHora(horarioCancha(c).desde) : "14:00",
@@ -10226,6 +11090,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
     precio_120: c?.precio_120 != null ? String(Math.round(c.precio_120)) : "",
     reserva_online: c ? c.reserva_online : true,
     activa: c ? c.activa : true,
+    horario_propio: c ? !!c.horario_propio : false,
   });
   const [form, setForm] = useState(() => toForm(initial));
   const [editing, setEditing] = useState(!initial);
@@ -10244,6 +11109,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
       precio_120: leerPrecio(form.precio_120),
       reserva_online: form.reserva_online,
       activa: form.activa,
+      ...(conHorarioComplejo ? { horario_propio: form.horario_propio } : {}),
     };
     if (!row.nombre) { setError("Poné el nombre de la cancha."); return; }
     if (row.apertura === row.cierre) { setError("La apertura y el cierre no pueden ser la misma hora."); return; }
@@ -10274,7 +11140,7 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
       <div className="border border-teal-800 rounded-lg p-3 flex flex-wrap items-center gap-x-4 gap-y-1">
         <div className="flex-1 min-w-[12rem]">
           <p className="font-semibold">{initial.nombre}{!initial.activa && <span className="ml-2 text-xs text-amber-400">desactivada</span>}</p>
-          <p className="text-sm text-teal-300">{rangoLabel(desde, hasta)} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
+          <p className="text-sm text-teal-300">{conHorarioComplejo && !initial.horario_propio ? "Horario del complejo" : rangoLabel(desde, hasta)}{conHorarioComplejo && initial.horario_propio ? " (horario propio)" : ""} · {precios.length > 0 ? precios.join(" · ") : "sin precios"}</p>
           <p className="text-xs text-teal-500">{initial.reserva_online ? "Recibe reservas online" : "Solo turnos cargados por el complejo"}</p>
         </div>
         <button type="button" onClick={() => { setForm(toForm(initial)); setEditing(true); }} className="text-sm text-lime-400">Editar</button>
@@ -10305,10 +11171,14 @@ function CanchaForm({ initial, complejoId, accessToken, orden = 0, onDone, onCan
           <label className="block text-xs text-teal-400 mb-1">Nombre</label>
           <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={40} className="w-full px-3 py-2 rounded border text-sm" style={adminInput} />
         </div>
-        {horaSelect("apertura", "Abre")}
-        {horaSelect("cierre", "Cierra")}
+        {(!conHorarioComplejo || form.horario_propio) && horaSelect("apertura", "Abre")}
+        {(!conHorarioComplejo || form.horario_propio) && horaSelect("cierre", "Cierra")}
       </div>
-      {overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
+      {conHorarioComplejo && (
+        <label className="flex items-center gap-2 text-sm text-teal-200 mb-3"><input type="checkbox" checked={form.horario_propio} onChange={(e) => set("horario_propio", e.target.checked)} />
+          Esta cancha abre en otro horario que el complejo (todos los días, el que pongas acá)</label>
+      )}
+      {(!conHorarioComplejo || form.horario_propio) && overnight && form.apertura !== form.cierre && <p className="text-xs text-teal-300 -mt-1 mb-3">Cierra pasada la medianoche: los turnos después de las 00:00 se ven en la agenda del día anterior.</p>}
       <p className="text-xs text-teal-400 mb-1">Precio por duración (dejá vacío lo que no ofrecés)</p>
       <div className="grid gap-3 grid-cols-3 mb-3">{DURACIONES.map(precioInput)}</div>
       <div className="flex flex-col gap-2 mb-3 text-sm text-teal-200">
@@ -10337,7 +11207,10 @@ function estiloReserva(r) {
 }
 
 /* Agenda de un día: una columna por cancha, una fila cada 30 minutos */
-function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
+function AgendaReservas({ complejoId, canchas: canchasBase, complejo = null, venueName, accessToken, fecha, setFecha, version, onChanged, rol = "dueno", verCuentas = true }) {
+  // Cada cancha con el horario de ese día (las cerradas ese día quedan marcadas)
+  const canchas = useMemo(() => canchasBase.map((c) => canchaDelDia(c, complejo, fecha) || { ...c, cerradaHoy: true }), [canchasBase, complejo, fecha]);
+  const abiertas = canchas.filter((c) => !c.cerradaHoy);
   const [reservas, setReservas] = useState(null);
   const [error, setError] = useState("");
   const [nueva, setNueva] = useState(null); // { canchaId, desde } para cargar un turno
@@ -10359,7 +11232,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
     return () => clearInterval(t);
   }, [load]);
 
-  const filas = useMemo(() => filasAgenda(canchas), [canchas]);
+  const filas = useMemo(() => filasAgenda(abiertas.length ? abiertas : canchasBase), [canchas]); // eslint-disable-line react-hooks/exhaustive-deps
   const finGrilla = filas[filas.length - 1] + PASO;
   const lista = useMemo(() => reservas || [], [reservas]);
   // Lo que ocupa cada cancha, con la fila de la agenda donde se dibuja (la de su inicio, o la primera
@@ -10381,7 +11254,7 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
     const o = porCancha[c.id].find((x) => x.fila === m);
     if (o) return { tipo: "reserva", o, span: Math.max(1, Math.ceil((Math.min(o.hasta, finGrilla) - m) / PASO)) };
     if (porCancha[c.id].some((x) => x.fila < m && x.hasta > m)) return { tipo: "tapada" };
-    if (m < desde || m >= hasta) return { tipo: "cerrada" };
+    if (c.cerradaHoy || m < desde || m >= hasta) return { tipo: "cerrada" };
     return { tipo: "libre" };
   };
 
@@ -10395,11 +11268,12 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
         {fecha !== hoy && <button type="button" onClick={() => setFecha(hoy)} className="text-xs text-lime-400">Ir a hoy</button>}
       </div>
       <div className="flex flex-wrap gap-2 mb-4">
-        <button type="button" onClick={() => setNueva({ canchaId: canchas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
+        <button type="button" disabled={abiertas.length === 0} onClick={() => setNueva({ canchaId: abiertas[0].id, desde: null })} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Cargar turno</button>
         <button type="button" onClick={() => setBloqueando(true)} className="px-4 py-2 rounded text-sm border border-teal-700 text-teal-200">Bloquear horario</button>
         <button type="button" onClick={load} className="px-3 py-2 rounded text-sm text-teal-400">Actualizar</button>
       </div>
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
+      {abiertas.length === 0 && <p className="text-sm text-amber-300 mb-3">El complejo está cerrado este día (según su horario). Lo cambiás en Canchas y precios › Horarios.</p>}
 
       {reservas !== null && (() => {
         const turnos = lista.filter((r) => r.tipo === "turno" && r.estado === "confirmada");
@@ -10476,15 +11350,15 @@ function AgendaReservas({ complejoId, canchas, venueName, accessToken, fecha, se
       )}
 
       {nueva && (
-        <NuevoTurnoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
+        <NuevoTurnoModal complejoId={complejoId} canchas={abiertas} fecha={fecha} reservas={lista} preset={nueva} accessToken={accessToken}
           onClose={() => setNueva(null)} onDone={() => { setNueva(null); onChanged(); }} />
       )}
       {bloqueando && (
-        <BloqueoModal complejoId={complejoId} canchas={canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
+        <BloqueoModal complejoId={complejoId} canchas={abiertas.length ? abiertas : canchas} fecha={fecha} reservas={lista} accessToken={accessToken}
           onClose={() => setBloqueando(false)} onDone={() => { setBloqueando(false); onChanged(); }} />
       )}
       {detalle && (
-        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
+        <DetalleReservaModal reserva={detalle} cancha={canchas.find((c) => c.id === detalle.cancha_id)} canchas={canchasBase} complejo={complejo} reservas={lista} fecha={fecha} venueName={venueName} accessToken={accessToken} rol={rol} verCuentas={verCuentas}
           onClose={() => setDetalleId(null)} onChanged={onChanged} />
       )}
     </div>
@@ -10688,15 +11562,6 @@ function resolverPedido(id, confirmar, accessToken) {
   return supabaseTable(`reservas?id=eq.${id}`, { method: "PATCH", body: { estado: confirmar ? "confirmada" : "rechazada" }, accessToken, prefer: "return=minimal" });
 }
 
-/* Mensaje de WhatsApp para avisarle al jugador que su turno quedó confirmado o rechazado */
-function mensajeTurno(r, venueName, canchaNombre, confirmado) {
-  const desde = minutoEnGrilla(r.fecha, r.inicio);
-  const turno = `el ${etiquetaFecha(r.fecha).toLowerCase()} a las ${etiquetaHora(desde)} (${canchaNombre || "cancha"})`;
-  return confirmado
-    ? `Hola ${r.nombre}, te confirmamos el turno en ${venueName} ${turno}. ¡Te esperamos!`
-    : `Hola ${r.nombre}, no podemos darte el turno en ${venueName} ${turno}. Si querés, pedí otro horario.`;
-}
-
 /* "sábado 10/10 a las 23:30" (hora de Argentina) */
 function etiquetaVencimiento(iso) {
   const ar = new Date(Date.parse(iso) - 3 * 3600000).toISOString();
@@ -10708,7 +11573,7 @@ function etiquetaVencimiento(iso) {
 function PedidosPendientes({ complejoId, canchas, venueName, accessToken, version, onChanged, onVer }) {
   const [pendientes, setPendientes] = useState([]);
   const [canceladas, setCanceladas] = useState([]);
-  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados, para el aviso por WhatsApp
+  const [resueltos, setResueltos] = useState([]); // recién confirmados o rechazados (al jugador le llega el aviso en la app)
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
   const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre;
@@ -10735,13 +11600,14 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
     setBusyId(r.id); setError("");
     try {
       await resolverPedido(r.id, confirmar, accessToken);
+      setPendientes((list) => list.filter((p) => p.id !== r.id));
       setResueltos((list) => [{ ...r, confirmado: confirmar }, ...list]);
       onChanged();
     } catch (e) { setError(reservaErrorText(e)); }
     finally { setBusyId(null); }
   };
 
-  const avisables = resueltos.filter((r) => r.telefono);
+  const avisables = resueltos;
   if (pendientes.length === 0 && canceladas.length === 0 && avisables.length === 0 && !error) return null;
   const linea = (r) => `${etiquetaFecha(r.fecha)} · ${rangoLabel(minutoEnGrilla(r.fecha, r.inicio), minutoEnGrilla(r.fecha, r.fin))} · ${nombreCancha(r.cancha_id) || "Cancha"}`;
 
@@ -10772,8 +11638,7 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
         <ul className="space-y-1 text-sm">
           {avisables.map((r) => (
             <li key={r.id} className="text-teal-300">
-              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} ·{" "}
-              <a href={waLink(r.telefono, mensajeTurno(r, venueName, nombreCancha(r.cancha_id), r.confirmado))} target="_blank" rel="noopener noreferrer" className="text-lime-400 underline">Avisarle por WhatsApp</a>
+              {r.confirmado ? "✓ Confirmado" : "✕ Rechazado"}: {r.nombre} · <span className="text-teal-500">le llega el aviso en la app</span>
             </li>
           ))}
         </ul>
@@ -10793,8 +11658,9 @@ function PedidosPendientes({ complejoId, canchas, venueName, accessToken, versio
 
 /* Detalle de un turno o bloqueo: cobro, "no vino", cancelar; confirmar o rechazar si está pendiente;
    bloquear al jugador si lo pidió online */
-function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
+function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null, reservas = [], fecha, venueName, accessToken, onClose, onChanged, rol = "dueno", verCuentas = true }) {
   const dueno = rol === "dueno";
+  const [editando, setEditando] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState("");
@@ -10863,9 +11729,16 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
   const btn = "px-3 py-2 rounded-lg text-sm border disabled:opacity-50";
 
   return (
-    <Modal title={r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+    <Modal title={editando ? "Editar turno" : r.tipo === "bloqueo" ? "Horario bloqueado" : r.nombre} onClose={onClose}>
+      {editando ? (
+        <EditarTurno r={r} canchas={canchas.length ? canchas : [cancha].filter(Boolean)} complejo={complejo} fecha={fecha} desdeActual={desde} duracionActual={hasta - desde}
+          reservas={reservas} accessToken={accessToken} onCancelar={() => setEditando(false)} onGuardado={async () => { await onChanged(); onClose(); }} />
+      ) : (
       <div className="space-y-3 text-sm" style={F.body}>
         <p className="text-teal-200">{cancha?.nombre} · {etiquetaFecha(fecha)} · {rangoLabel(desde, hasta)} ({hasta - desde} min)</p>
+        {r.tipo !== "bloqueo" && (r.estado === "confirmada" || r.estado === "pendiente") && (
+          <button type="button" onClick={() => setEditando(true)} className="text-sm text-teal-300 underline hover:text-lime-400">Editar turno (día, hora, cancha, datos)</button>
+        )}
         {r.tipo === "bloqueo" ? (
           <>
             {r.nota && <p className="text-teal-300">Motivo: {r.nota}</p>}
@@ -10887,9 +11760,6 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
             )}
             {r.estado === "confirmada" && (
               <>
-                {r.origen === "online" && r.telefono && (
-                  <a href={waLink(r.telefono, mensajeTurno(r, venueName, cancha?.nombre, true))} target="_blank" rel="noopener noreferrer" className="block text-lime-400 underline">Avisarle por WhatsApp que está confirmado</a>
-                )}
                 <div>
                   <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
                   <div className="flex flex-wrap gap-2">
@@ -10923,13 +11793,16 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">Entendido</button>
                   </p>
                 ) : confirmCancel ? (
-                  <p className="text-red-300">¿Cancelar este turno? El horario queda libre.{" "}
-                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
-                    {r.serie_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
+                  <p className="text-red-300">{r.tipo === "clase" ? "¿Cancelar esta clase? El horario queda libre para alquilar." : "¿Cancelar este turno? El horario queda libre."}{" "}
+                    <button type="button" disabled={busy} onClick={cancelar} className="font-semibold text-red-400">{r.serie_id && !r.horario_id ? "Solo este" : "Sí, cancelar"}</button>{" "}
+                    {r.serie_id && !r.horario_id && <><button type="button" disabled={busy} onClick={cancelarSiguientes} className="font-semibold text-red-400 ml-2">Este y los siguientes</button>{" "}</>}
                     <button type="button" onClick={() => setConfirmCancel(false)} className="text-teal-400 ml-2">No</button>
                   </p>
                 ) : (
-                  <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>Cancelar turno</button>
+                  <>
+                    <button type="button" onClick={() => setConfirmCancel(true)} className={`${btn} border-red-400 text-red-400`}>{r.tipo === "clase" ? "Cancelar clase (el profe no viene)" : "Cancelar turno"}</button>
+                    {r.horario_id && <p className="text-xs text-teal-500">Es parte del horario fijo del profe: para cambiarlo o terminarlo, entrá a Clases.</p>}
+                  </>
                 )}
               </>
             )}
@@ -10953,7 +11826,112 @@ function DetalleReservaModal({ reserva: r, cancha, fecha, venueName, accessToken
         )}
         {error && <p className="text-red-400">{error}</p>}
       </div>
+      )}
     </Modal>
+  );
+}
+
+/* Editar un turno ya cargado (ver 20261047_editar_turnos.sql). En un turno fijo pregunta si es solo
+   ese o ese y los que siguen. Si lo pidió un jugador por la app, la base le avisa del cambio. */
+function EditarTurno({ r, canchas, complejo = null, fecha, desdeActual, duracionActual, reservas, accessToken, onCancelar, onGuardado }) {
+  const [nuevaFecha, setNuevaFecha] = useState(fecha);
+  const [canchaId, setCanchaId] = useState(r.cancha_id);
+  const canchaBase = canchas.find((c) => c.id === canchaId) || canchas[0];
+  const cancha = canchaDelDia(canchaBase, complejo, nuevaFecha) || canchaBase;
+  const [duracion, setDuracion] = useState(duracionActual);
+  const [desde, setDesde] = useState(desdeActual);
+  const [form, setForm] = useState({ nombre: r.nombre || "", telefono: r.telefono ? formatArPhone(r.telefono) : "", precio: r.precio != null ? String(Math.round(Number(r.precio))) : "", nota: r.nota || "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k, v) => setForm((x) => ({ ...x, [k]: v }));
+  const inicios = iniciosPosibles(cancha, duracion);
+  const duraciones = DURACIONES.includes(duracion) ? DURACIONES : [...DURACIONES, duracion].sort((a, b) => a - b);
+  const otros = nuevaFecha === fecha ? reservas.filter((x) => x.id !== r.id && (!r.serie_id || x.serie_id !== r.serie_id || x.fecha < fecha)) : [];
+  const cobrado = !!r.medio_pago;
+
+  const guardar = async (siguientes) => {
+    const nombre = form.nombre.trim();
+    const telefono = form.telefono.trim() ? normalizeArPhone(form.telefono) : null;
+    if (!nombre) { setError("Poné el nombre de quien reserva."); return; }
+    if (form.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
+    if (!nuevaFecha) { setError("Elegí el día."); return; }
+    const motivo = motivoNoEntra(cancha, nuevaFecha, desde, duracion, otros);
+    if (motivo === "fuera_de_horario") { setError("Ese turno no entra en el horario de la cancha."); return; }
+    if (motivo === "superpuesto") { setError("Ese horario se pisa con otro turno o bloqueo."); return; }
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("editar_turno", {
+        p_id: r.id, p_fecha: nuevaFecha, p_cancha: cancha.id, p_minuto: desde, p_duracion: duracion,
+        p_nombre: nombre, p_telefono: telefono, p_precio: leerPrecio(form.precio), p_nota: form.nota.trim() || null, p_siguientes: !!siguientes,
+      }, accessToken);
+      await onGuardado();
+    } catch (e) {
+      setError(e?.pgCode === "23P01" ? (siguientes ? "Alguno de los turnos que siguen se pisa con otro turno o bloqueo: no se cambió ninguno." : "Ese horario se pisa con otro turno o bloqueo.") : reservaErrorText(e));
+    } finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded border";
+  return (
+    <div className="space-y-3 text-sm" style={F.body}>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Día</label>
+          <input type="date" value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Cancha</label>
+          <select value={cancha?.id} onChange={(e) => setCanchaId(e.target.value)} className={campo} style={adminInput}>
+            {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Desde</label>
+          <select value={desde ?? ""} onChange={(e) => setDesde(Number(e.target.value))} className={campo} style={adminInput}>
+            {desde != null && !inicios.includes(desde) && <option value={desde}>{etiquetaHora(desde)}{motivoNoEntra(cancha, nuevaFecha, desde, duracion, []) ? " (no entra)" : ""}</option>}
+            {inicios.map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Duración</label>
+          <select value={duracion} onChange={(e) => setDuracion(Number(e.target.value))} className={campo} style={adminInput}>
+            {duraciones.map((d) => <option key={d} value={d}>{d} min</option>)}
+          </select>
+        </div>
+      </div>
+      {desde != null && <p className="text-xs text-teal-500">{etiquetaFecha(nuevaFecha)} · {rangoLabel(desde, desde + duracion)}</p>}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nombre</label>
+          <input value={form.nombre} onChange={(e) => set("nombre", e.target.value)} maxLength={80} className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">WhatsApp (opcional)</label>
+          <input type="tel" value={form.telefono} onChange={(e) => set("telefono", e.target.value)} placeholder="Ej: 3446 123456" className={campo} style={adminInput} />
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Precio</label>
+          <input inputMode="numeric" value={form.precio} onChange={(e) => set("precio", e.target.value)} className={campo} style={adminInput} />
+          {cobrado && <p className="text-[11px] text-amber-300 mt-1">Ya está cobrado: el precio lo cambia solo el dueño, y la Caja se corrige sola.</p>}
+        </div>
+        <div>
+          <label className="block text-xs text-teal-400 mb-1">Nota (opcional)</label>
+          <input value={form.nota} onChange={(e) => set("nota", e.target.value)} maxLength={200} className={campo} style={adminInput} />
+        </div>
+      </div>
+      {r.origen === "online" && r.jugador_id && <p className="text-xs text-teal-400">Lo pidió un jugador por la app: si cambiás el día, la hora o la cancha, le llega un aviso.</p>}
+      {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
+      {r.serie_id ? (
+        <div className="space-y-2">
+          <p className="text-xs text-teal-400">Es un turno fijo: ¿cambiás solo este o también los que siguen? (Si corrés el día, los siguientes se corren igual.)</p>
+          <div className="flex gap-2">
+            <button type="button" disabled={busy} onClick={() => guardar(false)} className="flex-1 px-4 py-2.5 rounded-lg font-semibold border border-lime-400 text-lime-400 disabled:opacity-50">Solo este</button>
+            <button type="button" disabled={busy} onClick={() => guardar(true)} className="flex-1 px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Este y los que siguen"}</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" disabled={busy} onClick={() => guardar(false)} className="w-full px-4 py-2.5 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar cambios"}</button>
+      )}
+      <button type="button" onClick={onCancelar} className="w-full text-teal-400">Volver</button>
+    </div>
   );
 }
 
@@ -11057,8 +12035,11 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
               </div>
               <p className="text-sm text-teal-300">{category ? category.name : <span className="text-amber-400">Categoría eliminada</span>}</p>
               <a href={`https://wa.me/${i.telefono}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-1 text-sm underline" style={{ color: BRAND.lime }}>
-                WhatsApp {formatArPhone(i.telefono)}
+                WhatsApp {formatArPhone(i.telefono)}{i.contacto && i.jugador2_nombre ? ` (${i.contacto === 2 ? i.jugador2_nombre : i.jugador1_nombre})` : ""}
               </a>
+              {i.contacto && i.jugador2_nombre && (i.contacto === 2 ? i.telefono1 : i.telefono2) && (
+                <p className="text-xs text-teal-400">{i.contacto === 2 ? i.jugador1_nombre : i.jugador2_nombre}: {formatArPhone(i.contacto === 2 ? i.telefono1 : i.telefono2)}</p>
+              )}
               {Array.isArray(i.disponibilidad) && i.disponibilidad.length > 0 && (
                 <p className="text-xs text-teal-300 mt-1">Disponibilidad: {i.disponibilidad.map((d) => `${formatDateShort(d.date)} ${d.from} a ${d.to}`).join(" · ")}</p>
               )}
@@ -11225,11 +12206,91 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   );
 }
 
+/* Teléfonos de los jugadores de una pareja, para el organizador: ver y corregir el de un jugador sin
+   cuenta, o agregarlo a uno cargado sin teléfono (así pasa a sumar ranking). Si el jugador tiene
+   cuenta, el teléfono lo cambia él. Ver 20261041_telefonos_empleados.sql */
+function TelefonosPareja({ pair, accessToken, onUpdatePair }) {
+  const jugadores = jugadoresConPerfil(pair);
+  const [datos, setDatos] = useState({}); // { [id]: { telefono, con_cuenta } }
+  const [editando, setEditando] = useState({}); // { [índice]: texto }
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const ids = jugadores.map((j) => j.id).filter(Boolean).join(",");
+  useEffect(() => {
+    ids.split(",").filter(Boolean).forEach(async (id) => {
+      try {
+        const [r] = (await supabaseRpc("telefono_de_jugador", { p_perfil: id }, accessToken)) || [];
+        setDatos((d) => (d[id] ? d : { ...d, [id]: r || { telefono: null, con_cuenta: false } }));
+      } catch { setDatos((d) => (d[id] ? d : { ...d, [id]: { error: true } })); } // recién agregado: el torneo todavía se está guardando
+    });
+  }, [ids, accessToken]);
+  const guardar = async (i) => {
+    const j = jugadores[i];
+    const numero = normalizeArPhone(editando[i] || "");
+    if (!numero) { setError("Revisá el teléfono: con característica, sin el 0 ni el 15."); return; }
+    setBusy(i); setError(""); setAviso("");
+    try {
+      if (j.id) {
+        await supabaseRpc("corregir_telefono_jugador", { p_perfil: j.id, p_telefono: numero }, accessToken);
+        setDatos((d) => ({ ...d, [j.id]: { ...d[j.id], telefono: numero } }));
+      } else {
+        // Sin perfil todavía: se crea (o se encuentra) y la pareja queda con su ID
+        const { apellido, nombre } = separarNombre(j.name);
+        const id = await supabaseRpc("crear_jugador", { p_apellido: apellido, p_nombre: nombre, p_telefono: numero }, accessToken);
+        setDatos((d) => ({ ...d, [id]: { telefono: numero, con_cuenta: false } }));
+        onUpdatePair({ ...pair, players: jugadores.map((x, k) => (k === i ? { ...x, id } : x)) });
+      }
+      setEditando((e) => { const n = { ...e }; delete n[i]; return n; });
+      setAviso("Teléfono guardado.");
+    } catch (e) {
+      const code = e?.code || e?.pgCode;
+      setError(code === "tiene_cuenta" ? "Ese jugador tiene cuenta: el teléfono lo cambia él desde Mi cuenta." : code === "no_autorizado" ? "No se pudo: guardá el torneo y probá de nuevo." : "No se pudo guardar el teléfono. Probá de nuevo.");
+    }
+    setBusy(null);
+  };
+  return (
+    <div className="mt-2 rounded border border-teal-900 p-2 space-y-2 text-xs" style={F.body}>
+      {jugadores.map((j, i) => {
+        const d = j.id ? datos[j.id] : null;
+        const enEdicion = editando[i] !== undefined;
+        return (
+          <div key={i} className="flex flex-wrap items-center gap-2">
+            <span className="text-teal-100 min-w-[8rem]">{j.name}</span>
+            {j.id && !d ? <span className="opacity-60">…</span>
+              : d?.con_cuenta ? <span className="text-teal-400">{formatArPhone(d.telefono)} · tiene cuenta (lo cambia él)</span>
+              : enEdicion ? (
+                <>
+                  <input value={editando[i]} onChange={(e) => setEditando((x) => ({ ...x, [i]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && guardar(i)} inputMode="tel" placeholder="Ej: 3446 123456" autoFocus className="w-36 px-2 py-1 rounded border" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }} />
+                  <button type="button" disabled={busy === i} onClick={() => guardar(i)} className="text-lime-400 font-semibold disabled:opacity-50">Guardar</button>
+                  <button type="button" onClick={() => setEditando((x) => { const n = { ...x }; delete n[i]; return n; })} className="text-teal-400">Cancelar</button>
+                </>
+              ) : (
+                <>
+                  <span className="text-teal-400">{d?.telefono ? formatArPhone(d.telefono) : "Sin teléfono"}</span>
+                  <button type="button" onClick={() => setEditando((x) => ({ ...x, [i]: d?.telefono ? formatArPhone(d.telefono) : "" }))} className="text-teal-300 underline">{d?.telefono ? "Corregir" : "Agregar"}</button>
+                </>
+              )}
+          </div>
+        );
+      })}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="text-lime-400">{aviso}</p>}
+    </div>
+  );
+}
+
 /* section: la parte que se muestra ("parejas", "grupos", "llave" o "super8"), elegida desde las
    pestañas del torneo; sin section, la categoría muestra sus propias pestañas */
-function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section }) {
+function CategoryAdminView({ category, format, tournament, onUpdateCategory, onGroupsLocked, onUpdateTournament, section, accessToken = null }) {
   const tab = section || "parejas"; // la sección la elige el menú del torneo
-  const [pairName, setPairName] = useState("");
+  // Carga de una pareja: por cada jugador, teléfono (opcional; obligatorio en torneos de circuito) y
+  // "Apellido Nombre". Con el teléfono se busca su perfil y el nombre se completa solo (ver jugadores.js)
+  const jugadorVacio = { tel: "", texto: "", opciones: null, elegido: null };
+  const [cargaJugadores, setCargaJugadores] = useState(() => [jugadorVacio, jugadorVacio]);
+  const [agregando, setAgregando] = useState(false);
+  const [confirmarRepetido, setConfirmarRepetido] = useState(""); // aviso de jugador ya anotado: se agrega al tocar de nuevo
+  const [telefonosDe, setTelefonosDe] = useState(null); // pareja con los teléfonos abiertos
   const [pairError, setPairError] = useState("");
   const [pairNotice, setPairNotice] = useState(""); // aviso de nombre repetido de la última pareja agregada
   const [editingPairId, setEditingPairId] = useState(null);
@@ -11247,15 +12308,71 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const super8Generated = super8 && category.groups.length > 0;
   const usesSchedule = tournamentUsesSchedule(tournament);
 
-  const addPair = () => {
-    if (!pairName.trim()) return;
+  const cuantosJugadores = individual ? 1 : 2;
+  const filasCarga = cargaJugadores.slice(0, cuantosJugadores);
+  const circuito = !!tournament.circuitId;
+  const cambiarJugador = (i, cambios) => {
+    setConfirmarRepetido("");
+    setCargaJugadores((l) => l.map((j, k) => (k === i ? { ...j, ...cambios } : j)));
+  };
+  // Al completar un teléfono válido se busca el perfil: si hay uno, se completa el nombre; si hay
+  // varios (por ejemplo, un padre que anota a sus hijos con su número), se elige
+  const buscarPorTelefono = async (i, tel) => {
+    const numero = normalizeArPhone(tel);
+    if (!numero || !accessToken) { cambiarJugador(i, { opciones: null, elegido: null }); return; }
+    try {
+      const encontrados = (await supabaseRpc("buscar_jugadores", { p_telefono: numero }, accessToken)) || [];
+      setCargaJugadores((l) => l.map((j, k) => {
+        if (k !== i || normalizeArPhone(j.tel) !== numero) return j;
+        if (encontrados.length === 1 && !j.texto.trim()) return { ...j, opciones: encontrados, elegido: encontrados[0].id, texto: nombreJugador(encontrados[0]) };
+        return { ...j, opciones: encontrados, elegido: null };
+      }));
+    } catch { cambiarJugador(i, { opciones: null, elegido: null }); }
+  };
+  const elegirPerfil = (i, perfil) => cambiarJugador(i, perfil ? { elegido: perfil.id, texto: nombreJugador(perfil) } : { elegido: null, texto: "" });
+
+  const addPair = async () => {
+    if (agregando) return;
+    if (filasCarga.every((j) => !j.texto.trim())) return;
     if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
     if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
+    const faltaNombre = filasCarga.findIndex((j) => !j.texto.trim());
+    if (faltaNombre >= 0) { setPairError(`Falta el apellido y nombre del jugador ${faltaNombre + 1}.`); return; }
+    const telMal = filasCarga.findIndex((j) => j.tel.trim() && !normalizeArPhone(j.tel));
+    if (telMal >= 0) { setPairError(`Revisá el teléfono del jugador ${telMal + 1} (característica y número, sin el 0 ni el 15).`); return; }
+    if (circuito) {
+      const sinTel = filasCarga.findIndex((j) => !j.tel.trim());
+      if (sinTel >= 0) { setPairError(`En los torneos de circuito el teléfono es obligatorio (jugador ${sinTel + 1}): sin teléfono no suma puntos.`); return; }
+    }
     setPairError("");
-    // Aviso (no bloqueo) si algún jugador ya está anotado en el torneo con un nombre igual o parecido
-    setPairNotice(duplicateNamesText(findNameDuplicates(splitPair(pairName), tournamentPairEntries(tournament))) || "");
-    onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name: pairName.trim(), availability: [] }] });
-    setPairName("");
+    setAgregando(true);
+    try {
+      // Con teléfono, el jugador queda con su perfil (se crea si no existe); sin teléfono, solo el nombre
+      const players = [];
+      for (const j of filasCarga) {
+        const name = nombreJugador(separarNombre(j.texto));
+        const numero = normalizeArPhone(j.tel);
+        let id = null;
+        if (numero && accessToken) {
+          const elegido = j.opciones?.find((o) => o.id === j.elegido);
+          id = elegido && nombreJugador(elegido) === name ? elegido.id : await supabaseRpc("crear_jugador", { p_apellido: separarNombre(j.texto).apellido, p_nombre: separarNombre(j.texto).nombre, p_telefono: numero }, accessToken);
+        }
+        players.push({ id, name });
+      }
+      // Un jugador con perfil que ya está anotado en el torneo: hay que confirmarlo (tocar Agregar de nuevo)
+      const donde = perfilesEnTorneo(tournament);
+      const repetido = players.find((p) => p.id && donde[p.id]);
+      const avisoRepetido = repetido ? `${repetido.name} ya está anotado en ${donde[repetido.id]}.` : "";
+      if (avisoRepetido && confirmarRepetido !== avisoRepetido) { setConfirmarRepetido(avisoRepetido); return; }
+      const name = nombrePareja(players);
+      // Aviso (no bloqueo) si un jugador sin perfil se parece a otro ya anotado
+      setPairNotice(duplicateNamesText(findNameDuplicates(players.filter((p) => !p.id).map((p) => p.name), tournamentPairEntries(tournament))) || "");
+      onUpdateCategory({ ...category, pairs: [...category.pairs, { id: uid(), name, availability: [], players }] });
+      setCargaJugadores([jugadorVacio, jugadorVacio]);
+      setConfirmarRepetido("");
+    } catch (e) {
+      setPairError(e?.code === "no_autorizado" || e?.pgCode === "no_autorizado" ? "No tenés permiso para cargar jugadores." : "No se pudo guardar el jugador. Revisá la conexión y probá de nuevo.");
+    } finally { setAgregando(false); }
   };
 
   const updatePairAvailability = (pairId, availability) => {
@@ -11284,7 +12401,10 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const cancelEditPair = () => { setEditingPairId(null); setEditPairName(""); };
   const saveEditPair = (id) => {
     if (!editPairName.trim()) return;
-    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, name: editPairName.trim() } : p)) });
+    // Si la pareja tiene jugadores con perfil, cada uno conserva su ID con el nombre corregido
+    const nuevos = splitPair(editPairName.trim());
+    const conJugadores = (p) => (Array.isArray(p.players) ? { players: p.players.map((j, i) => ({ ...j, name: nuevos[i] ?? j.name })) } : {});
+    onUpdateCategory({ ...category, pairs: category.pairs.map((p) => (p.id === id ? { ...p, name: editPairName.trim(), ...conJugadores(p) } : p)) });
     setEditingPairId(null);
     setEditPairName("");
   };
@@ -11382,19 +12502,27 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
     }));
   };
 
-  const generateBracketFromGroups = () => {
-    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
-    const realBracket = carrySkeletonSchedules(category.bracketIsSkeleton ? category.bracket : null, buildSeededBracket(seeding));
-    const withBracket = { ...category, bracket: realBracket, bracketSeeding: seeding, bracketIsSkeleton: false, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false };
-    onUpdateCategory(autoScheduleBracket(tournament, withBracket));
+  // La llave desde los grupos siempre se arma con los lugares ("1° Grupo A") y se completa con los
+  // grupos terminados: así queda enganchada a ellos (ver fillSkeletonBracket)
+  const linkedBracketFromGroups = (prev) => {
+    const lugares = buildPlaceholderBracket(category.groups);
+    if (!lugares) return null;
+    return fillSkeletonBracket({ ...category, bracket: carrySkeletonSchedules(prev, lugares), bracketIsSkeleton: true, bracketSeeding: null }, format);
   };
 
-  // Rearma la llave con los clasificados actuales (si cambiaron después de armarla), sin perder
-  // los horarios ya puestos ni si estaba publicada. Solo se ofrece si la llave no tiene resultados.
+  const generateBracketFromGroups = () => {
+    const linked = linkedBracketFromGroups(category.bracketIsSkeleton ? category.bracket : null);
+    if (!linked) return;
+    onUpdateCategory(autoScheduleBracket(tournament, { ...linked, bracketPublished: category.bracketIsSkeleton ? category.bracketPublished : false }));
+  };
+
+  // Rearma la llave con los clasificados actuales (llaves viejas, armadas antes de que la llave
+  // siguiera a los grupos), sin perder los horarios ya puestos ni si estaba publicada. Solo se
+  // ofrece si la llave no tiene resultados.
   const rebuildBracketFromGroups = () => {
-    const seeding = buildKnockoutSeeding(category.groups, pairsById, format);
-    const realBracket = carrySkeletonSchedules(category.bracket, buildSeededBracket(seeding));
-    onUpdateCategory(autoScheduleBracket(tournament, { ...category, bracket: realBracket, bracketSeeding: seeding }));
+    const linked = linkedBracketFromGroups(category.bracket);
+    if (!linked) return;
+    onUpdateCategory(autoScheduleBracket(tournament, linked));
   };
   const qualifiersChange = bracketQualifiersChange(category, pairsById, format);
   const bracketHasScores = !!category.bracket && category.bracket.some((round) => round.some(matchHasScore));
@@ -11487,19 +12615,45 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
       )}
       {tab === "parejas" && (
         <div>
-          <div className="flex gap-2 mb-1">
-            <input
-              value={pairName}
-              onChange={(e) => setPairName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
-              placeholder={individual ? "Ej: Pérez" : "Ej: Pérez / López"}
-              className="flex-1 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
-            />
-            <button type="button" onClick={addPair} className="px-4 py-2 rounded font-semibold" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Agregar</button>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-2 mb-1" style={F.body}>
+            <div className="flex-1 min-w-0 space-y-2">
+              {filasCarga.map((j, i) => (
+                <div key={i}>
+                  <div className="flex gap-2">
+                    <input
+                      value={j.tel} inputMode="tel" aria-label={`Teléfono del jugador ${i + 1}`}
+                      onChange={(e) => { cambiarJugador(i, { tel: e.target.value, opciones: null, elegido: null }); if (normalizeArPhone(e.target.value)) buscarPorTelefono(i, e.target.value); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
+                      placeholder={circuito ? "Teléfono" : "Teléfono (opcional)"}
+                      className="w-36 sm:w-44 shrink-0 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                    />
+                    <input
+                      value={j.texto} aria-label={`Apellido y nombre del jugador ${i + 1}`}
+                      onChange={(e) => cambiarJugador(i, { texto: e.target.value })}
+                      onKeyDown={(e) => { if (e.key === "Enter") addPair(); }}
+                      placeholder={individual ? "Apellido Nombre" : `Jugador ${i + 1}: Apellido Nombre`}
+                      className="flex-1 min-w-0 px-3 py-2 rounded border outline-none focus:border-lime-400" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+                    />
+                  </div>
+                  {j.opciones && j.opciones.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-xs">
+                      <span className="text-teal-400">Con ese teléfono hay varios jugadores:</span>
+                      {j.opciones.map((o) => (
+                        <button key={o.id} type="button" onClick={() => elegirPerfil(i, o)} className="px-2 py-0.5 rounded-full border" style={j.elegido === o.id ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>{nombreJugador(o)}</button>
+                      ))}
+                      <button type="button" onClick={() => elegirPerfil(i, null)} className="px-2 py-0.5 rounded-full border" style={!j.elegido ? { borderColor: BRAND.lime, color: BRAND.lime } : { borderColor: "#1f4a55", color: "#cbd5e1" }}>Otro</button>
+                    </div>
+                  )}
+                  {j.opciones && j.opciones.length === 1 && j.elegido && <p className="text-[11px] text-lime-400 mt-0.5">Jugador encontrado por su teléfono.</p>}
+                </div>
+              ))}
+            </div>
+            <button type="button" onClick={addPair} disabled={agregando} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: confirmarRepetido ? "#fbbf24" : "#9fe022", color: "#14181f" }}>{agregando ? "…" : confirmarRepetido ? "Agregar igual" : "Agregar"}</button>
           </div>
+          {confirmarRepetido && <p className="text-xs text-amber-400 mb-3" style={F.body}>{confirmarRepetido} Si es correcto, tocá "Agregar igual".</p>}
           {pairError && <p className="text-xs text-red-400 mb-3" style={F.body}>{pairError}</p>}
           {pairNotice && <p className="text-xs text-amber-400 mb-3" style={F.body}>{pairNotice} Si son personas distintas, no hace falta hacer nada.</p>}
-          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Si un jugador ya está anotado en el torneo con un nombre igual o parecido, te avisamos (no se bloquea).</p>
+          <p className="text-[11px] text-teal-600 mb-3" style={F.body}>Con el teléfono, el jugador suma sus puntos aunque cambie de compañero, y si ya jugó antes su nombre se completa solo. {circuito ? "En los torneos de circuito es obligatorio." : "Es opcional: sin teléfono se anota solo con el nombre."}</p>
           <ul className="space-y-2">
             {category.pairs.map((p) => {
               const played = pairHasPlayed(category, p.id);
@@ -11547,9 +12701,11 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                       ) : (
                         <button type="button" onClick={() => startEditPair(p)} className="text-sm text-teal-300">Editar</button>
                       )}
+                      {!isEditing && accessToken && <button type="button" onClick={() => setTelefonosDe(telefonosDe === p.id ? null : p.id)} className="text-sm text-teal-300">Teléfonos</button>}
                       {!super8Generated && <button type="button" onClick={() => removePair(p.id)} className="text-sm text-red-400">Quitar</button>}
                     </div>
                   </div>
+                  {telefonosDe === p.id && <TelefonosPareja pair={p} accessToken={accessToken} onUpdatePair={(np) => onUpdateCategory({ ...category, pairs: category.pairs.map((x) => (x.id === np.id ? np : x)) })} />}
                   {usesSchedule && <PairAvailabilityEditor pair={p} playDates={groupPlayDates(tournament)} onChange={(availability) => updatePairAvailability(p.id, availability)} />}
                 </li>
               );
@@ -12458,6 +13614,647 @@ function conceptoInscripcion(p, tournaments) {
   const pair = c?.pairs?.find((x) => x.id === p.pareja_id);
   const jugador = c && pair ? jugadoresDePareja(c, pair).find((j) => j.jugador === p.jugador)?.nombre : null;
   return ["Inscripción", t?.name || "torneo borrado", c?.name, jugador].filter(Boolean).join(" · ");
+}
+
+/* ---------- Caja nueva: un solo libro de movimientos (ver supabase/migrations/20261045_caja_libro.sql) ----------
+   Si la base todavía no tiene el libro (el real antes de la migración), muestra la Caja de siempre. */
+
+const ERRORES_CAJA = {
+  no_autorizado: "No tenés permiso para esto.",
+  monto_invalido: "Poné un monto mayor a cero.",
+  falta_concepto: "Poné un concepto (al menos 3 letras).",
+  cuenta_invalida: "Elegí una cuenta activa.",
+  misma_cuenta: "La cuenta de origen y la de destino tienen que ser distintas.",
+  categoria_invalida: "Elegí una categoría.",
+  complejo_invalido: "Ese complejo no es tuyo.",
+  socio_invalido: "Elegí un socio activo.",
+  falta_sentido: "Elegí si sobra o falta plata.",
+  fecha_antes_del_saldo_inicial: "La fecha es anterior al saldo inicial de esa cuenta.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
+  ya_anulado: "Ese movimiento ya estaba anulado.",
+  anular_en_origen: "Este movimiento viene de un cobro o una compra: anulalo desde ahí (la venta, el turno, la compra…).",
+  editar_en_origen: "El monto y la fecha de este movimiento se corrigen desde donde se cobró o se pagó.",
+  movimiento_anulado: "Un movimiento anulado ya no se puede cambiar.",
+  cuenta_en_uso_por_un_medio: "Esa cuenta recibe un medio de cobro: primero elegí otra cuenta para ese medio.",
+};
+const errorCaja = (e) => ERRORES_CAJA[e?.code] || (/duplicate|unique/i.test(e?.message || "") ? "Ya existe uno con ese nombre." : "No se pudo guardar. Revisá la conexión.");
+const enPesos = (c) => conSigno(Number(c || 0) / 100);
+const CLASES_CUENTA = [["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["banco", "Banco"], ["otra", "Otra"]];
+const BOTONES_MOVIMIENTO = [
+  ["ingreso", "+ Ingreso", "#9fe022"], ["gasto", "+ Gasto", "#f87171"], ["retiro_socio", "Retiro de socio", "#f59e0b"],
+  ["aporte_socio", "Aporte de socio", "#22d3ee"], ["transferencia_interna", "Pasar entre cuentas", "#94a3b8"], ["ajuste", "Ajuste", "#94a3b8"],
+];
+
+function CajaLibro({ organizer, complejos = [], tournaments = [], venues = [] }) {
+  const hoy = hoyArgentina();
+  const accessToken = organizer.accessToken;
+  const [hayLibro, setHayLibro] = useState(null); // null = averiguando, false = la base no lo tiene
+  const [tipo, setTipo] = useState("mes");
+  const [rango, setRango] = useState(() => rangoPeriodo("mes", hoy));
+  const [base, setBase] = useState(null); // { cuentas, categorias, socios, medios, saldos }
+  const [movs, setMovs] = useState(null);
+  const [error, setError] = useState("");
+  const [vista, setVista] = useState("movimientos"); // movimientos | configurar
+  const [nuevo, setNuevo] = useState(null); // tipo del formulario abierto
+  const [abierto, setAbierto] = useState(null); // id del movimiento con el detalle abierto
+  const [complejo, setComplejo] = useState("");
+  const [filtros, setFiltros] = useState({ buscar: "", tipo: "", cuenta: "", categoria: "", quien: "", verAnulados: false });
+
+  useEffect(() => {
+    supabaseRpc("preparar_mi_caja", {}, accessToken)
+      .then(() => setHayLibro(true))
+      .catch((e) => setHayLibro(e.pgCode === "PGRST202" || e.pgCode === "42883" ? false : true));
+  }, [accessToken]);
+
+  const cargarBase = useCallback(async () => {
+    const yo = organizer.id;
+    const [cuentas, categorias, socios, medios, saldos] = await Promise.all([
+      supabaseTable(`cuentas_caja?dueno_id=eq.${yo}&order=orden.asc,nombre.asc`, { accessToken }),
+      supabaseTable(`categorias_caja?dueno_id=eq.${yo}&order=tipo.asc,orden.asc,nombre.asc`, { accessToken }),
+      supabaseTable(`socios_caja?dueno_id=eq.${yo}&order=nombre.asc`, { accessToken }),
+      supabaseTable(`cuenta_por_medio?dueno_id=eq.${yo}`, { accessToken }),
+      supabaseRpc("saldos_cuentas", {}, accessToken),
+    ]);
+    const config = await supabaseTable(`caja_config?dueno_id=eq.${yo}`, { accessToken }).then((r) => r[0] || {}).catch(() => null);
+    setBase({ cuentas, categorias, socios, medios, saldos, config });
+  }, [organizer.id, accessToken]);
+
+  const cargarMovs = useCallback(async () => {
+    const { desde, hasta } = rango;
+    if (!desde || !hasta || hasta < desde) { setMovs(null); setError("Revisá las fechas: \"hasta\" tiene que ser el mismo día o después de \"desde\"."); return; }
+    setMovs(await traerTodo(`movimientos?dueno_id=eq.${organizer.id}&fecha=gte.${desde}&fecha=lte.${hasta}&order=fecha.desc,cargado_at.desc,id.asc`, accessToken));
+  }, [rango, organizer.id, accessToken]);
+
+  const recargar = useCallback(async () => {
+    try { await Promise.all([cargarBase(), cargarMovs()]); setError(""); }
+    catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
+  }, [cargarBase, cargarMovs]);
+
+  useEffect(() => { if (hayLibro) { setMovs(null); recargar(); } }, [hayLibro, recargar]);
+
+  if (hayLibro === false) return <CajaPanel organizer={organizer} complejos={complejos} tournaments={tournaments} />;
+  if (hayLibro === null) return <p className="text-sm opacity-60" style={F.body}>Cargando…</p>;
+
+  const elegirTipo = (t) => { setTipo(t); if (t !== "rango") setRango(rangoPeriodo(t, hoy)); };
+  const chip = (key, label) => (
+    <button key={key} type="button" onClick={() => elegirTipo(key)} className={`px-3 py-1.5 rounded-full text-sm border ${tipo === key ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{label}</button>
+  );
+  const cuentaDe = (id) => base?.cuentas.find((c) => c.id === id);
+  const categoriaDe = (id) => base?.categorias.find((c) => c.id === id);
+  const socioDe = (id) => base?.socios.find((s) => s.id === id);
+  const complejoNombre = (id) => (id ? venues.find((v) => v.id === id)?.name || "Complejo" : "");
+  const delComplejo = (movs || []).filter((m) => !complejo || m.complejo_id === complejo);
+  const resumen = resumenLibro(delComplejo);
+  const visibles = filtrarMovimientos(delComplejo, filtros, organizer.id);
+  const saldosActivos = (base?.saldos || []).filter((s) => s.activa || Number(s.saldo) !== 0);
+  const totalSaldos = saldosActivos.reduce((s, x) => s + Number(x.saldo), 0);
+
+  const descargar = () => {
+    const filas = [["Fecha", "Tipo", "Categoría", "Concepto", "Cuenta", "Destino", "Complejo", "Medio", "Monto", "Anulado"], ...visibles.map((m) => [
+      m.fecha, TIPOS_MOVIMIENTO[m.tipo], categoriaDe(m.categoria_id)?.nombre || "", m.concepto, cuentaDe(m.cuenta_id)?.nombre || "",
+      cuentaDe(m.cuenta_destino_id)?.nombre || "", complejoNombre(m.complejo_id), m.medio ? medioCobroLabel(m.medio) : "",
+      String((signoMovimiento(m) || 1) * Number(m.monto) / 100).replace(".", ","), m.anulado_at ? `Sí: ${m.anulado_motivo}` : "",
+    ])];
+    const csv = "﻿" + filas.map((f) => f.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `caja-${rango.desde}-al-${rango.hasta}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  const barrasIng = base ? barrasPorCategoria(resumen.porCategoria.ingreso, base.categorias) : [];
+  const barrasGas = base ? barrasPorCategoria(resumen.porCategoria.gasto, base.categorias) : [];
+  const Barras = ({ titulo, filas, color }) => (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-2 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <h2 className="text-xs uppercase tracking-wide text-teal-400">{titulo}</h2>
+      {filas.length === 0 ? <p className="text-teal-600 text-xs">Nada en este período.</p> : filas.map((f) => (
+        <button key={f.id} type="button" onClick={() => setFiltros((x) => ({ ...x, categoria: x.categoria === f.id ? "" : f.id }))} className="block w-full text-left">
+          <div className="flex justify-between gap-2 text-teal-200"><span className="truncate">{f.nombre}</span><span className="tabular-nums shrink-0">{enPesos(f.monto)}</span></div>
+          <div className="h-2 rounded-full mt-1" style={{ backgroundColor: "#134e4a" }}><div className="h-2 rounded-full" style={{ width: `${Math.max(2, f.pct)}%`, backgroundColor: color, opacity: filtros.categoria && filtros.categoria !== f.id ? 0.35 : 1 }} /></div>
+        </button>
+      ))}
+    </section>
+  );
+
+  return (
+    <div className="space-y-4 text-sm" style={F.body}>
+      <div className="flex flex-wrap items-center gap-2">
+        {[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["rango", "Elegir fechas"]].map(([k, l]) => chip(k, l))}
+        {complejos.length > 1 && (
+          <select value={complejo} onChange={(e) => setComplejo(e.target.value)} aria-label="Complejo" className="px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+            <option value="">Todos los complejos</option>
+            {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+          </select>
+        )}
+        <button type="button" onClick={() => setVista(vista === "configurar" ? "movimientos" : "configurar")} className="ml-auto px-3 py-1.5 rounded-lg border border-teal-700 text-teal-300 hover:text-lime-400">
+          {vista === "configurar" ? "← Volver a la caja" : "⚙ Configurar"}
+        </button>
+      </div>
+      {tipo === "rango" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" value={rango.desde} onChange={(e) => setRango({ ...rango, desde: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Desde" />
+          <span className="text-teal-400">al</span>
+          <input type="date" value={rango.hasta} onChange={(e) => setRango({ ...rango, hasta: e.target.value })} className="px-2 py-1.5 rounded border" style={adminInput} aria-label="Hasta" />
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, -1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período anterior">‹</button>
+          <span className="font-semibold text-teal-100">{etiquetaPeriodo(tipo, rango)}</span>
+          <button type="button" onClick={() => setRango(moverPeriodo(tipo, rango, 1))} className="px-3 py-1 rounded border border-teal-800 text-teal-300" aria-label="Período siguiente">›</button>
+        </div>
+      )}
+
+      {error && <p className="text-red-400">{error}</p>}
+      {base === null || movs === null ? (!error && <p className="opacity-60">Cargando…</p>) : vista === "configurar" ? (
+        <ConfigCaja base={base} accessToken={accessToken} onCambio={recargar} />
+      ) : (
+        <>
+          {/* Saldos de hoy, por cuenta */}
+          <section>
+            <div className="flex items-baseline justify-between mb-2">
+              <h2 className="text-xs uppercase tracking-wide text-teal-500">Saldos hoy</h2>
+              <span className="text-xs text-teal-400">Total <span className="font-semibold tabular-nums text-slate-100">{enPesos(totalSaldos)}</span></span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+              {saldosActivos.map((s) => (
+                <button key={s.cuenta_id} type="button" onClick={() => setFiltros((x) => ({ ...x, cuenta: x.cuenta === s.cuenta_id ? "" : s.cuenta_id }))}
+                  className={`rounded-xl border p-3 text-left min-w-0 ${filtros.cuenta === s.cuenta_id ? "border-lime-400" : "border-teal-800"}`} style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+                  <p className="text-xs text-teal-400 truncate">{s.nombre}{!s.activa && " (archivada)"}</p>
+                  <p className="text-lg font-semibold tabular-nums truncate" style={{ color: Number(s.saldo) < 0 ? "#f87171" : "#f1f5f9" }}>{enPesos(s.saldo)}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* Resultado del período */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <TarjetaResumen titulo="Ingresos" tono="lime" valor={enPesos(resumen.ingresos)} detalle={etiquetaPeriodo(tipo, rango)} />
+            <TarjetaResumen titulo="Gastos" tono="rojo" valor={enPesos(resumen.gastos)} detalle={etiquetaPeriodo(tipo, rango)} />
+            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Resultado" tono={resumen.resultado < 0 ? "rojo" : "cyan"} valor={enPesos(resumen.resultado)} detalle="Ingresos − gastos" /></div>
+          </div>
+          {(resumen.retiros > 0 || resumen.aportes > 0 || resumen.ajustes !== 0) && (
+            <p className="text-xs text-teal-400">
+              {[resumen.retiros > 0 && `Retiros de socios ${enPesos(resumen.retiros)}`, resumen.aportes > 0 && `Aportes de socios ${enPesos(resumen.aportes)}`,
+                resumen.ajustes !== 0 && `Ajustes ${enPesos(resumen.ajustes)}`].filter(Boolean).join(" · ")}
+              <span className="text-teal-600"> (no cuentan como ingreso ni gasto)</span>
+            </p>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <Barras titulo="Ingresos por origen" filas={barrasIng} color={BRAND.lime} />
+            <Barras titulo="Gastos por categoría" filas={barrasGas} color="#f87171" />
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {BOTONES_MOVIMIENTO.filter(([t]) => (t !== "retiro_socio" && t !== "aporte_socio") || base.socios.some((x) => x.activo)).map(([t, label, color]) => (
+              <button key={t} type="button" onClick={() => { setNuevo(nuevo === t ? null : t); setAbierto(null); }}
+                className="px-3 py-2 rounded-lg border font-semibold" style={{ borderColor: color, color, backgroundColor: nuevo === t ? `${color}22` : "transparent" }}>{label}</button>
+            ))}
+          </div>
+          {nuevo && (
+            <FormMovimiento tipo={nuevo} base={base} complejos={complejos} complejoNombre={complejoNombre} accessToken={accessToken} hoy={hoy}
+              onCancelar={() => setNuevo(null)} onGuardado={() => { setNuevo(null); recargar(); }} onConfigurar={() => { setNuevo(null); setVista("configurar"); }} />
+          )}
+
+          <GastosFijos organizer={organizer} mes={rango.hasta.slice(0, 7)} onChanged={recargar} />
+
+          {/* Lista de movimientos */}
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <p className="text-xs uppercase tracking-wide text-teal-500 mr-auto">Movimientos ({visibles.length})</p>
+              <input value={filtros.buscar} onChange={(e) => setFiltros({ ...filtros, buscar: e.target.value })} placeholder="Buscar concepto" aria-label="Buscar concepto" className="w-full sm:w-44 px-3 py-1.5 rounded-lg border text-sm" style={adminInput} />
+              <select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })} aria-label="Tipo" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todos los tipos</option>
+                {Object.entries(TIPOS_MOVIMIENTO).filter(([k]) => (k !== "retiro_socio" && k !== "aporte_socio") || base.socios.length > 0 || delComplejo.some((m) => m.tipo === k)).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <select value={filtros.cuenta} onChange={(e) => setFiltros({ ...filtros, cuenta: e.target.value })} aria-label="Cuenta" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todas las cuentas</option>
+                {base.cuentas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+              <select value={filtros.categoria} onChange={(e) => setFiltros({ ...filtros, categoria: e.target.value })} aria-label="Categoría" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Todas las categorías</option>
+                {base.categorias.map((c) => <option key={c.id} value={c.id}>{c.tipo === "gasto" ? "Gasto · " : "Ingreso · "}{c.nombre}</option>)}
+              </select>
+              <select value={filtros.quien} onChange={(e) => setFiltros({ ...filtros, quien: e.target.value })} aria-label="Quién cargó" className="w-full sm:w-auto px-3 py-1.5 rounded-lg border text-sm" style={adminInput}>
+                <option value="">Cargado por cualquiera</option>
+                <option value="yo">Cargado por mí</option>
+                <option value="otros">Cargado por empleados</option>
+              </select>
+              <label className="flex items-center gap-1.5 text-xs text-teal-300"><input type="checkbox" checked={filtros.verAnulados} onChange={(e) => setFiltros({ ...filtros, verAnulados: e.target.checked })} /> Ver anulados</label>
+              {visibles.length > 0 && <button type="button" onClick={descargar} className="text-xs text-teal-300 underline">Descargar planilla</button>}
+            </div>
+            {visibles.length === 0 ? (
+              <p className="text-teal-400">{delComplejo.length === 0 ? "No hay movimientos en este período." : "No hay movimientos con ese filtro."}</p>
+            ) : (
+              <ul className="rounded-xl border border-teal-800 divide-y divide-teal-900/70 overflow-hidden">
+                {visibles.map((m) => {
+                  const signo = signoMovimiento(m);
+                  const color = m.anulado_at ? "#64748b" : signo > 0 ? BRAND.lime : signo < 0 ? "#f87171" : "#cbd5e1";
+                  const cat = categoriaDe(m.categoria_id);
+                  return (
+                    <li key={m.id}>
+                      <button type="button" onClick={() => { setAbierto(abierto === m.id ? null : m.id); setNuevo(null); }} className={`w-full text-left px-3 py-2.5 flex items-start gap-3 hover:bg-white/5 ${abierto === m.id ? "bg-white/5" : ""}`}>
+                        <span className="text-xs text-teal-400 tabular-nums w-11 shrink-0 pt-0.5">{m.fecha.slice(8, 10)}/{m.fecha.slice(5, 7)}</span>
+                        <span className="flex-1 min-w-0">
+                          <span className={`block truncate ${m.anulado_at ? "line-through text-slate-500" : "text-slate-100"}`}>{m.concepto}</span>
+                          <span className="block text-xs text-teal-500 truncate">
+                            {[cat?.nombre || TIPOS_MOVIMIENTO[m.tipo],
+                              m.tipo === "transferencia_interna" ? `${cuentaDe(m.cuenta_id)?.nombre} → ${cuentaDe(m.cuenta_destino_id)?.nombre}` : cuentaDe(m.cuenta_id)?.nombre,
+                              socioDe(m.socio_id)?.nombre, complejos.length > 1 && complejoNombre(m.complejo_id),
+                              m.cargado_por !== organizer.id && "empleado", m.anulado_at && "ANULADO"].filter(Boolean).join(" · ")}
+                          </span>
+                        </span>
+                        <span className="font-semibold tabular-nums whitespace-nowrap" style={{ color }}>{signo > 0 ? "+" : signo < 0 ? "−" : ""}{formatoPrecio(Number(m.monto) / 100)}</span>
+                      </button>
+                      {abierto === m.id && (
+                        <DetalleMovimiento m={m} base={base} complejos={complejos} complejoNombre={complejoNombre} accessToken={accessToken} esMio={m.cargado_por === organizer.id}
+                          onCerrar={() => setAbierto(null)} onCambio={recargar} />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* Formulario de un movimiento a mano (ingreso, gasto, retiro/aporte de socio, pase entre cuentas, ajuste) */
+function FormMovimiento({ tipo, base, complejos, complejoNombre, accessToken, hoy, onCancelar, onGuardado, onConfigurar }) {
+  const activas = base.cuentas.filter((c) => c.activa);
+  const efectivo = activas.find((c) => c.clase === "efectivo")?.id || activas[0]?.id || "";
+  const categorias = base.categorias.filter((c) => c.tipo === tipo && c.activa);
+  const socios = base.socios.filter((s) => s.activo);
+  const [f, setF] = useState({
+    monto: "", fecha: hoy, concepto: "", cuenta: efectivo, destino: activas.find((c) => c.id !== efectivo)?.id || "",
+    categoria: "", complejo: complejos.length === 1 ? complejos[0].id : "", socio: socios.length === 1 ? socios[0].id : "", sentido: "1",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const titulo = { ingreso: "Nuevo ingreso", gasto: "Nuevo gasto", retiro_socio: "Retiro de socio (la plata sale del negocio)", aporte_socio: "Aporte de socio (la plata entra al negocio)", transferencia_interna: "Pasar plata de una cuenta a otra", ajuste: "Ajuste (para corregir un saldo)" }[tipo];
+  const guardar = async () => {
+    const monto = aCentavos(f.monto);
+    if (!monto) { setError("Poné el monto."); return; }
+    setBusy(true); setError("");
+    try {
+      if (tipo === "transferencia_interna") {
+        await supabaseRpc("transferir_entre_cuentas", { p_origen: f.cuenta, p_destino: f.destino, p_monto: monto, p_concepto: f.concepto, p_fecha: f.fecha }, accessToken);
+      } else {
+        await supabaseRpc("registrar_movimiento", {
+          p_tipo: tipo, p_monto: monto, p_cuenta: f.cuenta, p_concepto: f.concepto, p_fecha: f.fecha,
+          p_categoria: f.categoria || null, p_complejo: f.complejo || null, p_medio: null,
+          p_socio: f.socio || null, p_sentido: tipo === "ajuste" ? Number(f.sentido) : null,
+        }, accessToken);
+      }
+      onGuardado();
+    } catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded-lg border text-base";
+  const etiqueta = "block text-xs text-teal-400 mb-1";
+  return (
+    <div className="rounded-xl border border-teal-700 p-3 space-y-3">
+      <p className="font-semibold text-teal-100">{titulo}</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block"><span className={etiqueta}>Monto</span><input inputMode="decimal" value={f.monto} onChange={(e) => setF({ ...f, monto: e.target.value })} placeholder="$" className={campo} style={adminInput} /></label>
+        <label className="block"><span className={etiqueta}>Fecha</span><input type="date" value={f.fecha} onChange={(e) => setF({ ...f, fecha: e.target.value })} className={campo} style={adminInput} /></label>
+        <label className="block sm:col-span-2"><span className={etiqueta}>Concepto</span><input value={f.concepto} onChange={(e) => setF({ ...f, concepto: e.target.value })} maxLength={120}
+          placeholder={{ ingreso: "Ej: sponsor de la fecha", gasto: "Ej: factura de luz de octubre", retiro_socio: "Ej: retiro de fin de mes", aporte_socio: "Ej: plata para comprar pelotas", transferencia_interna: "Ej: depósito en el banco", ajuste: "Ej: diferencia al contar la caja" }[tipo]} className={campo} style={adminInput} /></label>
+        <label className="block"><span className={etiqueta}>{tipo === "transferencia_interna" ? "Sale de" : tipo === "ingreso" || tipo === "aporte_socio" ? "Entra a" : tipo === "ajuste" ? "Cuenta" : "Sale de"}</span>
+          <select value={f.cuenta} onChange={(e) => setF({ ...f, cuenta: e.target.value })} className={campo} style={adminInput}>{activas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}</select></label>
+        {tipo === "transferencia_interna" && (
+          <label className="block"><span className={etiqueta}>Entra a</span>
+            <select value={f.destino} onChange={(e) => setF({ ...f, destino: e.target.value })} className={campo} style={adminInput}>{activas.filter((c) => c.id !== f.cuenta).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}</select></label>
+        )}
+        {(tipo === "ingreso" || tipo === "gasto") && (
+          <label className="block"><span className={etiqueta}>Categoría</span>
+            <select value={f.categoria} onChange={(e) => setF({ ...f, categoria: e.target.value })} className={campo} style={adminInput}>
+              <option value="">Elegí…</option>
+              {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select></label>
+        )}
+        {(tipo === "retiro_socio" || tipo === "aporte_socio") && (
+          socios.length ? (
+            <label className="block"><span className={etiqueta}>Socio</span>
+              <select value={f.socio} onChange={(e) => setF({ ...f, socio: e.target.value })} className={campo} style={adminInput}>
+                <option value="">Sin indicar</option>
+                {socios.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+              </select></label>
+          ) : <p className="text-xs text-teal-400 self-end pb-2">No cargaste socios. <button type="button" onClick={onConfigurar} className="underline text-teal-300">Cargalos en Configurar</button> para saber quién retiró.</p>
+        )}
+        {tipo === "ajuste" && (
+          <div><span className={etiqueta}>¿Qué pasó?</span>
+            <div className="flex gap-2">
+              {[["1", "Sobra plata"], ["-1", "Falta plata"]].map(([v, l]) => (
+                <button key={v} type="button" onClick={() => setF({ ...f, sentido: v })} className={`px-3 py-2 rounded-lg border ${f.sentido === v ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+              ))}
+            </div></div>
+        )}
+        {complejos.length > 1 && tipo !== "transferencia_interna" && (
+          <label className="block"><span className={etiqueta}>Complejo</span>
+            <select value={f.complejo} onChange={(e) => setF({ ...f, complejo: e.target.value })} className={campo} style={adminInput}>
+              <option value="">Todo el negocio</option>
+              {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+            </select></label>
+        )}
+      </div>
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar"}</button>
+        <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* Detalle de un movimiento: datos, editar, anular con motivo e historial */
+function DetalleMovimiento({ m, base, complejos, complejoNombre, accessToken, esMio, onCerrar, onCambio }) {
+  const auto = m.ref_tipo && m.ref_tipo !== "caja_vieja";
+  const [modo, setModo] = useState(null); // editar | anular
+  const [f, setF] = useState({ monto: centavosATexto(Number(m.monto)), fecha: m.fecha, concepto: m.concepto, cuenta: m.cuenta_id, categoria: m.categoria_id || "", socio: m.socio_id || "", complejo: m.complejo_id || "" });
+  const [motivo, setMotivo] = useState("");
+  const [historial, setHistorial] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    supabaseTable(`movimientos_historial?movimiento_id=eq.${m.id}&order=hecho_at.desc`, { accessToken }).then(setHistorial).catch(() => setHistorial([]));
+  }, [m.id, accessToken]);
+  const cuenta = (id) => base.cuentas.find((c) => c.id === id)?.nombre || "—";
+  const guardar = async () => {
+    setBusy(true); setError("");
+    try {
+      const cambios = { cuenta_id: f.cuenta, concepto: f.concepto };
+      if (m.tipo === "ingreso" || m.tipo === "gasto") cambios.categoria_id = f.categoria;
+      if (!auto) {
+        const monto = aCentavos(f.monto);
+        if (!monto) { setError("Poné el monto."); setBusy(false); return; }
+        Object.assign(cambios, { monto, fecha: f.fecha, complejo_id: f.complejo || null });
+        if (m.tipo === "retiro_socio" || m.tipo === "aporte_socio") cambios.socio_id = f.socio || null;
+      }
+      await supabaseRpc("editar_movimiento", { p_id: m.id, p_cambios: cambios }, accessToken);
+      setModo(null); onCambio();
+    } catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const anular = async () => {
+    setBusy(true); setError("");
+    try { await supabaseRpc("anular_movimiento", { p_id: m.id, p_motivo: motivo }, accessToken); onCerrar(); onCambio(); }
+    catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const campo = "w-full px-3 py-2 rounded-lg border text-base";
+  const etiqueta = "block text-xs text-teal-400 mb-1";
+  const fila = (k, v) => v ? <p className="text-xs"><span className="text-teal-500">{k}: </span><span className="text-slate-200">{v}</span></p> : null;
+  return (
+    <div className="px-3 pb-3 pt-1 space-y-3" style={{ backgroundColor: "rgba(255,255,255,0.03)" }}>
+      <div className="grid gap-1 sm:grid-cols-2">
+        {fila("Tipo", TIPOS_MOVIMIENTO[m.tipo])}
+        {fila("Categoría", base.categorias.find((c) => c.id === m.categoria_id)?.nombre)}
+        {fila(m.tipo === "transferencia_interna" ? "De → a" : "Cuenta", m.tipo === "transferencia_interna" ? `${cuenta(m.cuenta_id)} → ${cuenta(m.cuenta_destino_id)}` : cuenta(m.cuenta_id))}
+        {fila("Medio", m.medio && medioCobroLabel(m.medio))}
+        {fila("Socio", base.socios.find((s) => s.id === m.socio_id)?.nombre)}
+        {fila("Complejo", complejoNombre(m.complejo_id))}
+        {auto ? fila("Cobrado", esMio ? "por vos" : "por un empleado") : fila("Cargado", `${fechaCorta(fechaArgentina(m.cargado_at))} ${new Date(m.cargado_at).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Argentina/Buenos_Aires" })}${esMio ? " por vos" : " por un empleado"}`)}
+        {auto && fila("Origen", `Viene de ${ORIGENES_LIBRO[m.ref_tipo]} (se anotó solo)`)}
+        {m.anulado_at && fila("Anulado", `${fechaCorta(fechaArgentina(m.anulado_at))} · ${m.anulado_motivo}`)}
+      </div>
+
+      {!m.anulado_at && modo === null && (
+        <div className="flex flex-wrap gap-3">
+          <button type="button" onClick={() => setModo("editar")} className="text-teal-300 hover:text-lime-400">Editar</button>
+          {auto ? <span className="text-xs text-teal-600 self-center">Para anularlo, anulá {ORIGENES_LIBRO[m.ref_tipo]} desde donde se cargó.</span>
+            : <button type="button" onClick={() => setModo("anular")} className="text-red-400">Anular</button>}
+          <button type="button" onClick={onCerrar} className="text-teal-500 ml-auto">Cerrar</button>
+        </div>
+      )}
+
+      {modo === "editar" && (
+        <div className="space-y-3">
+          {auto && <p className="text-xs text-teal-400">El monto y la fecha se corrigen desde donde se cobró o se pagó. Acá podés cambiar la cuenta, la categoría y el concepto.</p>}
+          <div className="grid gap-3 sm:grid-cols-2">
+            {!auto && <label className="block"><span className={etiqueta}>Monto</span><input inputMode="decimal" value={f.monto} onChange={(e) => setF({ ...f, monto: e.target.value })} className={campo} style={adminInput} /></label>}
+            {!auto && <label className="block"><span className={etiqueta}>Fecha</span><input type="date" value={f.fecha} onChange={(e) => setF({ ...f, fecha: e.target.value })} className={campo} style={adminInput} /></label>}
+            <label className="block sm:col-span-2"><span className={etiqueta}>Concepto</span><input value={f.concepto} onChange={(e) => setF({ ...f, concepto: e.target.value })} maxLength={120} className={campo} style={adminInput} /></label>
+            <label className="block"><span className={etiqueta}>Cuenta</span>
+              <select value={f.cuenta} onChange={(e) => setF({ ...f, cuenta: e.target.value })} className={campo} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa || c.id === m.cuenta_id).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select></label>
+            {(m.tipo === "ingreso" || m.tipo === "gasto") && (
+              <label className="block"><span className={etiqueta}>Categoría</span>
+                <select value={f.categoria} onChange={(e) => setF({ ...f, categoria: e.target.value })} className={campo} style={adminInput}>
+                  {base.categorias.filter((c) => c.tipo === m.tipo && (c.activa || c.id === m.categoria_id)).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select></label>
+            )}
+            {!auto && (m.tipo === "retiro_socio" || m.tipo === "aporte_socio") && (
+              <label className="block"><span className={etiqueta}>Socio</span>
+                <select value={f.socio} onChange={(e) => setF({ ...f, socio: e.target.value })} className={campo} style={adminInput}>
+                  <option value="">Sin indicar</option>
+                  {base.socios.filter((s) => s.activo || s.id === m.socio_id).map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                </select></label>
+            )}
+            {!auto && complejos.length > 1 && m.tipo !== "transferencia_interna" && (
+              <label className="block"><span className={etiqueta}>Complejo</span>
+                <select value={f.complejo} onChange={(e) => setF({ ...f, complejo: e.target.value })} className={campo} style={adminInput}>
+                  <option value="">Todo el negocio</option>
+                  {complejos.map((c) => <option key={c.id} value={c.id}>{complejoNombre(c.id)}</option>)}
+                </select></label>
+            )}
+          </div>
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Guardar cambios"}</button>
+            <button type="button" onClick={() => setModo(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {modo === "anular" && (
+        <div className="space-y-2">
+          <p className="text-xs text-teal-400">El movimiento no se borra: queda tachado, con el motivo, y deja de contar en los saldos.</p>
+          <input value={motivo} onChange={(e) => setMotivo(e.target.value)} maxLength={120} placeholder="Motivo (ej: se cargó dos veces)" className={campo} style={adminInput} />
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={anular} className="px-4 py-2 rounded-lg font-semibold border border-red-400 text-red-300 disabled:opacity-50">{busy ? "Anulando…" : "Anular movimiento"}</button>
+            <button type="button" onClick={() => setModo(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+
+      {historial?.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-wide text-teal-500 mb-1">Historial</p>
+          <ul className="space-y-1">
+            {historial.map((h) => {
+              const cambios = h.accion === "anulacion" ? [`anulado: ${h.motivo}`] : ["monto", "fecha", "concepto", "cuenta_id", "categoria_id", "socio_id", "complejo_id", "medio"]
+                .filter((k) => JSON.stringify(h.antes[k]) !== JSON.stringify(h.despues[k]))
+                .map((k) => {
+                  const ver = (v) => (k === "monto" ? formatoPrecio(Number(v) / 100) : k === "cuenta_id" ? cuenta(v) : k === "categoria_id" ? base.categorias.find((c) => c.id === v)?.nombre || "—"
+                    : k === "socio_id" ? base.socios.find((s) => s.id === v)?.nombre || "—" : k === "complejo_id" ? complejoNombre(v) || "todo el negocio" : v ?? "—");
+                  return `${{ monto: "monto", fecha: "fecha", concepto: "concepto", cuenta_id: "cuenta", categoria_id: "categoría", socio_id: "socio", complejo_id: "complejo", medio: "medio" }[k]}: ${ver(h.antes[k])} → ${ver(h.despues[k])}`;
+                });
+              return <li key={h.id} className="text-xs text-teal-300"><span className="text-teal-500">{fechaCorta(fechaArgentina(h.hecho_at))}</span> · {cambios.join(" · ") || "cambio"}</li>;
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Configurar la caja: cuentas (saldo inicial, archivar), a qué cuenta va cada medio, categorías y socios */
+function ConfigCaja({ base, accessToken, onCambio }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [editCuenta, setEditCuenta] = useState(null); // {id|null, nombre, clase, saldo, fecha, activa}
+  const [nuevaCat, setNuevaCat] = useState({ ingreso: "", gasto: "" });
+  const [editCat, setEditCat] = useState(null); // {id, nombre}
+  const [nuevoSocio, setNuevoSocio] = useState("");
+  const [editSocio, setEditSocio] = useState(null);
+  const llamar = async (fn, params, despues) => {
+    setBusy(true); setError("");
+    try { await supabaseRpc(fn, params, accessToken); despues?.(); await onCambio(); }
+    catch (e) { setError(errorCaja(e)); }
+    finally { setBusy(false); }
+  };
+  const saldoDe = (id) => base.saldos.find((s) => s.cuenta_id === id)?.saldo;
+  const medioCuenta = (medio) => base.medios.find((x) => x.complejo_id === "" && x.medio === medio)?.cuenta_id || "";
+  const caja = "rounded-xl border border-teal-800 p-4 space-y-3 min-w-0";
+  const fondo = { backgroundColor: "rgba(8,18,24,0.6)" };
+  const campo = "px-3 py-2 rounded-lg border text-sm";
+  const guardarCuenta = () => {
+    const saldo = editCuenta.saldo.trim() === "" ? 0 : (editCuenta.saldo.trim().startsWith("-") ? -1 : 1) * (aCentavos(editCuenta.saldo.replace("-", "")) || 0);
+    llamar("guardar_cuenta_caja", { p_id: editCuenta.id, p_nombre: editCuenta.nombre, p_clase: editCuenta.clase, p_saldo_inicial: saldo, p_saldo_fecha: editCuenta.fecha || null, p_activa: editCuenta.activa }, () => setEditCuenta(null));
+  };
+  return (
+    <div className="space-y-4">
+      {error && <p className="text-red-400">{error}</p>}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Cuentas</h2>
+          <p className="text-xs text-teal-500">Dónde está la plata. El saldo inicial es lo que había en esa cuenta el día que empezás a usar la caja.</p>
+          <ul className="divide-y divide-teal-900/70">
+            {base.cuentas.map((c) => (
+              <li key={c.id} className="py-2">
+                {editCuenta?.id === c.id ? null : (
+                  <div className="flex items-center gap-2">
+                    <span className={`flex-1 min-w-0 truncate ${c.activa ? "text-slate-100" : "text-slate-500 line-through"}`}>{c.nombre}</span>
+                    <span className="text-xs text-teal-500 hidden sm:inline">inicial {enPesos(c.saldo_inicial)} el {fechaCorta(c.saldo_inicial_fecha)}</span>
+                    <span className="tabular-nums text-teal-200">{enPesos(saldoDe(c.id))}</span>
+                    <button type="button" onClick={() => setEditCuenta({ id: c.id, nombre: c.nombre, clase: c.clase, saldo: (c.saldo_inicial < 0 ? "-" : "") + centavosATexto(Math.abs(c.saldo_inicial)), fecha: c.saldo_inicial_fecha, activa: c.activa })} className="text-xs text-teal-300 hover:text-lime-400">Editar</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          {editCuenta ? (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="font-semibold text-teal-100">{editCuenta.id ? "Editar cuenta" : "Cuenta nueva"}</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={editCuenta.nombre} onChange={(e) => setEditCuenta({ ...editCuenta, nombre: e.target.value })} maxLength={40} placeholder="Nombre (ej: Banco Nación)" className={campo} style={adminInput} />
+                <select value={editCuenta.clase} onChange={(e) => setEditCuenta({ ...editCuenta, clase: e.target.value })} className={campo} style={adminInput}>{CLASES_CUENTA.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                <label className="block"><span className="block text-xs text-teal-400 mb-1">Saldo inicial</span><input inputMode="decimal" value={editCuenta.saldo} onChange={(e) => setEditCuenta({ ...editCuenta, saldo: e.target.value })} placeholder="$0" className={`w-full ${campo}`} style={adminInput} /></label>
+                <label className="block"><span className="block text-xs text-teal-400 mb-1">Al día</span><input type="date" value={editCuenta.fecha} onChange={(e) => setEditCuenta({ ...editCuenta, fecha: e.target.value })} className={`w-full ${campo}`} style={adminInput} /></label>
+              </div>
+              {editCuenta.id && (
+                <label className="flex items-center gap-2 text-xs text-teal-300"><input type="checkbox" checked={!editCuenta.activa} onChange={(e) => setEditCuenta({ ...editCuenta, activa: !e.target.checked })} /> Archivarla (no se borra: sus movimientos quedan)</label>
+              )}
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy || editCuenta.nombre.trim().length < 2} onClick={guardarCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+                <button type="button" onClick={() => setEditCuenta(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setEditCuenta({ id: null, nombre: "", clase: "banco", saldo: "", fecha: hoyArgentina(), activa: true })} className="text-teal-300 hover:text-lime-400">+ Agregar cuenta</button>
+          )}
+        </section>
+
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Medios de cobro</h2>
+          <p className="text-xs text-teal-500">A qué cuenta va la plata de cada medio cuando se cobra un turno, una venta, una inscripción, etc.</p>
+          {MEDIOS_VENTA.map(([medio, label]) => (
+            <label key={medio} className="flex items-center gap-3">
+              <span className="w-32 text-teal-200">{label}</span>
+              <select value={medioCuenta(medio)} disabled={busy} onChange={(e) => llamar("elegir_cuenta_medio", { p_medio: medio, p_cuenta: e.target.value, p_complejo: "" })} className={`flex-1 ${campo}`} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa || c.id === medioCuenta(medio)).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+            </label>
+          ))}
+          <p className="text-xs text-teal-600">Vale para los cobros nuevos; los anteriores quedan donde estaban.</p>
+          {base.config && (
+            <label className="block pt-2 border-t border-teal-900">
+              <span className="block text-teal-200">Caja del día</span>
+              <span className="block text-xs text-teal-500 mb-1">Al cerrar, el efectivo contado pasa a esta cuenta (y de acá sale el fondo al abrir).</span>
+              <select value={base.config.cuenta_guardado || base.cuentas.find((c) => c.nombre === "Caja fuerte" && c.activa)?.id || ""} disabled={busy}
+                onChange={(e) => llamar("elegir_cuenta_guardado", { p_cuenta: e.target.value })} className={`w-full ${campo}`} style={adminInput}>
+                {base.cuentas.filter((c) => c.activa && c.nombre !== "Efectivo").map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+            </label>
+          )}
+        </section>
+
+        {["ingreso", "gasto"].map((t) => (
+          <section key={t} className={caja} style={fondo}>
+            <h2 className="text-sm uppercase tracking-wide text-teal-400">{t === "ingreso" ? "Categorías de ingresos" : "Categorías de gastos"}</h2>
+            <ul className="divide-y divide-teal-900/70">
+              {base.categorias.filter((c) => c.tipo === t).map((c) => (
+                <li key={c.id} className="py-1.5 flex items-center gap-2">
+                  {editCat?.id === c.id ? (
+                    <>
+                      <input value={editCat.nombre} onChange={(e) => setEditCat({ ...editCat, nombre: e.target.value })} maxLength={40} className={`flex-1 ${campo}`} style={adminInput} />
+                      <button type="button" disabled={busy || editCat.nombre.trim().length < 2} onClick={() => llamar("guardar_categoria_caja", { p_id: c.id, p_tipo: t, p_nombre: editCat.nombre, p_activa: c.activa }, () => setEditCat(null))} className="text-xs text-lime-400 disabled:opacity-50">Guardar</button>
+                      <button type="button" onClick={() => setEditCat(null)} className="text-xs text-teal-400">Cancelar</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className={`flex-1 min-w-0 truncate ${c.activa ? "text-slate-100" : "text-slate-500 line-through"}`}>{c.nombre}{c.clave && <span className="text-[10px] text-teal-600 ml-1">automática</span>}</span>
+                      <button type="button" onClick={() => setEditCat({ id: c.id, nombre: c.nombre })} className="text-xs text-teal-300 hover:text-lime-400">Renombrar</button>
+                      {!c.clave && <button type="button" disabled={busy} onClick={() => llamar("guardar_categoria_caja", { p_id: c.id, p_tipo: t, p_nombre: c.nombre, p_activa: !c.activa })} className="text-xs text-teal-400 hover:text-red-400">{c.activa ? "Desactivar" : "Activar"}</button>}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <input value={nuevaCat[t]} onChange={(e) => setNuevaCat({ ...nuevaCat, [t]: e.target.value })} maxLength={40} placeholder={t === "ingreso" ? "Ej: Alquiler del salón" : "Ej: Seguridad"} className={`flex-1 ${campo}`} style={adminInput} />
+              <button type="button" disabled={busy || nuevaCat[t].trim().length < 2} onClick={() => llamar("guardar_categoria_caja", { p_id: null, p_tipo: t, p_nombre: nuevaCat[t], p_activa: true }, () => setNuevaCat({ ...nuevaCat, [t]: "" }))} className="px-3 rounded-lg border border-lime-400 text-lime-400 disabled:opacity-40">Agregar</button>
+            </div>
+          </section>
+        ))}
+
+        <section className={caja} style={fondo}>
+          <h2 className="text-sm uppercase tracking-wide text-teal-400">Socios</h2>
+          <p className="text-xs text-teal-500">Para anotar quién retira o pone plata. Con al menos un socio cargado aparecen en la Caja los botones "Retiro de socio" y "Aporte de socio".</p>
+          {base.socios.length === 0 && <p className="text-xs text-teal-600">Todavía no cargaste socios.</p>}
+          <ul className="divide-y divide-teal-900/70">
+            {base.socios.map((s) => (
+              <li key={s.id} className="py-1.5 flex items-center gap-2">
+                {editSocio?.id === s.id ? (
+                  <>
+                    <input value={editSocio.nombre} onChange={(e) => setEditSocio({ ...editSocio, nombre: e.target.value })} maxLength={40} className={`flex-1 ${campo}`} style={adminInput} />
+                    <button type="button" disabled={busy || editSocio.nombre.trim().length < 2} onClick={() => llamar("guardar_socio", { p_id: s.id, p_nombre: editSocio.nombre, p_activo: s.activo }, () => setEditSocio(null))} className="text-xs text-lime-400 disabled:opacity-50">Guardar</button>
+                    <button type="button" onClick={() => setEditSocio(null)} className="text-xs text-teal-400">Cancelar</button>
+                  </>
+                ) : (
+                  <>
+                    <span className={`flex-1 min-w-0 truncate ${s.activo ? "text-slate-100" : "text-slate-500 line-through"}`}>{s.nombre}</span>
+                    <button type="button" onClick={() => setEditSocio({ id: s.id, nombre: s.nombre })} className="text-xs text-teal-300 hover:text-lime-400">Renombrar</button>
+                    <button type="button" disabled={busy} onClick={() => llamar("guardar_socio", { p_id: s.id, p_nombre: s.nombre, p_activo: !s.activo })} className="text-xs text-teal-400 hover:text-red-400">{s.activo ? "Dar de baja" : "Reactivar"}</button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-2">
+            <input value={nuevoSocio} onChange={(e) => setNuevoSocio(e.target.value)} maxLength={40} placeholder="Nombre del socio" className={`flex-1 ${campo}`} style={adminInput} />
+            <button type="button" disabled={busy || nuevoSocio.trim().length < 2} onClick={() => llamar("guardar_socio", { p_id: null, p_nombre: nuevoSocio, p_activo: true }, () => setNuevoSocio(""))} className="px-3 rounded-lg border border-lime-400 text-lime-400 disabled:opacity-40">Agregar</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
 }
 
 function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
@@ -13372,11 +15169,13 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
     Promise.all([
       supabaseTable(`profes_complejo?complejo_id=eq.${c}&order=activo.desc,nombre.asc`, { accessToken }),
       supabaseTable(`canchas?complejo_id=eq.${c}&activa=eq.true&order=orden.asc,created_at.asc`),
-      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id&order=fecha.asc`, accessToken),
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.clase&estado=eq.confirmada&fecha=gte.${sumarDias(hoy, -120)}&select=id,profe_id,cancha_id,fecha,inicio,fin,precio,medio_pago,serie_id,horario_id&order=fecha.asc`, accessToken),
       supabaseTable(`alumnos?complejo_id=eq.${c}&order=nombre.asc`, { accessToken }),
       supabaseTable(`cuotas_alumnos?complejo_id=eq.${c}&periodo=eq.${mes}&select=alumno_id,monto,medio`, { accessToken }),
       esDueno ? supabaseTable(`pagos_profes?complejo_id=eq.${c}&periodo=eq.${mes}&select=profe_id,monto`, { accessToken }) : Promise.resolve([]),
-    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos }); setError(""); } })
+      supabaseTable(`horarios_profe?complejo_id=eq.${c}&order=created_at.asc`, { accessToken }).catch(() => null), // null: la base todavía no los tiene
+      supabaseTable(`complejos?id=eq.${c}&select=*`).then((r) => r[0] || null).catch(() => null),
+    ]).then(([profes, canchas, clases, alumnos, cuotas, pagos, horarios, complejo]) => { if (vivo) { setDatos({ profes, canchas, clases, alumnos, cuotas, pagos, horarios, complejo }); setError(""); } })
       .catch(() => { if (vivo) setError("No se pudieron cargar las clases. Revisá la conexión."); });
     return () => { vivo = false; };
   }, [complejoId, accessToken, esDueno, hoy, mes, version]);
@@ -13478,6 +15277,120 @@ function ClasesPanel({ complejos, venues, accessToken, esDueno }) {
   );
 }
 
+/* Horario fijo del profe (ver 20261048_horarios_profes.sql): días + desde-hasta + cancha. La base
+   mantiene reservadas las próximas 8 semanas, sin pisar turnos ya cargados. */
+const DIAS_SEMANA = [[1, "Lun"], [2, "Mar"], [3, "Mié"], [4, "Jue"], [5, "Vie"], [6, "Sáb"], [0, "Dom"]];
+const horaFin = (m) => (m === 1440 ? "24:00" : etiquetaHora(m));
+const diasTexto = (dias) => DIAS_SEMANA.filter(([d]) => dias.includes(d)).map(([, l]) => l).join(" · ");
+const fechasOcupadas = (lista) => (lista || []).map((f) => etiquetaFecha(f)).join(", ");
+
+function HorariosProfe({ profe, horarios, canchas, accessToken, hoy, onChanged }) {
+  const [form, setForm] = useState(null); // { id?, dias, desde, hasta, canchaId, fecha }
+  const [terminando, setTerminando] = useState(null); // { id, fecha }
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");
+  const vigentes = horarios.filter((h) => !h.vigente_hasta || h.vigente_hasta >= hoy);
+  const terminados = horarios.filter((h) => h.vigente_hasta && h.vigente_hasta < hoy);
+  const nombreCancha = (id) => canchas.find((c) => c.id === id)?.nombre || "Cancha";
+  const horas = Array.from({ length: 49 }, (_, i) => i * 30);
+  const nuevo = () => setForm({ dias: [], desde: 7 * 60, hasta: 12 * 60, canchaId: canchas[0].id, fecha: hoy });
+  const cambiar = (h) => setForm({ id: h.id, dias: [...h.dias], desde: h.desde, hasta: h.hasta, canchaId: h.cancha_id, fecha: hoy });
+  const correr = async (fn) => {
+    setBusy(true); setError(""); setAviso("");
+    try { await fn(); await onChanged(); } catch (e) { setError(reservaErrorText(e)); }
+    finally { setBusy(false); }
+  };
+  const guardar = () => {
+    if (!form.dias.length) { setError("Elegí al menos un día."); return; }
+    if (form.hasta <= form.desde) { setError("El \"hasta\" tiene que ser después del \"desde\"."); return; }
+    correr(async () => {
+      const params = { p_cancha: form.canchaId, p_dias: form.dias, p_desde: form.desde, p_hasta: form.hasta };
+      const r = form.id
+        ? await supabaseRpc("cambiar_horario_profe", { p_id: form.id, ...params, p_desde_fecha: form.fecha }, accessToken)
+        : await supabaseRpc("crear_horario_profe", { p_profe: profe.id, ...params, p_vigente_desde: form.fecha }, accessToken);
+      const ocupadas = r?.ocupadas || [];
+      setAviso((form.id ? "Horario cambiado." : `Listo: se reservaron ${r.creadas} clase${r.creadas === 1 ? "" : "s"} de las próximas 8 semanas, y se van a seguir reservando solas.`)
+        + (ocupadas.length ? ` No se pudieron reservar (la cancha estaba ocupada): ${fechasOcupadas(ocupadas)}.` : ""));
+      setForm(null);
+    });
+  };
+  const terminar = () => correr(async () => {
+    const n = await supabaseRpc("terminar_horario_profe", { p_id: terminando.id, p_desde: terminando.fecha }, accessToken);
+    setAviso(`Horario terminado: se liberaron ${n} clase${n === 1 ? "" : "s"}.`);
+    setTerminando(null);
+  });
+  const sel = "px-2 py-2 rounded-lg border text-base min-w-0";
+  return (
+    <section className="rounded-xl border border-teal-800 p-4 space-y-3 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm uppercase tracking-wide text-teal-400">Horario fijo</h3>
+        {!form && <button type="button" onClick={nuevo} className="text-xs text-lime-400 font-semibold">+ Horario fijo</button>}
+      </div>
+      {vigentes.length === 0 && !form && <p className="text-teal-400">No tiene horario fijo. Cargalo una vez (por ejemplo, lunes, miércoles y viernes de 7 a 12) y las clases se reservan solas.</p>}
+      <ul className="space-y-2">
+        {vigentes.map((h) => (
+          <li key={h.id} className="rounded-lg border border-teal-900 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-slate-100 font-semibold">{diasTexto(h.dias)}, {etiquetaHora(h.desde)} a {horaFin(h.hasta)} · {nombreCancha(h.cancha_id)}</span>
+              <span className="flex gap-3 text-xs">
+                <button type="button" onClick={() => { cambiar(h); setTerminando(null); }} className="text-teal-300 hover:text-lime-400">Cambiar</button>
+                <button type="button" onClick={() => { setTerminando({ id: h.id, fecha: hoy }); setForm(null); }} className="text-teal-400 hover:text-red-400">Terminar</button>
+              </span>
+            </div>
+            <p className="text-xs text-teal-500">Desde {fechaCorta(h.vigente_desde)}{h.vigente_hasta ? ` hasta ${fechaCorta(h.vigente_hasta)}` : " · se renueva solo"}</p>
+            {terminando?.id === h.id && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label className="text-xs text-teal-300">Sin clases desde el <input type="date" value={terminando.fecha} min={hoy} onChange={(e) => setTerminando({ ...terminando, fecha: e.target.value })} className="ml-1 px-2 py-1 rounded border text-sm" style={adminInput} /></label>
+                <button type="button" disabled={busy} onClick={terminar} className="px-3 py-1.5 rounded-lg border border-red-400 text-red-300 text-xs disabled:opacity-50">Terminar y liberar las canchas</button>
+                <button type="button" onClick={() => setTerminando(null)} className="text-xs text-teal-400">Cancelar</button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      {form && (
+        <div className="rounded-lg border border-teal-700 p-3 space-y-3">
+          <p className="font-semibold text-teal-100">{form.id ? "Cambiar el horario" : "Nuevo horario fijo"}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {DIAS_SEMANA.map(([d, l]) => (
+              <button key={d} type="button" onClick={() => setForm({ ...form, dias: form.dias.includes(d) ? form.dias.filter((x) => x !== d) : [...form.dias, d] })}
+                className={`px-3 py-1.5 rounded-lg border text-sm ${form.dias.includes(d) ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+            ))}
+          </div>
+          <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
+            <label className="text-xs text-teal-400">De
+              <select value={form.desde} onChange={(e) => setForm({ ...form, desde: Number(e.target.value) })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {horas.filter((m) => m < 1440).map((m) => <option key={m} value={m}>{etiquetaHora(m)}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">A
+              <select value={form.hasta} onChange={(e) => setForm({ ...form, hasta: Number(e.target.value) })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {horas.filter((m) => m > form.desde).map((m) => <option key={m} value={m}>{horaFin(m)}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">Cancha
+              <select value={form.canchaId} onChange={(e) => setForm({ ...form, canchaId: e.target.value })} className={`block mt-1 w-full ${sel}`} style={adminInput}>
+                {canchas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select></label>
+            <label className="text-xs text-teal-400">{form.id ? "Cambia desde el" : "Empieza el"}
+              <input type="date" value={form.fecha} min={hoy} onChange={(e) => setForm({ ...form, fecha: e.target.value })} className={`block mt-1 w-full ${sel}`} style={adminInput} /></label>
+          </div>
+          {profe.modo === "alquila" && profe.precio_hora != null && form.hasta > form.desde && (
+            <p className="text-xs text-teal-400">Cada día: {formatoPrecio(Math.round((Number(profe.precio_hora) * (form.hasta - form.desde)) / 60))} de alquiler ({(form.hasta - form.desde) / 60} h).</p>
+          )}
+          {form.id && <p className="text-xs text-teal-500">Las clases que vienen se rehacen con el horario nuevo. Las que ya pasaron, las cobradas y los días que cancelaste quedan como están.</p>}
+          <div className="flex gap-3 items-center">
+            <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : form.id ? "Guardar cambio" : "Reservar el horario"}</button>
+            <button type="button" onClick={() => setForm(null)} className="text-teal-400">Cancelar</button>
+          </div>
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
+      {terminados.length > 0 && <p className="text-xs text-teal-600">Terminados: {terminados.map((h) => `${diasTexto(h.dias)} ${etiquetaHora(h.desde)}-${horaFin(h.hasta)} (hasta ${fechaCorta(h.vigente_hasta)})`).join(" · ")}</p>}
+    </section>
+  );
+}
+
 function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esDueno, hoy, mes, onBack, onChanged, onEditar }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -13503,7 +15416,8 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
     try { await fn(); if (ok) setAviso(ok); onChanged(); } catch (e) { setError(e?.pgCode === "23505" ? "Esa cuota ya está cobrada este mes." : reservaErrorText(e)); }
     finally { setBusy(false); }
   };
-  const cancha = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const canchaElegida = cargar ? datos.canchas.find((c) => c.id === cargar.canchaId) || datos.canchas[0] : null;
+  const cancha = canchaElegida ? canchaDelDia(canchaElegida, datos.complejo, cargar.fecha) || canchaElegida : null;
   const inicios = cancha ? iniciosPosibles(cancha, Number(cargar.duracion)) : [];
   const cargarClases = async () => {
     if (!cancha || cargar.desde === "" || !cargar.fecha) { setError("Elegí cancha, día y horario."); return; }
@@ -13567,11 +15481,15 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
       {error && <p className="text-red-400 whitespace-pre-line">{error}</p>}
       {aviso && <p className="rounded-lg px-3 py-2" style={{ backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime }}>✓ {aviso}</p>}
 
+      {datos.horarios && datos.canchas.length > 0 && (
+        <HorariosProfe profe={p} horarios={datos.horarios.filter((h) => h.profe_id === p.id)} canchas={datos.canchas} accessToken={accessToken} hoy={hoy} onChanged={onChanged} />
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <section className={seccion} style={fondo}>
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm uppercase tracking-wide text-teal-400">Próximas clases</h3>
-            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">+ Cargar clases</button>}
+            {!cargar && datos.canchas.length > 0 && <button type="button" onClick={() => setCargar({ canchaId: datos.canchas[0].id, fecha: hoy, desde: "", duracion: 60, semanas: 1 })} className="text-xs text-lime-400 font-semibold">{datos.horarios ? "+ Clase suelta" : "+ Cargar clases"}</button>}
           </div>
           {cargar && (
             <div className="rounded-lg border border-teal-700 p-3 space-y-2">
@@ -13601,9 +15519,9 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
             </div>
           )}
           {proximas.length === 0 ? <p className="text-teal-400">No tiene clases cargadas.</p> : (
-            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{r.serie_id && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
+            <ul className="space-y-1">{proximas.map((r) => <li key={r.id} className="text-teal-200">{horario(r)}{(r.horario_id || r.serie_id) && <span className="text-xs text-lime-400"> · fija</span>}</li>)}</ul>
           )}
-          <p className="text-xs text-teal-500">Para cancelar una clase, tocála en la Agenda.</p>
+          <p className="text-xs text-teal-500">Si el profe falta un día, tocá esa clase en la Agenda y cancelala: el horario queda libre para alquilar.</p>
         </section>
 
         {p.modo === "alquila" ? (
@@ -13999,7 +15917,12 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
 
           {datos.productos.length > 0 && (
             <section className="rounded-xl border border-teal-800 p-4 space-y-2" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
-              <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="text-sm uppercase tracking-wide text-teal-400">Lo más vendido en el mostrador</h2>
+                {datos.productos.some((x) => x.conCosto) && (
+                  <p className="text-xs text-teal-400">Ganancia en productos: <span className="font-semibold" style={{ color: BRAND.lime }}>{conSigno(datos.productos.reduce((g, x) => g + x.ganancia, 0))}</span> <span className="text-teal-600">(precio menos costo, de los que tienen costo cargado)</span></p>
+                )}
+              </div>
               <ul className="divide-y divide-teal-900/70">
                 {datos.productos.slice(0, 12).map((x, i) => (
                   <li key={x.descripcion} className="py-1.5 flex items-center gap-3">
@@ -14445,7 +16368,37 @@ const CAJA_ERRORES = {
   caja_cerrada: "Esa caja ya está cerrada.",
   no_autorizado: "No tenés permiso para manejar esta caja.",
   datos_invalidos: "Revisá los montos.",
+  ya_tiene_otra_abierta: "Esa persona ya abrió otra caja: primero tiene que cerrarla.",
+  hay_una_caja_posterior: "Después de esta caja se abrió otra: solo se puede reabrir la última. Corregí la diferencia en la caja nueva con un ajuste.",
+  caja_abierta: "Esa caja ya está abierta.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
+  cuenta_invalida: "Elegí una cuenta activa.",
+  socio_invalido: "Elegí un socio activo.",
 };
+// Billetes del contador de la caja (ver 20261046_caja_arqueo.sql)
+const BILLETES = [20000, 10000, 2000, 1000, 500, 200, 100];
+const totalConteo = (c) => BILLETES.reduce((s, b) => s + b * (Number(c?.[b]) || 0), 0);
+const conteoParaBase = (c) => Object.fromEntries(BILLETES.filter((b) => Number(c?.[b]) > 0).map((b) => [String(b), Number(c[b])]));
+const faltaFuncion = (e) => e?.pgCode === "PGRST202" || e?.pgCode === "42883";
+
+/* Contador de billetes: cuántos de cada uno y el total */
+function ContadorBilletes({ conteo, onChange, autoFocus = false }) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {BILLETES.map((b, i) => (
+          <label key={b} className="flex items-center gap-2 rounded-lg border border-teal-800 px-2 py-1.5">
+            <span className="text-xs text-teal-300 w-16 shrink-0 tabular-nums">{formatoPrecio(b)}</span>
+            <input inputMode="numeric" value={conteo[b] ?? ""} autoFocus={autoFocus && i === 0}
+              onChange={(e) => onChange({ ...conteo, [b]: e.target.value.replace(/[^\d]/g, "").slice(0, 5) })}
+              placeholder="0" aria-label={`Billetes de ${formatoPrecio(b)}`} className="w-full min-w-0 px-2 py-1 rounded border text-base text-right" style={adminInput} />
+          </label>
+        ))}
+      </div>
+      <p className="text-teal-200">Total contado: <span className="font-semibold tabular-nums text-slate-100">{formatoPrecio(totalConteo(conteo)) || "$0"}</span></p>
+    </div>
+  );
+}
 const cajaErrorText = (e) => CAJA_ERRORES[e?.code] || reservaErrorText(e);
 /* id de quien está logueado (el "sub" del token); el empleado entra con su propia cuenta */
 function uidDeToken(token) {
@@ -14458,7 +16411,9 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [cajas, setCajas] = useState(null); // las del complejo que ve (las suyas; el dueño, todas)
   const [error, setError] = useState("");
-  const [fondo, setFondo] = useState("");
+  const [fondo, setFondo] = useState({});
+  const [sinCaja, setSinCaja] = useState([]); // efectivo que el dueño cobró hoy sin caja abierta
+  const [reabriendo, setReabriendo] = useState(null); // { id, motivo }
   const [busy, setBusy] = useState(false);
   const [viendo, setViendo] = useState(null); // id de una caja de otro (solo el dueño)
   const yo = uidDeToken(accessToken);
@@ -14467,19 +16422,25 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
   const load = useCallback(async () => {
     try {
       setCajas(await supabaseTable(`caja_turnos?complejo_id=eq.${encodeURIComponent(complejoId)}&or=(cerrada_at.is.null,abierta_at.gte.${encodeURIComponent(new Date(Date.now() - 60 * 86400000).toISOString())})&order=abierta_at.desc&limit=200`, { accessToken }));
+      if (esDueno) {
+        setSinCaja(await supabaseTable(`movimientos?cargado_por=eq.${uidDeToken(accessToken)}&complejo_id=eq.${encodeURIComponent(complejoId)}&medio=eq.efectivo&caja_turno_id=is.null&anulado_at=is.null&ref_tipo=in.(turno,cuenta,venta,cuota_clase)&fecha=eq.${hoyArgentina()}&select=id,concepto,monto&order=cargado_at.desc`, { accessToken }).catch(() => []));
+      }
       setError("");
     } catch { setError("No se pudo cargar la caja. Revisá la conexión."); }
-  }, [complejoId, accessToken]);
+  }, [complejoId, accessToken, esDueno]);
   useEffect(() => { setCajas(null); setViendo(null); load(); }, [load]);
 
   const mia = (cajas || []).find((c) => c.usuario === yo && !c.cerrada_at);
   const abiertasDeOtros = esDueno ? (cajas || []).filter((c) => c.usuario !== yo && !c.cerrada_at) : [];
   const cerradas = (cajas || []).filter((c) => c.cerrada_at);
+  // Solo se reabre la última caja de cada persona, y si no tiene otra abierta (reabrir_caja hace el mismo control)
+  const reabrible = (c) => !(cajas || []).some((o) => o.id !== c.id && o.usuario === c.usuario && (!o.cerrada_at || o.abierta_at >= c.abierta_at));
   const abrir = async () => {
     setBusy(true); setError("");
     try {
-      await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: leerPrecio(fondo) || 0 }, accessToken);
-      setFondo("");
+      try { await supabaseRpc("abrir_caja_conteo", { p_complejo: complejoId, p_conteo: conteoParaBase(fondo) }, accessToken); }
+      catch (e) { if (!faltaFuncion(e)) throw e; await supabaseRpc("abrir_caja", { p_complejo: complejoId, p_fondo: totalConteo(fondo) }, accessToken); }
+      setFondo({});
       await load();
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
@@ -14496,17 +16457,21 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
       {cajas === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
         <>
           {mia ? (
-            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia onChanged={load} />
+            <CajaTurnoDetalle key={mia.id} caja={mia} accessToken={accessToken} propia esDueno={esDueno} onChanged={load} />
           ) : (
             <section className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
               <h2 className="text-sm uppercase tracking-wide text-teal-400">Tu caja está cerrada</h2>
-              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.</p>
-              <div className="flex flex-wrap items-end gap-2">
-                <label className="text-xs text-teal-400">Efectivo con el que arrancás (fondo)
-                  <input inputMode="numeric" value={fondo} onChange={(e) => setFondo(e.target.value)} placeholder="$0" className="block mt-1 w-40 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-                </label>
-                <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
-              </div>
+              <p className="text-teal-300">Abrila al empezar tu turno: todo lo que cobres queda a tu nombre, y al irte la cerrás contando el efectivo.{!esDueno && " Sin la caja abierta no podés cobrar en efectivo."}</p>
+              <p className="text-xs text-teal-400">Contá los billetes con los que arrancás (el fondo). Si no hay, dejalo en cero.</p>
+              <ContadorBilletes conteo={fondo} onChange={setFondo} />
+              <button type="button" disabled={busy} onClick={abrir} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Abriendo…" : "Abrir caja"}</button>
+            </section>
+          )}
+
+          {esDueno && !mia && sinCaja.length > 0 && (
+            <section className="rounded-xl border p-3 space-y-1" style={{ borderColor: "#f59e0b88", backgroundColor: "#f59e0b11" }}>
+              <p className="text-amber-300 font-semibold">Hoy cobraste {formatoPrecio(sinCaja.reduce((s, m) => s + Number(m.monto), 0) / 100)} en efectivo sin tener la caja abierta</p>
+              <p className="text-xs text-teal-300">Está en la cuenta Efectivo de la Caja, pero no en ninguna caja del día. {sinCaja.slice(0, 4).map((m) => m.concepto).join(" · ")}{sinCaja.length > 4 ? " · …" : ""}</p>
             </section>
           )}
 
@@ -14514,7 +16479,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
             <section className="space-y-2">
               <h2 className="text-sm uppercase tracking-wide text-teal-400">Cajas abiertas de tus empleados</h2>
               {abiertasDeOtros.map((c) => viendo === c.id ? (
-                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
+                <CajaTurnoDetalle key={c.id} caja={c} accessToken={accessToken} esDueno={esDueno} onChanged={() => { setViendo(null); load(); }} onCerrarVista={() => setViendo(null)} />
               ) : (
                 <button key={c.id} type="button" onClick={() => setViendo(c.id)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-teal-800 px-4 py-3 text-left hover:bg-white/5">
                   <span className="min-w-0"><span className="block truncate text-slate-100">{c.usuario_email}</span><span className="block text-xs text-teal-500">Abierta desde {fechaHoraAr(c.abierta_at)} · fondo {formatoPrecio(c.fondo) || "$0"}</span></span>
@@ -14529,6 +16494,33 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
 
           <section className="space-y-2">
             <h2 className="text-sm uppercase tracking-wide text-teal-400">{esDueno ? "Cierres" : "Tus cierres"}</h2>
+            {esDueno && (() => {
+              const conDif = {};
+              for (const c of cerradas) if (Number(c.contado) !== Number(c.esperado)) conDif[c.usuario_email || "?"] = (conDif[c.usuario_email || "?"] || 0) + 1;
+              const filas = Object.entries(conDif).sort((a, b) => b[1] - a[1]);
+              return filas.length > 0 && (
+                <div className="rounded-lg border p-3 space-y-1" style={{ borderColor: "#f8717188", backgroundColor: "#f8717111" }}>
+                  <p className="text-red-300 font-semibold text-xs uppercase tracking-wide">Cierres con diferencia (últimos 60 días)</p>
+                  {filas.map(([quien, n]) => <p key={quien} className="text-teal-200 break-all">⚠ {quien}: {n} {n === 1 ? "cierre" : "cierres"} con diferencia</p>)}
+                </div>
+              );
+            })()}
+            {reabriendo && (
+              <div className="rounded-lg border border-amber-500/60 p-3 space-y-2">
+                <p className="text-amber-300 font-semibold">Reabrir la caja</p>
+                <p className="text-xs text-teal-400">Se anulan la diferencia y el pase de efectivo del cierre, y la caja vuelve a quedar abierta para contarla de nuevo.</p>
+                <input value={reabriendo.motivo} onChange={(e) => setReabriendo({ ...reabriendo, motivo: e.target.value })} maxLength={120} placeholder="Motivo (ej: contó mal los billetes)" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <div className="flex gap-3 items-center">
+                  <button type="button" disabled={busy || reabriendo.motivo.trim().length < 3} onClick={async () => {
+                    setBusy(true); setError("");
+                    try { await supabaseRpc("reabrir_caja", { p_turno: reabriendo.id, p_motivo: reabriendo.motivo }, accessToken); setReabriendo(null); await load(); }
+                    catch (e) { setError(cajaErrorText(e)); }
+                    finally { setBusy(false); }
+                  }} className="px-4 py-2 rounded-lg font-semibold border border-amber-400 text-amber-300 disabled:opacity-50">{busy ? "Reabriendo…" : "Reabrir"}</button>
+                  <button type="button" onClick={() => setReabriendo(null)} className="text-teal-400">Cancelar</button>
+                </div>
+              </div>
+            )}
             {cerradas.length === 0 ? <p className="text-teal-400">Todavía no hay cajas cerradas.</p> : (
               <>
                 {/* PC: tabla; celular: tarjetas */}
@@ -14552,7 +16544,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                             {esDueno && <td className="px-3 py-2.5 text-teal-200 break-all">{c.usuario_email}</td>}
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.esperado) || "$0"}</td>
                             <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.contado) || "$0"}</td>
-                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} /></td>
+                            <td className="px-3 py-2.5 text-right"><DiferenciaCaja dif={dif} />{c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && reabrible(c) && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="block ml-auto mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}</td>
                           </tr>
                         );
                       })}
@@ -14571,6 +16563,7 @@ function CajaDelDia({ complejos, venues, accessToken, esDueno, conVentas = [] })
                         {esDueno && <p className="text-xs text-teal-400 break-all">{c.usuario_email}</p>}
                         <p className="text-xs text-teal-500">Debía haber {formatoPrecio(c.esperado) || "$0"} · contó {formatoPrecio(c.contado) || "$0"}</p>
                         {c.nota && <p className="text-xs text-teal-400 italic">“{c.nota}”</p>}
+                        {c.sin_confirmar > 0 && <span className="block text-xs text-amber-300">{c.sin_confirmar} cobro{c.sin_confirmar === 1 ? "" : "s"} sin tildar</span>}{c.destino_cierre && <span className="block text-xs text-teal-500">Efectivo a: {c.destino_cierre}</span>}{c.reabierta_motivo && <span className="block text-xs text-teal-500">Reabierta: {c.reabierta_motivo}</span>}{esDueno && reabrible(c) && <button type="button" onClick={() => setReabriendo({ id: c.id, motivo: "" })} className="mt-1 text-xs text-teal-300 hover:text-amber-300">Reabrir</button>}
                       </li>
                     );
                   })}
@@ -14590,7 +16583,7 @@ function DiferenciaCaja({ dif }) {
 }
 
 /* Una caja abierta: lo cobrado hasta ahora, movimientos y cierre */
-function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerrarVista }) {
+function CajaTurnoDetalle({ caja, accessToken, propia = false, esDueno = false, onChanged, onCerrarVista }) {
   const [resumen, setResumen] = useState(null);
   const [movs, setMovs] = useState([]);
   const [error, setError] = useState("");
@@ -14622,12 +16615,28 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
   };
+  const empezarCierre = async () => {
+    load();
+    setCierre({ conteo: {}, nota: "", confirmados: [], destino: "guardado", cuenta: "", socio: "", cobros: null, cuentas: [], socios: [], conLibro: true });
+    const [cobros, cuentas, socios] = await Promise.all([
+      supabaseRpc("cobros_para_confirmar", { p_turno: caja.id }, accessToken).catch((e) => (faltaFuncion(e) ? null : [])),
+      esDueno ? supabaseTable("cuentas_caja?activa=eq.true&order=orden.asc", { accessToken }).catch(() => []) : [],
+      esDueno ? supabaseTable("socios_caja?activo=eq.true&order=nombre.asc", { accessToken }).catch(() => []) : [],
+    ]);
+    setCierre((c) => c && { ...c, cobros: cobros || [], conLibro: cobros !== null, cuentas, socios, cuenta: cuentas.find((x) => x.nombre !== "Efectivo")?.id || "" });
+  };
   const cerrar = async () => {
-    const contado = leerPrecio(cierre.contado);
-    if (contado == null) { setError("Poné cuánto efectivo contaste."); return; }
+    const contado = totalConteo(cierre.conteo);
     setBusy(true); setError("");
     try {
-      setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+      if (cierre.conLibro) {
+        setResultado(await supabaseRpc("cerrar_caja_conteo", {
+          p_turno: caja.id, p_conteo: conteoParaBase(cierre.conteo), p_nota: cierre.nota.trim() || null, p_confirmados: cierre.confirmados,
+          p_destino: cierre.destino, p_cuenta: cierre.destino === "cuenta" ? cierre.cuenta : null, p_socio: cierre.destino === "socio" ? cierre.socio || null : null,
+        }, accessToken));
+      } else {
+        setResultado(await supabaseRpc("cerrar_caja", { p_turno: caja.id, p_contado: contado, p_nota: cierre.nota.trim() || null }, accessToken));
+      }
     } catch (e) { setError(cajaErrorText(e)); }
     finally { setBusy(false); }
   };
@@ -14639,6 +16648,7 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
         <h2 className="text-sm uppercase tracking-wide" style={{ color: BRAND.lime }}>Caja cerrada ✓</h2>
         <p className="text-teal-200">Debía haber {formatoPrecio(resultado.efectivo_esperado) || "$0"} en efectivo y se contaron {formatoPrecio(resultado.contado) || "$0"}.</p>
         <DiferenciaCaja dif={dif} />
+        {Number(resultado.sin_confirmar) > 0 && <p className="text-amber-300 text-xs">{resultado.sin_confirmar} cobro{Number(resultado.sin_confirmar) === 1 ? "" : "s"} con Mercado Pago, transferencia o tarjeta quedaron sin tildar.</p>}
         <div><button type="button" onClick={onChanged} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Listo</button></div>
       </section>
     );
@@ -14646,7 +16656,7 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
 
   const esperado = Number(resumen?.efectivo_esperado || 0);
   const totalCobrado = Object.values(resumen?.por_medio || {}).reduce((s, n) => s + Number(n), 0);
-  const contadoNum = cierre ? leerPrecio(cierre.contado) : null;
+  const contadoNum = cierre ? totalConteo(cierre.conteo) : null;
 
   return (
     <section className="rounded-xl border border-teal-700 p-4 space-y-4" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
@@ -14719,20 +16729,50 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, onChanged, onCerr
           {cierre ? (
             <div className="rounded-lg border p-3 space-y-3" style={{ borderColor: "#f59e0b88" }}>
               <p className="font-semibold text-amber-300">Cerrar la caja</p>
-              <label className="block text-xs text-teal-400">Contá el efectivo que hay en la caja
-                <input inputMode="numeric" value={cierre.contado} onChange={(e) => setCierre({ ...cierre, contado: e.target.value })} placeholder="$" className="block mt-1 w-48 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
-              </label>
-              {contadoNum != null && (
-                <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              <p className="text-xs text-teal-400">Contá los billetes que hay en la caja.</p>
+              <ContadorBilletes conteo={cierre.conteo} onChange={(conteo) => setCierre({ ...cierre, conteo })} autoFocus />
+              <p className="text-teal-200">Debería haber {formatoPrecio(esperado) || "$0"}. <DiferenciaCaja dif={contadoNum - esperado} /></p>
+              {cierre.cobros === null ? <p className="text-xs opacity-60">Cargando cobros…</p> : cierre.cobros.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs text-teal-400">Tildá los cobros con Mercado Pago, transferencia o tarjeta que viste entrar:</p>
+                  {cierre.cobros.map((c) => (
+                    <label key={c.id} className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={cierre.confirmados.includes(c.id)} onChange={(e) => setCierre({ ...cierre, confirmados: e.target.checked ? [...cierre.confirmados, c.id] : cierre.confirmados.filter((x) => x !== c.id) })} />
+                      <span className="flex-1 min-w-0 truncate text-teal-200">{horaAr(c.cargado_at)} · {c.concepto} · {medioCobroLabel(c.medio)}</span>
+                      <span className="tabular-nums shrink-0">{formatoPrecio(Number(c.monto) / 100)}</span>
+                    </label>
+                  ))}
+                </div>
               )}
+              {cierre.conLibro && (esDueno ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-teal-400">La caja queda en $0: ¿adónde va el efectivo contado?</p>
+                  <div className="flex flex-wrap gap-2">
+                    {[["guardado", "Cuenta de guardado"], ["cuenta", "Otra cuenta"], ["socio", "Me lo llevo (retiro de socio)"]].map(([k, l]) => (
+                      <button key={k} type="button" onClick={() => setCierre({ ...cierre, destino: k })} className={`px-3 py-1.5 rounded-lg border text-sm ${cierre.destino === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
+                    ))}
+                  </div>
+                  {cierre.destino === "cuenta" && (
+                    <select value={cierre.cuenta} onChange={(e) => setCierre({ ...cierre, cuenta: e.target.value })} className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                      {cierre.cuentas.filter((c) => c.nombre !== "Efectivo").map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                    </select>
+                  )}
+                  {cierre.destino === "socio" && cierre.socios.length > 0 && (
+                    <select value={cierre.socio} onChange={(e) => setCierre({ ...cierre, socio: e.target.value })} className="px-3 py-2 rounded-lg border text-base" style={adminInput}>
+                      <option value="">Sin indicar el socio</option>
+                      {cierre.socios.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                    </select>
+                  )}
+                </div>
+              ) : <p className="text-xs text-teal-400">La caja queda en $0: el efectivo contado pasa a la cuenta que eligió el dueño (por ejemplo, la caja fuerte).</p>)}
               <input value={cierre.nota} onChange={(e) => setCierre({ ...cierre, nota: e.target.value })} maxLength={200} placeholder="Nota (opcional, ej: por qué falta)" aria-label="Nota" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} />
               <div className="flex gap-3 items-center">
-                <button type="button" disabled={busy || contadoNum == null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
+                <button type="button" disabled={busy || cierre.cobros === null} onClick={cerrar} className="px-5 py-2.5 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Cerrando…" : "Confirmar cierre"}</button>
                 <button type="button" onClick={() => setCierre(null)} className="text-teal-400">Cancelar</button>
               </div>
             </div>
           ) : !mov && (
-            <button type="button" onClick={() => { load(); setCierre({ contado: "", nota: "" }); }} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
+            <button type="button" onClick={empezarCierre} className="w-full sm:w-auto px-5 py-2.5 rounded-lg font-bold border-2" style={{ borderColor: "#f59e0b", color: "#fbbf24" }}>{propia ? "Cerrar mi caja" : "Cerrar esta caja"}</button>
           )}
         </>
       )}
@@ -14753,6 +16793,9 @@ const VENTA_ERRORES = {
   elegir_talle: "Elegí el talle de la prenda.",
   talle_invalido: "Ese talle ya no existe: recargá la pantalla.",
   turno_invalido: "Ese turno ya no está confirmado: elegí otro.",
+  usar_devolucion: "Esa venta ya quedó en un cierre de caja: devolvela desde Caja del día › Ventas (elegí el día de la venta).",
+  ya_anulada: "Esa venta ya estaba anulada.",
+  falta_motivo: "Poné el motivo (al menos 3 letras).",
 };
 const ventaErrorText = (e) => VENTA_ERRORES[e?.code] || reservaErrorText(e);
 
@@ -14769,6 +16812,200 @@ function RubroIcono({ rubro, icono, className = "w-6 h-6" }) {
   const [d, color] = RUBRO_ICONOS[icono] || RUBRO_ICONOS[String(rubro || "").trim().toLowerCase()] || ["M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5", "#94a3b8"];
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>
+  );
+}
+
+/* "Cobrar turno o inscripción" desde el Mostrador (ver 20261049_cobrar_en_mostrador.sql): un turno de
+   hoy (cancha + consumos cargados) o la inscripción de un jugador (y su cuenta), más lo que haya en el
+   ticket. Se puede dividir el pago en dos medios. Cada cosa queda donde siempre. */
+const ERRORES_COBRO_MOSTRADOR = {
+  monto_no_coincide: "Los pagos no suman el total.",
+  dividir_cancha: "La cancha se paga con un solo medio: uno de los dos pagos tiene que cubrirla entera.",
+  nada_para_cobrar: "No hay nada para cobrar.",
+  turno_invalido: "Ese turno ya no está confirmado.",
+  torneo_invalido: "No se encontró el torneo.",
+  "42501": "No tenés permiso para cobrar inscripciones: pedile al dueño el permiso de torneos.",
+};
+function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglones, subtotal, items, onClose, onCobrado }) {
+  const [tab, setTab] = useState("turno");
+  const [turnos, setTurnos] = useState(null);
+  const [turno, setTurno] = useState(null);
+  const [buscar, setBuscar] = useState("");
+  const [jugador, setJugador] = useState(null); // { t, c, pair, jugador, nombre, precio, pagado, cuenta: { id, saldo } | null }
+  const [montoIns, setMontoIns] = useState("");
+  const [conCuenta, setConCuenta] = useState(true);
+  const [medio, setMedio] = useState("efectivo");
+  const [dividir, setDividir] = useState(null); // { medio, monto } del segundo pago
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
+
+  useEffect(() => {
+    if (tab !== "turno" || turnos) return;
+    (async () => {
+      try {
+        const ts = (await supabaseRpc("turnos_para_cargar", { p_complejo: complejoId }, accessToken)) || [];
+        const precios = ts.length ? await supabaseTable(`reservas?id=in.(${ts.map((t) => t.id).join(",")})&select=id,precio,medio_pago`, { accessToken }) : [];
+        setTurnos(ts.map((t) => {
+          const x = precios.find((p) => p.id === t.id) || {};
+          return { ...t, cancha_monto: !x.medio_pago && Number(x.precio) > 0 ? Number(x.precio) : 0, pendiente: Number(t.pendiente) || 0 };
+        }));
+      } catch { setTurnos([]); setError("No se pudieron cargar los turnos de hoy."); }
+    })();
+  }, [tab, turnos, complejoId, accessToken]);
+
+  // Jugadores de los torneos que no terminaron, que coinciden con lo que se escribe
+  const texto = normalizeName(buscar);
+  const candidatos = texto.length < 2 ? [] : tournaments.filter((t) => tournamentStatusOf(t) !== STATUS.FINALIZADO).flatMap((t) => (t.categories || []).flatMap((c) => (c.pairs || []).flatMap((pair) =>
+    jugadoresDePareja(c, pair).filter((j) => normalizeName(j.nombre).includes(texto)).map((j) => ({ t, c, pair, jugador: j.jugador, nombre: j.nombre, precio: precioJugador(t, c) }))))).slice(0, 8);
+  const elegirJugador = async (j) => {
+    setError(""); setJugador({ ...j, pagado: null, cuenta: null });
+    try {
+      const [pagos, links] = await Promise.all([
+        supabaseTable(`pagos_inscripcion?torneo_id=eq.${encodeURIComponent(j.t.id)}&categoria_id=eq.${encodeURIComponent(j.c.id)}&pareja_id=eq.${encodeURIComponent(j.pair.id)}&jugador=eq.${j.jugador}&select=monto`, { accessToken }),
+        supabaseTable(`cuenta_jugadores?torneo_id=eq.${encodeURIComponent(j.t.id)}&categoria_id=eq.${encodeURIComponent(j.c.id)}&pareja_id=eq.${encodeURIComponent(j.pair.id)}&jugador=eq.${j.jugador}&select=cuenta_id,complejo_id`, { accessToken }).catch(() => []),
+      ]);
+      const pagado = pagos.reduce((s, p) => s + Number(p.monto), 0);
+      let cuenta = null;
+      if (links[0]) {
+        const cs = await supabaseRpc("cuentas_con_saldo", { p_complejo: links[0].complejo_id }, accessToken).catch(() => []);
+        const c = (cs || []).find((x) => x.id === links[0].cuenta_id);
+        if (c && Number(c.saldo) > 0) cuenta = { id: c.id, saldo: Number(c.saldo), nombre: c.nombre };
+      }
+      const debe = j.precio == null ? 0 : Math.max(0, j.precio - pagado);
+      setJugador({ ...j, pagado, cuenta });
+      setMontoIns(debe ? String(debe) : "");
+      setConCuenta(true);
+    } catch { setError("No se pudo cargar lo que debe ese jugador."); }
+  };
+
+  const partes = tab === "turno"
+    ? (turno ? [turno.cancha_monto > 0 && ["Cancha", turno.cancha_monto], turno.pendiente > 0 && ["Consumos del turno", turno.pendiente]].filter(Boolean) : [])
+    : (jugador && jugador.pagado != null ? [leerPrecio(montoIns) > 0 && ["Inscripción", leerPrecio(montoIns)], jugador.cuenta && conCuenta && [`Cuenta de ${jugador.cuenta.nombre}`, jugador.cuenta.saldo]].filter(Boolean) : []);
+  const sinTicket = partes.reduce((s, [, m]) => s + m, 0);
+  const total = sinTicket + (renglones.length ? subtotal : 0);
+  const segundo = dividir ? Math.min(total, leerPrecio(dividir.monto) || 0) : 0;
+  const pagos = [{ medio, monto: total - segundo }, ...(segundo > 0 ? [{ medio: dividir.medio, monto: segundo }] : [])].filter((p) => p.monto > 0);
+
+  const cobrar = async () => {
+    if (sinTicket <= 0) { setError(tab === "turno" ? "Elegí un turno con algo para cobrar." : "Elegí el jugador y el monto."); return; }
+    if (dividir && dividir.medio === medio) { setError("Elegí dos medios distintos para dividir."); return; }
+    if (tab === "turno" && !unMedioAlcanza(pagos, turno.cancha_monto)) { setError(ERRORES_COBRO_MOSTRADOR.dividir_cancha); return; }
+    setBusy(true); setError("");
+    try {
+      if (tab === "turno") {
+        // Lo del ticket se carga al turno y después se cobra todo junto
+        if (renglones.length) await supabaseRpc("vender", { p_complejo: complejoId, p_items: items(), p_pagos: [], p_ajuste: 0, p_cuenta: null, p_reserva: turno.id }, accessToken);
+        await supabaseRpc("cobrar_turno_mostrador", { p_reserva: turno.id, p_pagos: pagos }, accessToken);
+        onCobrado(`Cobrado el turno de ${turno.nombre} (${turno.cancha} · ${hora(turno.inicio)}): ${formatoPrecio(total)}.`);
+      } else {
+        const { parte, resto } = separarPagos(pagos, renglones.length ? subtotal : 0);
+        if (renglones.length) await supabaseRpc("vender", { p_complejo: complejoId, p_items: items(), p_pagos: parte, p_ajuste: 0, p_cuenta: null }, accessToken);
+        await supabaseRpc("cobrar_jugador_mostrador", {
+          p_torneo: jugador.t.id, p_categoria: jugador.c.id, p_pareja: jugador.pair.id, p_jugador: jugador.jugador,
+          p_inscripcion: leerPrecio(montoIns) || 0, p_cuenta: jugador.cuenta && conCuenta ? jugador.cuenta.id : null,
+          p_cuenta_monto: jugador.cuenta && conCuenta ? jugador.cuenta.saldo : null, p_pagos: resto,
+        }, accessToken);
+        onCobrado(`Cobrado a ${jugador.nombre} (${jugador.t.name}): ${formatoPrecio(total)}.`);
+      }
+    } catch (e) {
+      setError(ERRORES_COBRO_MOSTRADOR[e?.code] || ERRORES_COBRO_MOSTRADOR[e?.pgCode] || ventaErrorText(e));
+    } finally { setBusy(false); }
+  };
+
+  const chip = (activo) => `px-3 py-1.5 rounded-lg border text-sm ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`;
+  return (
+    <Modal title="Cobrar turno o inscripción" onClose={onClose}>
+      <div className="space-y-3 text-sm" style={F.body}>
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl border border-teal-900">
+          {[["turno", "Turno de hoy"], ["inscripcion", "Inscripción"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => { setTab(k); setError(""); }} className="py-2 rounded-lg" style={tab === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
+          ))}
+        </div>
+
+        {tab === "turno" ? (
+          turnos === null ? <p className="opacity-60">Cargando turnos…</p> : turnos.length === 0 ? <p className="text-teal-400">No hay turnos confirmados hoy.</p> : (
+            <ul className="max-h-60 overflow-y-auto divide-y divide-teal-900 rounded-lg border border-teal-900">
+              {turnos.map((t) => {
+                const nada = t.cancha_monto + t.pendiente === 0;
+                return (
+                  <li key={t.id}>
+                    <button type="button" disabled={nada} onClick={() => setTurno(t)} className={`w-full text-left px-3 py-2 flex justify-between gap-2 disabled:opacity-40 ${turno?.id === t.id ? "bg-white/5" : "hover:bg-white/5"}`}>
+                      <span className="min-w-0"><span className="block truncate text-slate-100">{hora(t.inicio)} · {t.cancha} · {t.nombre}</span>
+                        <span className="block text-xs text-teal-500">{t.cancha_monto > 0 ? `Cancha ${formatoPrecio(t.cancha_monto)}` : "Cancha cobrada"}{t.pendiente > 0 ? ` · consumos ${formatoPrecio(t.pendiente)}` : ""}</span></span>
+                      <span className="tabular-nums shrink-0">{nada ? "Al día" : formatoPrecio(t.cancha_monto + t.pendiente)}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )
+        ) : (
+          <div className="space-y-2">
+            <input value={buscar} onChange={(e) => { setBuscar(e.target.value); setJugador(null); }} placeholder="Nombre del jugador" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+            {!jugador && texto.length >= 2 && (candidatos.length === 0 ? <p className="text-teal-400">No hay jugadores con ese nombre en torneos que no terminaron.</p> : (
+              <ul className="divide-y divide-teal-900 rounded-lg border border-teal-900">
+                {candidatos.map((j) => (
+                  <li key={`${j.t.id}|${j.c.id}|${j.pair.id}|${j.jugador}`}>
+                    <button type="button" onClick={() => elegirJugador(j)} className="w-full text-left px-3 py-2 hover:bg-white/5">
+                      <span className="block text-slate-100">{j.nombre}</span>
+                      <span className="block text-xs text-teal-500">{j.t.name} · {j.c.name}{j.precio != null ? ` · inscripción ${formatoPrecio(j.precio)}` : ""}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ))}
+            {jugador && (
+              jugador.pagado == null ? <p className="opacity-60">Cargando…</p> : (
+                <div className="rounded-lg border border-teal-800 p-3 space-y-2">
+                  <p className="text-slate-100 font-semibold">{jugador.nombre} <span className="text-xs font-normal text-teal-500">· {jugador.t.name} · {jugador.c.name}</span></p>
+                  <p className="text-xs text-teal-400">{jugador.precio == null ? "El torneo no tiene precio cargado." : `Inscripción ${formatoPrecio(jugador.precio)} · pagó ${formatoPrecio(jugador.pagado) || "$0"}`}</p>
+                  <label className="flex items-center gap-2 text-teal-200">Cobrar de inscripción
+                    <input inputMode="numeric" value={montoIns} onChange={(e) => setMontoIns(e.target.value)} placeholder="$" className="w-32 px-2 py-1.5 rounded border text-base" style={adminInput} />
+                  </label>
+                  {jugador.cuenta && (
+                    <label className="flex items-center gap-2 text-teal-200"><input type="checkbox" checked={conCuenta} onChange={(e) => setConCuenta(e.target.checked)} />
+                      Cobrar también su cuenta ({formatoPrecio(jugador.cuenta.saldo)})</label>
+                  )}
+                  <button type="button" onClick={() => setJugador(null)} className="text-xs text-teal-400">Elegir otro jugador</button>
+                </div>
+              )
+            )}
+          </div>
+        )}
+
+        {(partes.length > 0 || renglones.length > 0) && (
+          <div className="rounded-lg border border-teal-800 p-3 space-y-1">
+            {partes.map(([l, m]) => <p key={l} className="flex justify-between"><span className="text-teal-300">{l}</span><span className="tabular-nums">{formatoPrecio(m)}</span></p>)}
+            {renglones.length > 0 && <p className="flex justify-between"><span className="text-teal-300">Productos del ticket</span><span className="tabular-nums">{formatoPrecio(subtotal)}</span></p>}
+            <p className="flex justify-between border-t border-teal-900 pt-1 font-semibold text-slate-100"><span>Total</span><span className="tabular-nums">{formatoPrecio(total)}</span></p>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2">{MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" onClick={() => setMedio(m)} className={chip(medio === m)}>{l}</button>)}</div>
+          {dividir ? (
+            <div className="flex flex-wrap items-center gap-2 text-teal-200">
+              <span>y</span>
+              <input inputMode="numeric" value={dividir.monto} onChange={(e) => setDividir({ ...dividir, monto: e.target.value })} placeholder="$" className="w-28 px-2 py-1.5 rounded border text-base" style={adminInput} />
+              <span>con</span>
+              <select value={dividir.medio} onChange={(e) => setDividir({ ...dividir, medio: e.target.value })} className="px-2 py-1.5 rounded border text-base" style={adminInput}>
+                {MEDIOS_VENTA.filter(([m]) => m !== medio).map(([m, l]) => <option key={m} value={m}>{l}</option>)}
+              </select>
+              <button type="button" onClick={() => setDividir(null)} className="text-xs text-teal-400">Sin dividir</button>
+              {total > 0 && segundo > 0 && <span className="w-full text-xs text-teal-400">{formatoPrecio(total - segundo)} con {medioCobroLabel(medio)} y {formatoPrecio(segundo)} con {medioCobroLabel(dividir.medio)}</span>}
+            </div>
+          ) : (
+            <button type="button" onClick={() => setDividir({ medio: MEDIOS_VENTA.find(([m]) => m !== medio)[0], monto: "" })} className="text-xs text-teal-400 underline">Dividir el pago en dos medios</button>
+          )}
+        </div>
+
+        {error && <p className="text-red-400">{error}</p>}
+        <button type="button" disabled={busy || total <= 0} onClick={cobrar} className="w-full px-4 py-3 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Cobrando…" : `Cobrar ${formatoPrecio(total) || "$0"}`}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -14876,7 +17113,8 @@ const MAS_VENDIDOS = "__mas_vendidos";
    crédito o seña van por "Descuento / dividir pago"), Cancha (queda en el turno de hoy y se cobra
    desde la agenda; ver 20261029_cargar_a_turno.sql) o Cliente (queda en su cuenta).
    Las ventas del día se ven en Caja del día. */
-function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) {
+function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, tournaments = [] }) {
+  const [cobrandoCuenta, setCobrandoCuenta] = useState(false); // "Cobrar turno o inscripción"
   const [complejoId, setComplejoId] = useState(complejos[0].id);
   const [productos, setProductos] = useState(null);
   const [vendidos30, setVendidos30] = useState([]); // renglones vendidos en los últimos 30 días
@@ -15039,6 +17277,9 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
 
   const ticket = (
     <div className="rounded-xl border border-teal-800 p-4 space-y-3" style={{ backgroundColor: "rgba(8,18,24,0.75)" }}>
+      <button type="button" onClick={() => setCobrandoCuenta(true)} className="w-full py-2 rounded-lg border text-sm font-semibold" style={{ borderColor: `${BRAND.cyan}88`, color: BRAND.cyan }}>
+        Cobrar turno o inscripción{renglones.length ? ` (+ ticket ${formatoPrecio(subtotal)})` : ""}
+      </button>
       <div className="space-y-2">
         <p className="text-sm text-slate-400">Cargar a</p>
         <div className="grid grid-cols-3 gap-1 p-1 rounded-xl border border-teal-900" role="radiogroup" aria-label="Cargar a">
@@ -15047,6 +17288,11 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja }) 
               className="py-2 rounded-lg text-sm transition" style={cargarA === k ? { backgroundColor: `${BRAND.lime}1f`, color: BRAND.lime } : { color: "#cbd5e1" }}>{l}</button>
           ))}
         </div>
+        {cobrandoCuenta && (
+          <CobrarTurnoInscripcion complejoId={complejoId} accessToken={accessToken} tournaments={tournaments} renglones={renglones} subtotal={subtotal}
+            items={() => itemsParaVender(carrito, sueltos)} onClose={() => setCobrandoCuenta(false)}
+            onCobrado={(texto) => { setCobrandoCuenta(false); setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setAviso({ texto, tono: "ok" }); load(); }} />
+        )}
         {cargarA !== "mostrador" && (
           <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
         )}
@@ -15363,6 +17609,8 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
   const [ventas, setVentas] = useState(null);
   const [error, setError] = useState("");
   const [anulando, setAnulando] = useState(null);
+  const [devolviendo, setDevolviendo] = useState(null); // { id, motivo, cuenta: "" (automático) | id de cuenta | "sin_plata" }
+  const [cuentasCaja, setCuentasCaja] = useState([]);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -15380,7 +17628,27 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
       await supabaseRpc("anular_venta", { p_venta: v.id }, accessToken);
       setAnulando(null);
       await load(); onChanged();
-    } catch (e) { setError(ventaErrorText(e)); }
+    } catch (e) {
+      if (e?.code === "usar_devolucion") {
+        // Ya quedó en un cierre: no se borra el ingreso de ese día, se anota la devolución hoy
+        setAnulando(null);
+        setDevolviendo({ id: v.id, motivo: "", cuenta: "" });
+        supabaseTable("cuentas_caja?activa=eq.true&order=orden.asc", { accessToken }).then(setCuentasCaja).catch(() => setCuentasCaja([]));
+      } else setError(ventaErrorText(e));
+    }
+    finally { setBusy(false); }
+  };
+  const devolver = async () => {
+    setBusy(true); setError("");
+    try {
+      await supabaseRpc("devolver_venta", {
+        p_venta: devolviendo.id, p_motivo: devolviendo.motivo.trim(),
+        p_cuenta: devolviendo.cuenta && devolviendo.cuenta !== "sin_plata" ? devolviendo.cuenta : null,
+        p_sin_plata: devolviendo.cuenta === "sin_plata",
+      }, accessToken);
+      setDevolviendo(null);
+      await load(); onChanged();
+    } catch (e) { setError(e?.code === "cuenta_invalida" ? "Elegí una cuenta activa." : ventaErrorText(e)); }
     finally { setBusy(false); }
   };
   const validas = (ventas || []).filter((v) => !v.anulada);
@@ -15419,12 +17687,29 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
                       {Number(v.a_cuenta) > 0 && ` · ${formatoPrecio(v.a_cuenta)} a cuenta de ${v.cuentas?.nombre || "una cuenta"}`}
                       {Number(v.ajuste) !== 0 && ` · ${Number(v.ajuste) < 0 ? "descuento" : "recargo"} ${formatoPrecio(Math.abs(v.ajuste))}`}
                       {esDueno && v.vendido_por_email && ` · ${v.vendido_por_email}`}
-                      {v.anulada && " · ANULADA"}
+                      {v.anulada && (v.devuelta ? ` · DEVUELTA${v.devolucion_motivo ? `: ${v.devolucion_motivo}` : ""}` : " · ANULADA")}
                     </span>
                   </span>
                   <span className="shrink-0 font-semibold tabular-nums">{formatoPrecio(v.total)}</span>
                 </div>
-                {esDueno && !v.anulada && (anulando === v.id ? (
+                {esDueno && !v.anulada && devolviendo?.id === v.id ? (
+                  <form onSubmit={(e) => { e.preventDefault(); devolver(); }} className="mt-2 rounded-lg border border-amber-500/50 p-3 space-y-2 text-sm">
+                    <p className="text-amber-300 font-semibold">Devolver la venta #{v.numero}</p>
+                    <p className="text-xs text-teal-400">Ya quedó en un cierre de caja: el ingreso de ese día no se toca y la devolución se anota hoy. Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}.</p>
+                    <input value={devolviendo.motivo} onChange={(e) => setDevolviendo({ ...devolviendo, motivo: e.target.value })} maxLength={200} placeholder="Motivo (ej: estaba vencida)" className="w-full px-3 py-2 rounded border" style={adminInput} />
+                    <label className="block text-xs text-teal-400">¿De dónde sale la plata?
+                      <select value={devolviendo.cuenta} onChange={(e) => setDevolviendo({ ...devolviendo, cuenta: e.target.value })} className="mt-1 w-full px-3 py-2 rounded border" style={adminInput}>
+                        <option value="">Automático: efectivo de tu caja abierta (o de la Caja fuerte); otros medios, de su cuenta</option>
+                        {cuentasCaja.map((c) => <option key={c.id} value={c.id}>De {c.nombre}</option>)}
+                        <option value="sin_plata">No se devolvió plata (se cambió por otra cosa)</option>
+                      </select>
+                    </label>
+                    <div className="flex justify-end gap-3">
+                      <button type="button" onClick={() => setDevolviendo(null)} className="text-teal-400">Cancelar</button>
+                      <button type="submit" disabled={busy || devolviendo.motivo.trim().length < 3} className="px-3 py-1.5 rounded-lg font-semibold border border-amber-400 text-amber-300 disabled:opacity-50">{busy ? "Devolviendo…" : "Devolver"}</button>
+                    </div>
+                  </form>
+                ) : esDueno && !v.anulada && (anulando === v.id ? (
                   <p className="mt-1 text-xs text-right">
                     <span className="text-teal-300">¿Anular? Vuelve el stock{Number(v.a_cuenta) > 0 ? " y se saca lo anotado a cuenta" : ""}. </span>
                     <button type="button" disabled={busy} onClick={() => anular(v)} className="text-red-400 font-semibold mr-2">Anular</button>
@@ -16245,7 +18530,72 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
   );
 }
 
-function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null }) {
+/* Historial de cambios de resultados del torneo (ver 20261052_historial_resultados.sql): qué
+   partido, quién lo cambió, cuándo y de qué a qué. Sirve para aclarar dudas después de un torneo. */
+function HistorialResultados({ tournament, accessToken }) {
+  const [filas, setFilas] = useState(null);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setFilas(await supabaseTable(`resultados_historial?torneo_id=eq.${encodeURIComponent(tournament.id)}&order=cambiado_at.desc&limit=300`, { accessToken }));
+      setError("");
+    } catch (e) {
+      setError(e?.pgCode === "42P01" || e?.pgCode === "PGRST205" ? "El historial todavía no está disponible." : "No se pudo cargar el historial. Revisá la conexión.");
+    }
+  }, [tournament.id, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const numeros = useMemo(() => new Map(collectScheduleableMatches(tournament).map((m) => [m.matchId, m.number])), [tournament]);
+  const nombreDe = (categoria, id) => {
+    const c = (tournament.categories || []).find((x) => x.name === categoria);
+    return (c && categoryEntitiesById(c)[id]?.name) || "una pareja";
+  };
+  const lugar = (f) => {
+    const [, ri, total] = /^llave:(\d+):(\d+)$/.exec(f.lugar || "") || [];
+    return ri != null ? roundStageLabel(Number(total), Number(ri)) : f.lugar;
+  };
+  const resultado = (f, r) => {
+    if (!r || Object.keys(r).length === 0) return "sin resultado";
+    if (r.walkover) return `W.O. (no se presentó ${nombreDe(f.categoria, r.walkover)})`;
+    const sets = (r.sets || []).map((s) => `${s.a ?? "?"}-${s.b ?? "?"}`).join(" ");
+    return r.retired ? `${sets} · se retiró ${nombreDe(f.categoria, r.retired)}` : sets || "sin resultado";
+  };
+
+  return (
+    <div style={F.body}>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <p className="text-sm text-teal-300">Cada vez que alguien carga, corrige o borra un resultado queda anotado acá.</p>
+        <button type="button" onClick={load} className="text-sm text-teal-400 hover:text-lime-400 shrink-0">Actualizar</button>
+      </div>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+      {filas === null ? (!error && <p className="text-sm opacity-60">Cargando…</p>) : filas.length === 0 ? (
+        <p className="text-sm text-teal-400">Todavía no hay cambios de resultados.</p>
+      ) : (
+        <ul className="space-y-2">
+          {filas.map((f) => {
+            const nro = numeros.get(f.partido);
+            const corrige = Object.keys(f.antes || {}).length > 0;
+            return (
+              <li key={f.id} className="rounded-lg border border-teal-800 px-3 py-2.5 text-sm">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-xs">
+                  <span className="text-teal-300 font-semibold">{nro ? `#${nro} · ` : ""}{f.categoria} · {lugar(f)}</span>
+                  <span className="text-teal-500">{fechaHoraAr(f.cambiado_at)} · {f.por_quien || "sin dato"}</span>
+                </div>
+                <p className="mt-1 text-slate-200 break-words">{f.pareja_a || "—"} <span className="text-teal-500 text-xs">vs</span> {f.pareja_b || "—"}</p>
+                <p className="mt-1">
+                  {corrige ? <><span className="text-amber-300">{resultado(f, f.antes)}</span> <span className="text-teal-500">→</span> </> : <span className="text-teal-500">Se cargó: </span>}
+                  <span className={Object.keys(f.despues || {}).length ? "text-lime-400 font-semibold" : "text-red-300"}>{resultado(f, f.despues)}</span>
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null, accessToken = null, vistaPedida = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
   // El estado (Próximo / En curso / Finalizado) y el cierre de inscripciones también se siguen solos; el
@@ -16275,9 +18625,9 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   // de horarios: sus partidos van en "Partidos".
   // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
   const allTabs = usesSchedule
-    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
-    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : [])];
-  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros"].includes(key)) : allTabs;
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : []), ...(accessToken ? [["historial", "Historial"]] : [])]
+    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : []), ...(accessToken ? [["historial", "Historial"]] : [])];
+  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros", "historial"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
@@ -16287,12 +18637,16 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
     return usesSchedule ? "horarios" : "inscripciones";
   });
   const view = tabs.some(([key]) => key === chosenView) ? chosenView : tabs[0][0];
+  // Un aviso de la campanita puede pedir una pestaña (ej. Inscripciones) con el torneo ya abierto
+  useEffect(() => { if (vistaPedida?.vista) setView(vistaPedida.vista); }, [vistaPedida]);
   // Avance y avisos para la tira de resumen y las marcas ✓ / ⚠ de las pestañas
   const alertsCount = useMemo(() => (usesSchedule ? scheduleAlerts(tournament, collectScheduleableMatches(tournament)).alerts.length : 0), [tournament, usesSchedule]);
   const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
   const configReady = tournament.categories.length > 0 && (!usesSchedule || (tournament.playDates || []).length > 0);
   const tabState = { config: configReady ? "ok" : "empty", ...Object.fromEntries(progress.map((p) => [p.tab, p.state])) };
-  const nextTab = tabs[tabs.findIndex(([key]) => key === view) + 1];
+  const pasos = tabs.filter(([key]) => key !== "historial"); // el historial no es un paso de armar el torneo
+  const enPaso = pasos.findIndex(([key]) => key === view);
+  const nextTab = enPaso >= 0 ? pasos[enPaso + 1] : null;
   const goTo = (key) => { setView(key); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;
@@ -16452,7 +18806,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
                 <CategoryAdminView
                   key={category.id} category={category} format={tournament.matchFormat} tournament={tournament}
                   onUpdateCategory={updateCategory} onGroupsLocked={updateCategoryAndAutoSchedule} onUpdateTournament={update}
-                  section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]}
+                  section={{ inscripciones: "parejas", grupos: "grupos", llaves: "llave", partidos: "super8" }[view]} accessToken={accessToken}
                 />
               )}
             </>
@@ -16461,6 +18815,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
 
         {view === "horarios" && <ScheduleAdminView tournament={tournament} update={update} onGoConfig={() => goTo("config")} />}
         {view === "encancha" && <OnCourtView tournament={tournament} update={update} />}
+        {view === "historial" && accessToken && <HistorialResultados tournament={tournament} accessToken={accessToken} />}
 
         {nextTab && (
           <div className="mt-10 pt-4 border-t border-teal-900 flex justify-end">
@@ -16696,7 +19051,8 @@ function SmashPointAppInner() {
   const [events, setEvents] = useState([]);
   // Complejos con dueño y sección Reservas (tabla complejos; la ficha pública sigue en venues)
   const [complejos, setComplejos] = useState([]);
-  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS); // funciones en prueba prendidas (ver FuncionesContext)
+  const [funciones, setFunciones] = useState(FUNCIONES_APAGADAS);
+  const [vistaPedida, setVistaPedida] = useState(null); // pestaña del torneo que pidió un aviso de la campanita // funciones en prueba prendidas (ver FuncionesContext)
   const [suspendidos, setSuspendidos] = useState([]); // organizadores y complejos suspendidos (ver cuentas_suspendidas)
   const [adsOcultas, setAdsOcultas] = useState([]); // publicidades con el cliente vencido o de baja (ver publicidades_ocultas)
   const routeFromHash = () => ({ "#complejo": "cuenta", "#privacidad": "privacidad" })[window.location.hash] || null;
@@ -16933,7 +19289,7 @@ function SmashPointAppInner() {
       coverUrl: owner?.coverUrl || "",
       role: "colaborador",
       accessToken: j.accessToken,
-      email: j.email,
+      email: j.email || formatArPhone(j.phone), // con cuenta de teléfono, el teléfono (se muestra arriba del panel)
       complejoId: c.complejo_id,
       permisos: { agenda: c.p_agenda, resultados: c.p_resultados, torneos: c.p_torneos, canchas: c.p_canchas, consumos: !!c.p_consumos },
     });
@@ -17271,7 +19627,7 @@ function SmashPointAppInner() {
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
       : selected._light
         ? <LoadingTournament />
-        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} />;
+        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} jugadorApi={jugadorApi} />;
   } else if (route === "login") {
     content = <Login jugadorApi={jugadorApi} aviso={avisoCuenta} onEntro={despuesDeEntrar} onBack={() => { setAvisoCuenta(null); setRoute("public-home"); }} />;
   } else if (route === "nueva-clave" && jugadorApi.jugador) {
@@ -17343,6 +19699,8 @@ function SmashPointAppInner() {
         onBack={() => setRoute("admin-home")}
         inscripciones={inscripciones.filter((i) => i.torneo_id === selected.id)}
         onResolveInscripcion={resolveInscripcion}
+        accessToken={session.accessToken}
+        vistaPedida={vistaPedida}
         soloResultados={session.role === "colaborador" && !session.permisos?.torneos}
         cobros={session.role === "creador" ? null : {
           accessToken: session.accessToken, organizerId: session.id, esDueno: session.role !== "colaborador",
@@ -17359,7 +19717,7 @@ function SmashPointAppInner() {
         circuits={myCircuits}
         onCreate={createTournament}
         onDuplicate={(t) => saver.save(t)}
-        onOpen={(id) => { setSelectedId(id); setRoute("admin-tournament"); }}
+        onOpen={(id, vista) => { setSelectedId(id); setRoute("admin-tournament"); setVistaPedida(vista ? { vista, n: Date.now() } : null); }}
         onLogout={endSession}
         onMiCuenta={jugadorApi.jugador ? irAMiCuenta : null}
         onUpdate={updateTournament}
@@ -17393,6 +19751,7 @@ function SmashPointAppInner() {
           <ContactFooter onGoLogin={() => setRoute("login")} />
         </div>
       )}
+      <ConfirmarMailAvisos />
       {/* Aviso de guardado: choque con otra persona o falta de conexión */}
       {saveNotice && (
         <div role="alert" className="fixed inset-x-0 bottom-0 z-[60] px-4 pb-4" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 1rem)" }}>

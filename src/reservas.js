@@ -215,3 +215,25 @@ export function agruparSeries(reservas) {
     return { serieId, proxima: orden[0], ultima: orden[orden.length - 1], cantidad: orden.length, fechas: orden.map((r) => r.fecha) };
   }).sort((a, b) => (a.proxima.fecha < b.proxima.fecha ? -1 : a.proxima.fecha > b.proxima.fecha ? 1 : a.proxima.inicio < b.proxima.inicio ? -1 : 1));
 }
+
+/* La cancha con el horario de ese día (ver 20261050_horarios_complejo.sql), o null si está cerrada.
+   - complejo.horario: { "0": [desde, hasta] | null, … } por día de la semana (0 = domingo). Sin cargar,
+     o con la cancha en "horario propio", vale la apertura/cierre de la cancha.
+   - online: además se recorta con complejo.horario_online (lo que se puede pedir desde la app). */
+export function canchaDelDia(cancha, complejo, fecha, online = false) {
+  const dia = String(new Date(`${fecha}T12:00:00Z`).getUTCDay());
+  let { desde, hasta } = horarioCancha(cancha);
+  if (complejo?.horario && !cancha.horario_propio) {
+    const e = complejo.horario[dia];
+    if (!Array.isArray(e)) return null;
+    [desde, hasta] = e.map(Number);
+  }
+  if (online && complejo?.horario_online) {
+    const o = complejo.horario_online[dia];
+    if (!Array.isArray(o)) return null;
+    desde = Math.max(desde, Number(o[0]));
+    hasta = Math.min(hasta, Number(o[1]));
+    if (hasta <= desde) return null;
+  }
+  return { ...cancha, apertura: etiquetaHora(desde), cierre: etiquetaHora(hasta) };
+}
