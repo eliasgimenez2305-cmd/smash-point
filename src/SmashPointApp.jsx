@@ -18498,6 +18498,71 @@ function AvisosPanel({ tournament, inscripciones = [] }) {
   );
 }
 
+/* Historial de cambios de resultados del torneo (ver 20261052_historial_resultados.sql): qué
+   partido, quién lo cambió, cuándo y de qué a qué. Sirve para aclarar dudas después de un torneo. */
+function HistorialResultados({ tournament, accessToken }) {
+  const [filas, setFilas] = useState(null);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setFilas(await supabaseTable(`resultados_historial?torneo_id=eq.${encodeURIComponent(tournament.id)}&order=cambiado_at.desc&limit=300`, { accessToken }));
+      setError("");
+    } catch (e) {
+      setError(e?.pgCode === "42P01" || e?.pgCode === "PGRST205" ? "El historial todavía no está disponible." : "No se pudo cargar el historial. Revisá la conexión.");
+    }
+  }, [tournament.id, accessToken]);
+  useEffect(() => { load(); }, [load]);
+
+  const numeros = useMemo(() => new Map(collectScheduleableMatches(tournament).map((m) => [m.matchId, m.number])), [tournament]);
+  const nombreDe = (categoria, id) => {
+    const c = (tournament.categories || []).find((x) => x.name === categoria);
+    return (c && categoryEntitiesById(c)[id]?.name) || "una pareja";
+  };
+  const lugar = (f) => {
+    const [, ri, total] = /^llave:(\d+):(\d+)$/.exec(f.lugar || "") || [];
+    return ri != null ? roundStageLabel(Number(total), Number(ri)) : f.lugar;
+  };
+  const resultado = (f, r) => {
+    if (!r || Object.keys(r).length === 0) return "sin resultado";
+    if (r.walkover) return `W.O. (no se presentó ${nombreDe(f.categoria, r.walkover)})`;
+    const sets = (r.sets || []).map((s) => `${s.a ?? "?"}-${s.b ?? "?"}`).join(" ");
+    return r.retired ? `${sets} · se retiró ${nombreDe(f.categoria, r.retired)}` : sets || "sin resultado";
+  };
+
+  return (
+    <div style={F.body}>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <p className="text-sm text-teal-300">Cada vez que alguien carga, corrige o borra un resultado queda anotado acá.</p>
+        <button type="button" onClick={load} className="text-sm text-teal-400 hover:text-lime-400 shrink-0">Actualizar</button>
+      </div>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+      {filas === null ? (!error && <p className="text-sm opacity-60">Cargando…</p>) : filas.length === 0 ? (
+        <p className="text-sm text-teal-400">Todavía no hay cambios de resultados.</p>
+      ) : (
+        <ul className="space-y-2">
+          {filas.map((f) => {
+            const nro = numeros.get(f.partido);
+            const corrige = Object.keys(f.antes || {}).length > 0;
+            return (
+              <li key={f.id} className="rounded-lg border border-teal-800 px-3 py-2.5 text-sm">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-xs">
+                  <span className="text-teal-300 font-semibold">{nro ? `#${nro} · ` : ""}{f.categoria} · {lugar(f)}</span>
+                  <span className="text-teal-500">{fechaHoraAr(f.cambiado_at)} · {f.por_quien || "sin dato"}</span>
+                </div>
+                <p className="mt-1 text-slate-200 break-words">{f.pareja_a || "—"} <span className="text-teal-500 text-xs">vs</span> {f.pareja_b || "—"}</p>
+                <p className="mt-1">
+                  {corrige ? <><span className="text-amber-300">{resultado(f, f.antes)}</span> <span className="text-teal-500">→</span> </> : <span className="text-teal-500">Se cargó: </span>}
+                  <span className={Object.keys(f.despues || {}).length ? "text-lime-400 font-semibold" : "text-red-300"}>{resultado(f, f.despues)}</span>
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function AdminTournament({ enPanel = false, tournament, update: save, onBack, inscripciones = [], onResolveInscripcion, soloResultados = false, cobros = null, accessToken = null, vistaPedida = null }) {
   // Todo lo que se guarda desde el panel mantiene las llaves al día: se arman en borrador apenas hay
   // grupos y se completan solas cuando termina cada grupo (ver withAutoBracket)
@@ -18528,9 +18593,9 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   // de horarios: sus partidos van en "Partidos".
   // Un colaborador que solo carga resultados ve solo las pestañas donde se cargan
   const allTabs = usesSchedule
-    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : [])]
-    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : [])];
-  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros"].includes(key)) : allTabs;
+    ? [["config", "Configuración"], ["inscripciones", "Inscripciones"], ["grupos", "Grupos"], ["horarios", "Horarios"], ["avisos", "Avisos"], ["llaves", "Llaves"], ["encancha", "En cancha"], ...(cobros ? [["cobros", "Cobros"]] : []), ...(accessToken ? [["historial", "Historial"]] : [])]
+    : [["config", "Configuración"], ["inscripciones", tournament.categories.every((c) => c.format === "super8_individual") ? "Jugadores" : "Inscripciones"], ["partidos", "Partidos"], ...(cobros ? [["cobros", "Cobros"]] : []), ...(accessToken ? [["historial", "Historial"]] : [])];
+  const tabs = soloResultados ? allTabs.filter(([key]) => ["grupos", "llaves", "encancha", "partidos", "cobros", "historial"].includes(key)) : allTabs;
   // Arranca en "En cancha" con el torneo en curso (es lo que se usa desde el celular en el club), en
   // Inscripciones si hay nuevas, en Configuración si falta lo básico, y si no en Horarios
   const [chosenView, setView] = useState(() => {
@@ -18547,7 +18612,8 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   const progress = useMemo(() => organizerProgress(tournament, pendingCount, alertsCount), [tournament, pendingCount, alertsCount]);
   const configReady = tournament.categories.length > 0 && (!usesSchedule || (tournament.playDates || []).length > 0);
   const tabState = { config: configReady ? "ok" : "empty", ...Object.fromEntries(progress.map((p) => [p.tab, p.state])) };
-  const nextTab = tabs[tabs.findIndex(([key]) => key === view) + 1];
+  const pasos = tabs.filter(([key]) => key !== "historial"); // el historial no es un paso de armar el torneo
+  const nextTab = pasos[pasos.findIndex(([key]) => key === view) + 1];
   const goTo = (key) => { setView(key); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;
@@ -18716,6 +18782,7 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
 
         {view === "horarios" && <ScheduleAdminView tournament={tournament} update={update} onGoConfig={() => goTo("config")} />}
         {view === "encancha" && <OnCourtView tournament={tournament} update={update} />}
+        {view === "historial" && accessToken && <HistorialResultados tournament={tournament} accessToken={accessToken} />}
 
         {nextTab && (
           <div className="mt-10 pt-4 border-t border-teal-900 flex justify-end">
