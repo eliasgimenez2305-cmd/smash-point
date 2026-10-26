@@ -18613,7 +18613,8 @@ function AdminTournament({ enPanel = false, tournament, update: save, onBack, in
   const configReady = tournament.categories.length > 0 && (!usesSchedule || (tournament.playDates || []).length > 0);
   const tabState = { config: configReady ? "ok" : "empty", ...Object.fromEntries(progress.map((p) => [p.tab, p.state])) };
   const pasos = tabs.filter(([key]) => key !== "historial"); // el historial no es un paso de armar el torneo
-  const nextTab = pasos[pasos.findIndex(([key]) => key === view) + 1];
+  const enPaso = pasos.findIndex(([key]) => key === view);
+  const nextTab = enPaso >= 0 ? pasos[enPaso + 1] : null;
   const goTo = (key) => { setView(key); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const [categoryId, setCategoryId] = useState(tournament.categories[0]?.id || null);
   const category = tournament.categories.find((c) => c.id === categoryId) || tournament.categories[0] || null;

@@ -3,7 +3,7 @@
 -- Los resultados se guardan en torneos.datos (guardar_partidos o guardar_torneo). Un disparador compara
 -- los resultados de antes y después de cada guardado (sets, W.O. y retiro de cada partido de grupos,
 -- Super 8 y llave) y anota los que cambiaron. Mientras alguien escribe un resultado se guarda varias
--- veces (6, 6-2, 6-2 1…): los cambios de la misma persona en el mismo partido dentro de 3 minutos
+-- veces (6, 6-2, 6-2 1…): los cambios de la misma persona en el mismo partido dentro de 1 minuto
 -- quedan en un solo renglón, "de cómo estaba" → "a cómo quedó".
 -- Lo ven el organizador del torneo, sus empleados con permiso de resultados y el creador.
 --
@@ -79,7 +79,7 @@ begin
     where coalesce(o.resultado, '{}'::jsonb) is distinct from coalesce(n.resultado, '{}'::jsonb)
   loop
     select * into v_ultimo from resultados_historial
-    where torneo_id = new.id and partido = r.partido and por is not distinct from auth.uid() and cambiado_at > now() - interval '3 minutes'
+    where torneo_id = new.id and partido = r.partido and por is not distinct from auth.uid() and cambiado_at > now() - interval '1 minute'
     order by cambiado_at desc limit 1;
     if found then
       if v_ultimo.antes = r.despues then

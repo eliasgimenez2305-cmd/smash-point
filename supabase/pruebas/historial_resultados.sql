@@ -50,7 +50,7 @@ begin
 end $$;
 reset role;
 
--- Pasados los 3 minutos, se corrige (gana TORREZ): otro renglón, de 2-6 1-6 a 6-2 6-1
+-- Pasado el minuto, se corrige (gana TORREZ): otro renglón, de 2-6 1-6 a 6-2 6-1
 update resultados_historial set cambiado_at = now() - interval '10 minutes', creado_at = now() - interval '10 minutes' where torneo_id = 'thist-prueba';
 set local role authenticated;
 do $$
