@@ -1148,12 +1148,27 @@ function super8EnOrden(rounds, orderedIds) {
   return rounds.map((round) => round.map((match) => match.map((lado) => (Array.isArray(lado) ? lado.map(id) : id(lado)))));
 }
 
+/* La planilla que se usa en los clubes para el Súper 8 Individual de 8 jugadores (números del 1 al 8):
+   14 partidos de a 2 por ronda. Cada uno juega una vez con cada otro como compañero. */
+const SUPER8_PLANILLA_INDIVIDUAL = [
+  [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+  [[[1, 3], [5, 7]], [[2, 4], [6, 8]]],
+  [[[1, 4], [5, 8]], [[2, 3], [6, 7]]],
+  [[[1, 5], [2, 6]], [[3, 7], [4, 8]]],
+  [[[1, 6], [4, 7]], [[2, 5], [3, 8]]],
+  [[[1, 7], [2, 8]], [[3, 5], [4, 6]]],
+  [[[1, 8], [3, 6]], [[2, 7], [4, 5]]],
+];
+
 function buildSuper8Group(format, orderedIds) {
   const teams = [];
   const posiciones = orderedIds.map((_, i) => i);
   let matches;
   if (format === "super8_individual") {
-    const base = buildSuper8IndividualRounds(posiciones);
+    // Con 8 jugadores, la planilla de siempre; con otra cantidad, el cuadro calculado en orden
+    const base = orderedIds.length === SUPER8_PLANILLA_INDIVIDUAL.length + 1
+      ? SUPER8_PLANILLA_INDIVIDUAL.map((round) => round.map((match) => match.map((lado) => lado.map((n) => n - 1))))
+      : buildSuper8IndividualRounds(posiciones);
     if (!base) return null;
     const rounds = super8EnOrden(base, orderedIds);
     const teamFor = (playerIds) => {
