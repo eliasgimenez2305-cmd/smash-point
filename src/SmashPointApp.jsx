@@ -1137,12 +1137,25 @@ function buildSuper8IndividualRounds(ids) {
    En el Individual, cada lado de un partido es un "equipo" de 2 jugadores que se guarda en
    category.teams; los partidos apuntan a esos equipos en pairA/pairB, así el resto de la app
    (resultados, WO, horarios) los trata igual que a una pareja. */
+/* Renumera un cuadro para que la ronda 1 vaya en el orden de los números: en el Individual
+   1-2 vs 3-4 y 5-6 vs 7-8; por Parejas 1 vs 2, 3 vs 4… Solo cambia los números, así cada uno
+   sigue jugando una vez con cada compañero y contra cada rival las mismas veces.
+   rounds: el cuadro armado con las posiciones 0..n-1; devuelve el mismo cuadro con los ids. */
+function super8EnOrden(rounds, orderedIds) {
+  const enRonda1 = rounds[0].flat(2);
+  const lugar = new Map(enRonda1.map((pos, k) => [pos, k]));
+  const id = (pos) => orderedIds[lugar.get(pos)];
+  return rounds.map((round) => round.map((match) => match.map((lado) => (Array.isArray(lado) ? lado.map(id) : id(lado)))));
+}
+
 function buildSuper8Group(format, orderedIds) {
   const teams = [];
+  const posiciones = orderedIds.map((_, i) => i);
   let matches;
   if (format === "super8_individual") {
-    const rounds = buildSuper8IndividualRounds(orderedIds);
-    if (!rounds) return null;
+    const base = buildSuper8IndividualRounds(posiciones);
+    if (!base) return null;
+    const rounds = super8EnOrden(base, orderedIds);
     const teamFor = (playerIds) => {
       const team = { id: uid(), playerIds };
       teams.push(team);
@@ -1150,7 +1163,7 @@ function buildSuper8Group(format, orderedIds) {
     };
     matches = rounds.flatMap((round, ri) => round.map(([t1, t2]) => ({ id: uid(), pairA: teamFor(t1), pairB: teamFor(t2), sets: [], round: ri + 1 })));
   } else {
-    matches = buildCircleRounds(orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
+    matches = super8EnOrden(buildCircleRounds(posiciones), orderedIds).flatMap((round, ri) => round.map(([a, b]) => ({ id: uid(), pairA: a, pairB: b, sets: [], round: ri + 1 })));
   }
   return { group: { id: uid(), name: "Súper 8", pairIds: orderedIds, format: "super8", matches }, teams };
 }
