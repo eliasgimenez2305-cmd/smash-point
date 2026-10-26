@@ -10437,7 +10437,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "reportes" && verReportes ? (
         <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} />
       ) : seccion === "clientes" && verClientes ? (
-        <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
+        <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? (inscripciones || []).filter((i) => (tournaments || []).some((t) => t.id === i.torneo_id)) : []} />
       ) : seccion === "compras" && verConsumos && !colaborador ? (
         <ComprasPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} />
       ) : seccion === "cajadia" && verCajaDia ? (
