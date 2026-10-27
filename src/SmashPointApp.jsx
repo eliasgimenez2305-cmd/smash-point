@@ -4343,21 +4343,40 @@ function StreamLinksEditor({ tournament, date, courts, onSave }) {
   );
 }
 
-/* Botones "▶ Cancha 1" de las transmisiones de un día (vista pública) */
-function StreamLinks({ tournament, date }) {
+/* Recuadro "● TRANSMISION EN VIVO" de un día (vista pública): una cajita por cancha con su número, la
+   categoría del partido que se está jugando y "▶ ver" si tiene transmisión. Tocar la cancha baja a
+   su partido. Sale de los links de Horarios y de lo que el organizador marca "En cancha". */
+function StreamLinks({ tournament, date, matches = [], courts = [], categoryColor = {}, onIrPartido }) {
   const delDia = tournament.streams?.[date] || {};
-  const canchas = Object.keys(delDia).filter((c) => linkValido(delDia[c])).sort((a, b) => Number(a) - Number(b));
-  if (canchas.length === 0) return null;
+  const conLink = Object.keys(delDia).filter((c) => linkValido(delDia[c])).map(Number);
+  if (conLink.length === 0) return null;
+  const enCancha = {};
+  matches.forEach((m) => { if (m.liveStatus === "en_curso" && !m.placeholder && !matchIsPlayed(m, tournament.matchFormat)) enCancha[m.schedule.court] = m; });
+  const canchas = [...new Set([...conLink, ...Object.keys(enCancha).map(Number)])].sort((a, b) => a - b);
+  const total = Math.max(courts.length, canchas.length);
   // "En vivo" solo el día de los partidos; otro día el link queda (puede ser la grabación)
   const enVivo = date === todayISO() && tournamentStatusOf(tournament) !== STATUS.FINALIZADO;
   return (
-    <div className="flex flex-wrap items-center gap-2 mb-2" style={F.body}>
-      <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "#f87171" }}>{enVivo ? "● En vivo" : "Transmisiones"}</span>
-      {canchas.map((c) => (
-        <a key={c} href={delDia[c]} target="_blank" rel="noopener noreferrer" className="px-3 py-1 rounded-full text-xs font-semibold border" style={{ borderColor: "#f8717199", color: "#fecaca", backgroundColor: "#f871711a" }}>
-          ▶ {courtName(tournament, Number(c))}
-        </a>
-      ))}
+    <div className="mb-4 rounded-2xl p-3" style={{ ...F.body, backgroundColor: "#0f2a33", border: "1.5px solid #fb923c" }}>
+      <div className="flex items-center justify-between gap-2 mb-2.5">
+        <span className="text-[15px]" style={{ ...F.display, color: "#fb923c" }}>{enVivo ? "● TRANSMISION EN VIVO" : "TRANSMISIONES"}</span>
+        <span className="text-xs shrink-0" style={{ color: "#a5d8e0" }}>{conLink.length} de {total} cancha{total !== 1 ? "s" : ""}</span>
+      </div>
+      <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${Math.min(canchas.length, 5)}, minmax(0, 1fr))` }}>
+        {canchas.map((c) => {
+          const m = enCancha[c];
+          return (
+            <div key={c} className="flex flex-col items-center justify-center gap-0.5 min-h-[56px] rounded-[10px] min-w-0 px-1" style={{ border: "1px solid #fb923c66", backgroundColor: "#fb923c14" }}>
+              <button type="button" disabled={!m} onClick={() => m && onIrPartido?.(m)} className="flex flex-col items-center min-w-0 max-w-full" aria-label={m ? `Ir al partido de la ${courtName(tournament, c)}` : courtName(tournament, c)}>
+                <span className="text-[15px] truncate max-w-full" style={{ ...F.display, color: "#f2f5f8" }}>{courtName(tournament, c, true)}</span>
+                {m && <span className="text-[10px] font-bold truncate max-w-full" style={{ color: categoryColor[m.categoryId] }}>{m.categoryName}</span>}
+              </button>
+              {delDia[c] && linkValido(delDia[c]) && <a href={delDia[c]} target="_blank" rel="noopener noreferrer" className="text-[10px]" style={{ color: "#fecaca" }}>▶ ver</a>}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2.5 text-xs" style={{ color: "#a5d8e0" }}>Tocá una cancha para ir a su partido. "▶ ver" abre la transmisión.</p>
     </div>
   );
 }
@@ -5377,41 +5396,6 @@ function ScheduleDayGrid({ tournament, dateInfo, dateColor, scheduled, trayMatch
   );
 }
 
-/* Resultado en formato marcador: una pareja por renglón y los games de cada set en columnas a la
-   derecha. La pareja ganadora va en verde y el número ganador de cada set en negrita. Un W.O. se
-   muestra con el resultado con que se computa (6-0 6-0) y la marca W.O. en la pareja que no se
-   presentó. */
-function Scoreboard({ match, pairsById, format }) {
-  const sets = effectiveSets(match, format).filter((s) => s && s.a != null && s.b != null);
-  const winner = matchWinnerId(match, format);
-  const line = (side) => {
-    const id = side === "a" ? match.pairA : match.pairB;
-    const other = side === "a" ? "b" : "a";
-    const won = winner === id;
-    // Los nombres largos bajan de renglón (no se cortan); los games quedan arriba, a la derecha
-    return (
-      <div className="flex items-start gap-2 min-w-0">
-        <span className={`flex-1 min-w-0 break-words ${won ? "text-lime-400 font-semibold" : "text-slate-300"}`}>
-          {pairsById[id]?.name || "—"}
-          {match.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
-          {match.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
-        </span>
-        <span className="flex gap-1 shrink-0 font-mono">
-          {sets.map((s, i) => (
-            <span key={i} className={`w-5 text-center ${s[side] > s[other] ? "font-extrabold text-slate-100" : "text-slate-400"}`}>{s[side]}</span>
-          ))}
-        </span>
-      </div>
-    );
-  };
-  return (
-    <div className="text-sm leading-snug">
-      {line("a")}
-      {line("b")}
-    </div>
-  );
-}
-
 /* Horarios en modo lectura para la vista pública: una lista compacta por día y horario, dos
    renglones por partido ("C1 · Gómez - Ibáñez vs Rossi - Peralta · 6-3 6-3" y debajo la
    categoría), con un botón "Ahora" que lleva al horario que se está jugando. */
@@ -5444,67 +5428,110 @@ function SchedulePublicView({ tournament }) {
       || pending.find((m) => m.schedule.date >= today)
       || pending[0];
   const goToNow = () => { if (nowMatch) document.getElementById(slotId(nowMatch))?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const irAlPartido = (m) => document.getElementById(`partido-${m.key}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Los sets van en columnas fijas (todas las del formato), así quedan alineados entre partidos
+  const columnasSets = (tournament.matchFormat || DEFAULT_MATCH_FORMAT).setsToPlay || 3;
 
   const byDate = {};
   scheduled.forEach((m) => { (byDate[m.schedule.date] = byDate[m.schedule.date] || []).push(m); });
+  const fechas = Object.keys(byDate).sort();
 
   return (
     <div>
-      {nowMatch && (
-        <button type="button" onClick={goToNow} className="mb-4 px-4 py-2 rounded-full text-sm font-semibold" style={{ backgroundColor: "#fb923c", color: "#14181f", ...F.body }}>
-          ● Ahora
-        </button>
-      )}
-      {Object.keys(byDate).sort().map((date, di) => {
+      {fechas.map((date, di) => {
         const dateColor = GROUP_COLORS[di % GROUP_COLORS.length];
         const byTime = {};
         byDate[date].forEach((m) => { (byTime[m.schedule.time] = byTime[m.schedule.time] || []).push(m); });
         return (
-          <div key={date} className="mb-6">
-            <div className="mb-2"><SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill></div>
-            <StreamLinks tournament={tournament} date={date} />
+          <div key={date} className={di < fechas.length - 1 ? "mb-6" : ""}>
+            <StreamLinks tournament={tournament} date={date} matches={byDate[date]} courts={courtsOfDay(tournament, date, byDate[date])} categoryColor={categoryColor} onIrPartido={irAlPartido} />
+            <div className="mb-2.5 flex items-center gap-3">
+              <SkewPill color={dateColor}>{formatDateShort(date)}</SkewPill>
+              {nowMatch && nowMatch.schedule.date === date && (
+                <button type="button" onClick={goToNow} className="px-4 py-2 rounded-full text-sm font-bold" style={{ backgroundColor: "#fb923c", color: "#14181f", ...F.body }}>
+                  ● EN CURSO
+                </button>
+              )}
+            </div>
             <div className="rounded-xl border divide-y min-w-0" style={{ borderColor: dateColor + "40" }}>
               {Object.keys(byTime).sort().map((time) => (
-                <div key={time} id={slotId(byTime[time][0])} className="px-3 py-2 scroll-mt-4 space-y-2.5" style={{ borderColor: dateColor + "22" }}>
-                    {byTime[time].map((m, i) => {
-                      const hasResult = !m.placeholder && matchIsPlayed(m, tournament.matchFormat);
-                      const w = hasResult ? matchWinnerId(m, tournament.matchFormat) : null;
-                      const live = !hasResult && m.liveStatus === "en_curso";
-                      const name = (id) => <span className={w === id ? "text-lime-400 font-semibold" : ""}>{pairsById[id]?.name || "—"}</span>;
-                      // Columna izquierda: la hora (en el primer partido del horario) y el "vs"; a la
-                      // derecha, la cancha y la categoría arriba y cada pareja en su propio renglón
-                      return (
-                        <div key={m.key} className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-x-2 text-sm" style={F.body}>
-                          <span className="text-sm font-extrabold" style={{ color: dateColor }}>{i === 0 ? time : ""}</span>
-                          <div className="flex items-baseline gap-2 min-w-0 text-[11px] pt-0.5">
-                            <span className="min-w-0 truncate">
-                              <span className="font-bold" style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</span>
-                              <span style={{ color: categoryColor[m.categoryId] }}> · {m.number ? `#${m.number} · ` : ""}{m.categoryName}</span>
-                              {m.label && <span className="text-teal-500"> · {m.label}</span>}
-                            </span>
-                            {live && <span className="text-[10px] font-bold shrink-0 ml-auto" style={{ color: "#fb923c" }}>● EN CURSO</span>}
-                            {live && streamOf(tournament, date, m.schedule.court) && <a href={streamOf(tournament, date, m.schedule.court)} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold shrink-0 underline" style={{ color: "#f87171" }}>▶ Ver</a>}
-                          </div>
-                          {hasResult ? (
-                            <><span /><div className="min-w-0 mt-0.5"><Scoreboard match={m} pairsById={pairsById} format={tournament.matchFormat} /></div></>
-                          ) : m.placeholder ? (
-                            <><span /><span className="italic opacity-70 break-words">{m.placeholder}</span></>
-                          ) : (
-                            <>
-                              <span className="row-span-2 self-center text-xs text-teal-500 text-right pr-1">vs</span>
-                              <span className="min-w-0 break-words leading-snug">{name(m.pairA)}</span>
-                              <span className="min-w-0 break-words leading-snug">{name(m.pairB)}</span>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
+                <div key={time} id={slotId(byTime[time][0])} className="p-3 scroll-mt-4 space-y-3" style={{ borderColor: dateColor + "22" }}>
+                  {byTime[time].map((m, i) => (
+                    <PartidoHorario
+                      key={m.key} m={m} tournament={tournament} pairsById={pairsById} hora={i === 0 ? time : ""}
+                      dateColor={dateColor} categoryColor={categoryColor[m.categoryId]} columnasSets={columnasSets}
+                    />
+                  ))}
                 </div>
               ))}
             </div>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* Un partido de los horarios públicos, en 3 renglones: 1) hora, cancha, número, categoría y grupo
+   (y "EN CURSO" + "▶ Ver" si se está jugando); 2 y 3) cada pareja en un renglón. Jugado: los sets en
+   columnas fijas a la derecha, la ganadora en verde. Sin jugar: "vs" a la izquierda, entre las dos. */
+function PartidoHorario({ m, tournament, pairsById, hora, dateColor, categoryColor, columnasSets }) {
+  const format = tournament.matchFormat;
+  const hasResult = !m.placeholder && matchIsPlayed(m, format);
+  const live = !hasResult && !m.placeholder && m.liveStatus === "en_curso";
+  const stream = live ? streamOf(tournament, m.schedule.date, m.schedule.court) : null;
+  const nombre = (id) => pairsById[id]?.name || "—";
+  const marcas = (id) => (
+    <>
+      {m.walkover === id && <span className="ml-1.5 text-[9px] font-bold text-amber-400">W.O.</span>}
+      {m.retired === id && <span className="ml-1.5 text-[9px] font-bold text-red-400">RET</span>}
+    </>
+  );
+  let cuerpo;
+  if (hasResult) {
+    const sets = effectiveSets(m, format).filter((s) => s && s.a != null && s.b != null);
+    const w = matchWinnerId(m, format);
+    const columnas = Math.max(columnasSets, sets.length);
+    const renglon = (side) => {
+      const id = side === "a" ? m.pairA : m.pairB;
+      const other = side === "a" ? "b" : "a";
+      const gano = w === id;
+      return (
+        <div className="flex items-baseline gap-1.5">
+          <span className={`flex-1 min-w-0 truncate ${gano ? "font-bold" : ""}`} style={{ color: gano ? "#9fe022" : "#c9dde2" }} title={nombre(id)}>{nombre(id)}{marcas(id)}</span>
+          {Array.from({ length: columnas }, (_, k) => {
+            const s = sets[k];
+            const ganoSet = s && s[side] > s[other];
+            return <span key={k} className={`w-[18px] shrink-0 text-right tabular-nums ${ganoSet ? "font-bold" : ""}`} style={{ color: ganoSet ? "#f2f5f8" : "#7fb3bd" }}>{s ? s[side] : ""}</span>;
+          })}
+        </div>
+      );
+    };
+    cuerpo = <>{renglon("a")}{renglon("b")}</>;
+  } else if (m.placeholder) {
+    cuerpo = <span className="italic opacity-70 break-words">{m.placeholder}</span>;
+  } else {
+    cuerpo = (
+      <div className="grid grid-cols-[18px_minmax(0,1fr)] gap-x-1.5 gap-y-1">
+        <span className="row-span-2 self-center" style={{ color: "#5fb3bf" }}>vs</span>
+        <span className="min-w-0 truncate" title={nombre(m.pairA)}>{nombre(m.pairA)}</span>
+        <span className="min-w-0 truncate" title={nombre(m.pairB)}>{nombre(m.pairB)}</span>
+      </div>
+    );
+  }
+  return (
+    <div id={`partido-${m.key}`} className="flex flex-col gap-1 text-[11px] scroll-mt-4" style={F.body}>
+      <div className="flex items-baseline gap-2.5 min-w-0">
+        <span className="w-10 shrink-0 text-sm font-extrabold" style={{ color: dateColor }}>{hora}</span>
+        <span className="min-w-0 truncate">
+          <b style={{ color: dateColor }}>{courtName(tournament, m.schedule.court, true)}</b>
+          <span style={{ color: categoryColor }}> · {m.number ? `#${m.number} · ` : ""}{m.categoryName}</span>
+          {m.label && <span style={{ color: "#5fb3bf" }}> · {m.label}</span>}
+        </span>
+        {live && <span className="ml-auto shrink-0 text-[10px] font-bold rounded-full px-2" style={{ color: "#14181f", backgroundColor: "#fb923c" }}>EN CURSO</span>}
+        {stream && <a href={stream} target="_blank" rel="noopener noreferrer" className="shrink-0 text-[10px] font-bold" style={{ color: "#f87171" }}>▶ Ver</a>}
+      </div>
+      {cuerpo}
     </div>
   );
 }
@@ -7927,7 +7954,8 @@ function PublicTournament({ tournament, organizers, onBack, jugadorApi = null })
         )}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-          <Badge status={tournamentStatusOf(tournament)} />
+          {/* En curso no lleva etiqueta: lo dicen el recuadro de transmisión y el botón "EN CURSO" de Horarios */}
+          {tournamentStatusOf(tournament) !== STATUS.EN_CURSO && <Badge status={tournamentStatusOf(tournament)} />}
         </div>
         <p className="text-xs text-teal-500 mt-2" style={F.body}>
           {tournamentTypeSummary(tournament)}
