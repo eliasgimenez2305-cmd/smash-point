@@ -19512,6 +19512,16 @@ function SmashPointAppInner() {
     return () => { document.removeEventListener("visibilitychange", check); clearInterval(id); };
   }, [session, route, selectedId, reloadTournaments]);
 
+  // La portada pública también se actualiza sola mientras está a la vista, cada 1 minuto (pregunta
+  // qué torneos cambiaron y baja solo el resumen de esos)
+  useEffect(() => {
+    if (session || route !== "public-home") return;
+    const check = () => { if (document.visibilityState === "visible") reloadTournaments(); };
+    document.addEventListener("visibilitychange", check);
+    const id = setInterval(check, 60000);
+    return () => { document.removeEventListener("visibilitychange", check); clearInterval(id); };
+  }, [session, route, reloadTournaments]);
+
   // Inscripciones de los torneos del organizador logueado (para los avisos de "nuevas" y su pestaña)
   const [inscripciones, setInscripciones] = useState([]);
   const reloadInscripciones = useCallback(async () => {
