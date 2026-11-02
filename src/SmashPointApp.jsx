@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
-import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet } from "./standings.js";
+import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet, bracketFormat, formatForMatch, superTiebreakPoints } from "./standings.js";
 import { findNameDuplicates, splitPair, nameMatch, normalizeName } from "./names.js";
 import { fapRound1 } from "./bracketFap.js";
 import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
@@ -1283,7 +1283,7 @@ function tournamentProgress(t) {
   (t.categories || []).forEach((c) => {
     (c.groups || []).forEach((g) => g.matches.forEach((m) => { total++; if (matchIsPlayed(m, t.matchFormat)) played++; }));
     (c.bracket || []).forEach((round) => round.forEach((m) => {
-      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m, t.matchFormat)) played++; }
+      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m, bracketFormat(t.matchFormat))) played++; }
     }));
   });
   return { total, played, pct: total > 0 ? Math.round((played / total) * 100) : 0 };
@@ -1617,8 +1617,10 @@ function withForfeits(category, format) {
   return current;
 }
 
+/* El formato en palabras. Si la llave tiene uno propio: "Zonas: … — Llaves: …" */
 function formatSummary(format) {
   const f = format || DEFAULT_MATCH_FORMAT;
+  if (f.bracket) return `Zonas: ${formatSummary({ ...f, bracket: null })} — Llaves: ${formatSummary(f.bracket)}`;
   if (isSingleSetFormat(f)) {
     const tie = f.gamesPerSet - 1;
     const set = f.type === "americano" ? `set único a ${f.gamesPerSet} games, sin ventaja` : `un solo set a ${f.gamesPerSet} games`;
@@ -1629,7 +1631,7 @@ function formatSummary(format) {
     `${f.gamesPerSet} games por set`,
   ];
   if (f.setTiebreak) parts.push(`tie break a 7 en ${f.gamesPerSet}-${f.gamesPerSet}`);
-  if (f.setsToPlay >= 3) parts.push(f.finalSuperTiebreak ? "super tie-break a 10 en el set decisivo" : "sin super tie-break (se juega el set completo)");
+  if (f.setsToPlay >= 3) parts.push(f.finalSuperTiebreak ? `super tie-break a ${superTiebreakPoints(f)} en el set decisivo` : "sin super tie-break (se juega el set completo)");
   return parts.join(" · ");
 }
 
@@ -3247,7 +3249,7 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
           return (
             <div key={i} className="flex flex-col items-center">
               <span className="text-[10px] text-teal-500 mb-0.5" style={F.body}>
-                {isTiebreak ? "STB a 10" : singleSet ? `Set a ${format.gamesPerSet}` : `Set ${i + 1}`}
+                {isTiebreak ? `STB a ${superTiebreakPoints(format)}` : singleSet ? `Set a ${format.gamesPerSet}` : `Set ${i + 1}`}
               </span>
               <div className="flex items-center gap-1">
                 <input
@@ -3415,12 +3417,72 @@ function ClassicMatchFormatFields({ format, onChange }) {
         <input type="checkbox" checked={f.setTiebreak} onChange={(e) => onChange({ ...f, setTiebreak: e.target.checked })} />
         Tie break a 7 puntos dentro del set
       </label>
-      {f.setsToPlay >= 3 && <label className="flex items-center gap-2 text-sm" style={F.body}>
-        <input type="checkbox" checked={f.finalSuperTiebreak} onChange={(e) => onChange({ ...f, finalSuperTiebreak: e.target.checked })} />
-        Super tie-break a 10 en el set decisivo
-      </label>}
+      {f.setsToPlay >= 3 && (
+        <div>
+          <label className="block text-xs text-teal-400 mb-1" style={F.body}>Set decisivo</label>
+          <select
+            value={!f.finalSuperTiebreak ? "completo" : superTiebreakPoints(f) === 11 ? "stb11" : "stb10"}
+            onChange={(e) => {
+              const v = e.target.value;
+              onChange(v === "completo" ? { ...f, finalSuperTiebreak: false } : { ...f, finalSuperTiebreak: true, superTiebreakPoints: v === "stb11" ? 11 : 10 });
+            }}
+            className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+          >
+            <option value="stb10">Super tie-break a 10</option>
+            <option value="stb11">Super tie-break a 11</option>
+            <option value="completo">Set completo</option>
+          </select>
+        </div>
+      )}
     </div>
   );
+}
+
+/* Formato del Clásico para zonas y llaves: las llaves pueden jugarse igual que las zonas o con un
+   formato propio (matchFormat.bracket), por ejemplo zonas con super tie-break y llaves al mejor de
+   3 sets completos */
+function ClassicFormatByStage({ format, onChange }) {
+  const f = format || DEFAULT_MATCH_FORMAT;
+  const { bracket, ...zonas } = f;
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-xs uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Zonas</p>
+        <ClassicMatchFormatFields format={zonas} onChange={(z) => onChange(bracket ? { ...z, bracket } : z)} />
+      </div>
+      <div>
+        <p className="text-xs uppercase tracking-wide text-teal-400 mb-2" style={F.body}>Llaves</p>
+        <select
+          value={bracket ? "propio" : "igual"}
+          onChange={(e) => onChange(e.target.value === "propio" ? { ...zonas, bracket: { ...zonas, finalSuperTiebreak: false } } : zonas)}
+          className="px-3 py-2 rounded border text-sm mb-3" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+        >
+          <option value="igual">Igual que las zonas</option>
+          <option value="propio">Con otro formato</option>
+        </select>
+        {bracket && <ClassicMatchFormatFields format={bracket} onChange={(b) => onChange({ ...zonas, bracket: b })} />}
+      </div>
+    </div>
+  );
+}
+
+/* Qué pasa con los resultados ya cargados si el torneo pasa al formato next: cuántos partidos con
+   resultado se leen distinto (changed) y, de esos, cuántos dejan de estar terminados o cambian de
+   ganador (broken), por ejemplo un super tie-break 10-8 que con "set completo" ya no es un set. */
+function formatChangeImpact(tournament, next) {
+  const prev = tournament.matchFormat;
+  let changed = 0, broken = 0;
+  const check = (m, before, after) => {
+    if (!matchHasScore(m) || m.walkover) return;
+    if (JSON.stringify(countedSets(m, before)) !== JSON.stringify(countedSets(m, after)) || matchIsPlayed(m, before) !== matchIsPlayed(m, after)) changed++;
+    if (matchIsPlayed(m, before) && (!matchIsPlayed(m, after) || matchWinnerId(m, before) !== matchWinnerId(m, after))) broken++;
+  };
+  (tournament.categories || []).forEach((c) => {
+    if (isSuper8(c)) return;
+    (c.groups || []).forEach((g) => g.matches.forEach((m) => check(m, prev, next)));
+    (c.bracket || []).flat().forEach((m) => check(m, bracketFormat(prev), bracketFormat(next)));
+  });
+  return { changed, broken };
 }
 
 /* Nombre del tipo de torneo: "Clásico", "Súper 8 Individual", "Americano"... */
@@ -3466,6 +3528,8 @@ function TournamentTypeEditor({ tournament, update }) {
   const [classicFormat, setClassicFormat] = useState(() => (isSingleSetFormat(tournament.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : tournament.matchFormat || { ...DEFAULT_MATCH_FORMAT }));
   const blocked = tournamentConfigChangeBlocked(tournament, config);
   const hasResults = tournamentHasScores(tournament);
+  const draftFormat = config.type === "clasico" ? classicFormat : tournamentConfigIsComplete(config) ? withTournamentConfig(tournament, config).matchFormat : null;
+  const impact = open && hasResults && draftFormat ? formatChangeImpact(tournament, draftFormat) : { changed: 0, broken: 0 };
 
   const start = () => {
     setConfig(tournamentConfig(tournament));
@@ -3495,15 +3559,20 @@ function TournamentTypeEditor({ tournament, update }) {
         <div className="mt-4 space-y-4">
           <TournamentTypeChoice config={config} onChange={setConfig} />
           <TournamentTypeOptions config={config} onChange={setConfig} />
-          {config.type === "clasico" && <ClassicMatchFormatFields format={classicFormat} onChange={setClassicFormat} />}
+          {config.type === "clasico" && <ClassicFormatByStage format={classicFormat} onChange={setClassicFormat} />}
           {blocked && (
             <p className="text-xs text-amber-400" style={F.body}>
               Hay categorías con partidos ya armados en otro formato. Para este cambio, primero reiniciá sus grupos o partidos.
             </p>
           )}
-          {!blocked && hasResults && (
+          {!blocked && impact.broken > 0 && (
+            <p className="text-xs text-red-400 font-semibold" style={F.body}>
+              Ojo: {impact.broken === 1 ? "1 partido que hoy está terminado queda" : `${impact.broken} partidos que hoy están terminados quedan`} sin terminar o con otro ganador con este formato (por ejemplo, un super tie-break 10-8 leído como set común). Los grupos y la llave se recalculan con eso. Si el torneo está en juego, cambiá solo el formato de lo que todavía no empezó.
+            </p>
+          )}
+          {!blocked && impact.broken === 0 && impact.changed > 0 && (
             <p className="text-[11px] text-amber-400" style={F.body}>
-              Ya hay resultados cargados: si cambiás el formato, esos resultados se van a leer con el formato nuevo.
+              {impact.changed === 1 ? "1 resultado ya cargado se va a leer" : `${impact.changed} resultados ya cargados se van a leer`} con el formato nuevo.
             </p>
           )}
           <button
@@ -4088,7 +4157,7 @@ function BracketsOverview({ tournament, activeId, onSelect, onUpdateTournament }
     const champion = winners[rounds.length - 1]?.[0];
     if (champion) return { text: `🏆 ${categoryEntitiesById(c)[champion]?.name || "Campeón"}`, color: "#9fe022" };
     const played = rounds.flatMap((r, ri) => r.filter((m, mi) => !isByeMatch(byes, ri, mi)));
-    const done = played.filter((m) => matchIsPlayed(m, format)).length;
+    const done = played.filter((m) => matchIsPlayed(m, bracketFormat(format))).length;
     return { text: done > 0 ? `En juego · ${done}/${played.length} partidos` : `Publicada${wait}`, color: done > 0 ? "#fb923c" : "#38bdf8" };
   };
   const drafts = cats.filter((c) => c.bracket && !c.bracketPublished);
@@ -4612,7 +4681,7 @@ function MatchResultModal({ m, pairsById, format, onSetScore, onWalkover, onReti
       ) : (
         <>
           {m.retired && <p className="text-sm text-red-400 mb-2" style={F.body}>RET: se retiró {m.retired === m.pairA ? nameA : nameB}. El resto del partido se completa a favor del rival.</p>}
-          <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={format} onSetScore={onSetScore} partial={!!m.retired} /></div>
+          <div className="flex justify-start mb-3"><MatchSetsEditor sets={m.sets} format={formatForMatch(format, m)} onSetScore={onSetScore} partial={!!m.retired} /></div>
         </>
       )}
       <MatchOutcomeButtons m={m} nameA={nameA} nameB={nameB} onWalkover={onWalkover} onRetired={onRetired} className="text-xs mb-5" />
@@ -4994,7 +5063,8 @@ function scheduleAlerts(tournament, matches) {
       if (!m.schedule || isByeMatch(byes, ri, mi)) return;
       [2 * mi, 2 * mi + 1].forEach((fi) => {
         const child = c.bracket[ri - 1][fi];
-        if (!child?.schedule || isByeMatch(byes, ri - 1, fi) || (played(m) && played(child))) return;
+        const bf = bracketFormat(tournament.matchFormat);
+        if (!child?.schedule || isByeMatch(byes, ri - 1, fi) || (matchIsPlayed(m, bf) && matchIsPlayed(child, bf))) return;
         const gap = startOf(m.schedule) - startOf(child.schedule);
         if (gap < rest) shortRest.push({ c, m, child, gap, nums });
       });
@@ -7826,7 +7896,7 @@ function CategoryBracketPublicView({ category, format }) {
               const color = colorOf(ri);
               const w = walked.winners[ri][mi];
               // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
-              const jugados = matchIsPlayed(m, format) && !m.walkover ? countedSets(m, format) : [];
+              const jugados = matchIsPlayed(m, bracketFormat(format)) && !m.walkover ? countedSets(m, bracketFormat(format)) : [];
               const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
               const winnerIsA = w == null ? null : w === m.pairA;
               return (
@@ -7840,8 +7910,8 @@ function CategoryBracketPublicView({ category, format }) {
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
                     {games("b")}
                   </div>
-                  {matchIsPlayed(m, format) && (m.walkover || m.retired) && (
-                    <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={format} match={m} winnerIsA={winnerIsA} /></p>
+                  {matchIsPlayed(m, bracketFormat(format)) && (m.walkover || m.retired) && (
+                    <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={bracketFormat(format)} match={m} winnerIsA={winnerIsA} /></p>
                   )}
                 </div>
               );
@@ -12990,7 +13060,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
             const live = walkBracket(category.bracket, format).rounds.flat().find((x) => x.id === resultMatchInfo.id);
             return live && live.pairA && live.pairB && (
               <MatchResultModal
-                m={{ ...resultMatchInfo, ...live }} pairsById={pairsById} format={format}
+                m={{ ...resultMatchInfo, ...live }} pairsById={pairsById} format={bracketFormat(format)}
                 onSetScore={(setIndex, side, value) => setBracketSetScore(live.id, setIndex, side, value)}
                 onWalkover={(pairId) => setBracketWalkover(live.id, pairId)}
                 onRetired={(pairId) => setBracketRetired(live.id, pairId)}
@@ -13004,6 +13074,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
             const origins = bracketOrigins(category, format);
             const total = category.bracket.length;
             const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
+            const bf = bracketFormat(format);
             return (
               <>
                 <BracketGrid
@@ -13026,7 +13097,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                           <p className="text-amber-400 font-semibold text-xs">WO</p>
                         ) : (() => {
                           // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
-                          const jugados = matchIsPlayed(m, format) ? countedSets(m, format) : [];
+                          const jugados = matchIsPlayed(m, bf) ? countedSets(m, bf) : [];
                           const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
                           return (
                             <>
@@ -13045,8 +13116,8 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                         {/* El resultado se carga en la misma ventanita que en Horarios y En cancha */}
                         {editable && (
                           <button type="button" onClick={() => setResultMatch({ ...m, number: nums.get(m.id), categoryName: category.name, label: roundStageLabel(total, ri) })} className="text-xs underline text-teal-300 hover:text-lime-400">
-                            {matchIsPlayed(m, format) ? "Editar resultado ✎"
-                              : matchHasScore(m) ? <span className="font-mono"><MatchResultLabel format={format} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
+                            {matchIsPlayed(m, bf) ? "Editar resultado ✎"
+                              : matchHasScore(m) ? <span className="font-mono"><MatchResultLabel format={bf} match={m} winnerIsA={w == null ? null : w === m.pairA} /> ✎</span>
                               : "+ Resultado"}
                           </button>
                         )}
