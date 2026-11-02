@@ -1284,8 +1284,8 @@ function tournamentProgress(t) {
   if (isInfoOnly(t)) return { total, played, pct: 0 }; // los informativos no tienen partidos
   (t.categories || []).forEach((c) => {
     (c.groups || []).forEach((g) => g.matches.forEach((m) => { total++; if (matchIsPlayed(m, t.matchFormat)) played++; }));
-    (c.bracket || []).forEach((round) => round.forEach((m) => {
-      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m, bracketFormat(t.matchFormat))) played++; }
+    (c.bracket || []).forEach((round, ri) => round.forEach((m) => {
+      if (m.pairA && m.pairB) { total++; if (matchIsPlayed(m, bracketFormat(t.matchFormat, ri, c.bracket.length))) played++; }
     }));
   });
   return { total, played, pct: total > 0 ? Math.round((played / total) * 100) : 0 };
@@ -1622,7 +1622,10 @@ function withForfeits(category, format) {
 /* El formato en palabras. Si la llave tiene uno propio: "Zonas: … — Llaves: …" */
 function formatSummary(format) {
   const f = format || DEFAULT_MATCH_FORMAT;
-  if (f.bracket) return `Zonas: ${formatSummary({ ...f, bracket: null })} — Llaves: ${formatSummary(f.bracket)}`;
+  if (f.bracket) {
+    const desde = f.bracket.lastRounds === 1 ? "Final" : f.bracket.lastRounds === 2 ? "Semis y final" : "Llaves";
+    return `Zonas${f.bracket.lastRounds ? " y resto de la llave" : ""}: ${formatSummary({ ...f, bracket: null })} — ${desde}: ${formatSummary(f.bracket)}`;
+  }
   if (isSingleSetFormat(f)) {
     const tie = f.gamesPerSet - 1;
     const set = f.type === "americano" ? `set único a ${f.gamesPerSet} games, sin ventaja` : `un solo set a ${f.gamesPerSet} games`;
@@ -1702,7 +1705,7 @@ function collectScheduleableMatches(tournament) {
         if ((m.pairA && m.pairB) || isSkeletonSlot || isPendingScheduled) {
           list.push({
             key: `${c.id}:b:${ri}:${m.id}`, categoryId: c.id, categoryName: c.name,
-            location: { type: "bracket", roundIndex: ri }, matchId: m.id, number: nums.get(m.id), label: roundStageLabel(c.bracket.length, ri),
+            location: { type: "bracket", roundIndex: ri, rounds: c.bracket.length }, matchId: m.id, number: nums.get(m.id), label: roundStageLabel(c.bracket.length, ri),
             pairA: m.pairA, pairB: m.pairB, schedule: m.schedule || null, sets: m.sets || [],
             walkover: m.walkover || null, retired: m.retired || null, liveStatus: m.liveStatus || null, draft: !c.bracketPublished,
             placeholder: placeholderText,
@@ -3440,12 +3443,24 @@ function ClassicMatchFormatFields({ format, onChange }) {
   );
 }
 
+/* Desde qué ronda de la llave va su formato propio (matchFormat.bracket.lastRounds): toda la
+   llave, semis y final, o solo la final; las rondas de antes se juegan igual que las zonas */
+const BRACKET_FORMAT_ROUNDS = [
+  { value: "", label: "Toda la llave" },
+  { value: "2", label: "Semis y final" },
+  { value: "1", label: "Solo la final" },
+];
+
 /* Formato del Clásico para zonas y llaves: las llaves pueden jugarse igual que las zonas o con un
    formato propio (matchFormat.bracket), por ejemplo zonas con super tie-break y llaves al mejor de
-   3 sets completos */
+   3 sets completos, en toda la llave o desde las semis o solo en la final */
 function ClassicFormatByStage({ format, onChange }) {
   const f = format || DEFAULT_MATCH_FORMAT;
   const { bracket, ...zonas } = f;
+  const setRounds = (v) => {
+    const { lastRounds, ...rest } = bracket;
+    onChange({ ...zonas, bracket: v ? { ...rest, lastRounds: Number(v) } : rest });
+  };
   return (
     <div className="space-y-4">
       <div>
@@ -3462,6 +3477,19 @@ function ClassicFormatByStage({ format, onChange }) {
           <option value="igual">Igual que las zonas</option>
           <option value="propio">Con otro formato</option>
         </select>
+        {bracket && (
+          <div className="mb-3">
+            <label className="block text-xs text-teal-400 mb-1" style={F.body}>Desde qué ronda</label>
+            <select
+              value={bracket.lastRounds ? String(bracket.lastRounds) : ""}
+              onChange={(e) => setRounds(e.target.value)}
+              className="px-3 py-2 rounded border text-sm" style={{ backgroundColor: "#eef2f2", color: "#111827", borderColor: "#94a3b8" }}
+            >
+              {BRACKET_FORMAT_ROUNDS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            {bracket.lastRounds && <p className="text-[11px] text-teal-500 mt-1" style={F.body}>Las rondas de antes se juegan igual que las zonas.</p>}
+          </div>
+        )}
         {bracket && <ClassicMatchFormatFields format={bracket} onChange={(b) => onChange({ ...zonas, bracket: b })} />}
       </div>
     </div>
@@ -3482,7 +3510,7 @@ function formatChangeImpact(tournament, next) {
   (tournament.categories || []).forEach((c) => {
     if (isSuper8(c)) return;
     (c.groups || []).forEach((g) => g.matches.forEach((m) => check(m, prev, next)));
-    (c.bracket || []).flat().forEach((m) => check(m, bracketFormat(prev), bracketFormat(next)));
+    (c.bracket || []).forEach((round, ri) => round.forEach((m) => check(m, bracketFormat(prev, ri, c.bracket.length), bracketFormat(next, ri, c.bracket.length))));
   });
   return { changed, broken };
 }
@@ -4159,8 +4187,8 @@ function BracketsOverview({ tournament, activeId, onSelect, onUpdateTournament }
     const { rounds, winners, byes } = walkBracket(c.bracket, format);
     const champion = winners[rounds.length - 1]?.[0];
     if (champion) return { text: `🏆 ${categoryEntitiesById(c)[champion]?.name || "Campeón"}`, color: "#9fe022" };
-    const played = rounds.flatMap((r, ri) => r.filter((m, mi) => !isByeMatch(byes, ri, mi)));
-    const done = played.filter((m) => matchIsPlayed(m, bracketFormat(format))).length;
+    const played = rounds.flatMap((r, ri) => r.filter((m, mi) => !isByeMatch(byes, ri, mi)).map((m) => ({ m, ri })));
+    const done = played.filter(({ m, ri }) => matchIsPlayed(m, bracketFormat(format, ri, rounds.length))).length;
     return { text: done > 0 ? `En juego · ${done}/${played.length} partidos` : `Publicada${wait}`, color: done > 0 ? "#fb923c" : "#38bdf8" };
   };
   const drafts = cats.filter((c) => c.bracket && !c.bracketPublished);
@@ -5066,8 +5094,8 @@ function scheduleAlerts(tournament, matches) {
       if (!m.schedule || isByeMatch(byes, ri, mi)) return;
       [2 * mi, 2 * mi + 1].forEach((fi) => {
         const child = c.bracket[ri - 1][fi];
-        const bf = bracketFormat(tournament.matchFormat);
-        if (!child?.schedule || isByeMatch(byes, ri - 1, fi) || (matchIsPlayed(m, bf) && matchIsPlayed(child, bf))) return;
+        const bf = (r) => bracketFormat(tournament.matchFormat, r, c.bracket.length);
+        if (!child?.schedule || isByeMatch(byes, ri - 1, fi) || (matchIsPlayed(m, bf(ri)) && matchIsPlayed(child, bf(ri - 1)))) return;
         const gap = startOf(m.schedule) - startOf(child.schedule);
         if (gap < rest) shortRest.push({ c, m, child, gap, nums });
       });
@@ -7898,8 +7926,9 @@ function CategoryBracketPublicView({ category, format }) {
             renderMatch={(m, ri, mi) => {
               const color = colorOf(ri);
               const w = walked.winners[ri][mi];
+              const bf = bracketFormat(format, ri, total);
               // Los games de cada set (con RET, los sets completados; sin sets de más), como en un marcador
-              const jugados = matchIsPlayed(m, bracketFormat(format)) && !m.walkover ? countedSets(m, bracketFormat(format)) : [];
+              const jugados = matchIsPlayed(m, bf) && !m.walkover ? countedSets(m, bf) : [];
               const games = (lado) => <span className="flex gap-2 tabular-nums shrink-0">{jugados.map((x, i) => <span key={i} className="w-5 text-center">{x[lado]}</span>)}</span>;
               const winnerIsA = w == null ? null : w === m.pairA;
               return (
@@ -7913,8 +7942,8 @@ function CategoryBracketPublicView({ category, format }) {
                     <span className="flex items-center gap-1 min-w-0">{w && w === m.pairB && <WinnerCheck />}<PairName id={m.pairB} pairsById={pairsById} bye={walked.byes[ri][mi].pairB} placeholder={m.placeholderB} origin={ri === 0 ? origins[m.pairB] : null} /></span>
                     {games("b")}
                   </div>
-                  {matchIsPlayed(m, bracketFormat(format)) && (m.walkover || m.retired) && (
-                    <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={bracketFormat(format)} match={m} winnerIsA={winnerIsA} /></p>
+                  {matchIsPlayed(m, bf) && (m.walkover || m.retired) && (
+                    <p className="text-[10px] text-teal-500 mt-1"><MatchResultLabel format={bf} match={m} winnerIsA={winnerIsA} /></p>
                   )}
                 </div>
               );
@@ -13060,10 +13089,12 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
             </div>
           )}
           {category.bracket && resultMatchInfo && (() => {
-            const live = walkBracket(category.bracket, format).rounds.flat().find((x) => x.id === resultMatchInfo.id);
+            const { rounds } = walkBracket(category.bracket, format);
+            const ri = rounds.findIndex((r) => r.some((x) => x.id === resultMatchInfo.id));
+            const live = ri >= 0 ? rounds[ri].find((x) => x.id === resultMatchInfo.id) : null;
             return live && live.pairA && live.pairB && (
               <MatchResultModal
-                m={{ ...resultMatchInfo, ...live }} pairsById={pairsById} format={bracketFormat(format)}
+                m={{ ...resultMatchInfo, ...live }} pairsById={pairsById} format={bracketFormat(format, ri, rounds.length)}
                 onSetScore={(setIndex, side, value) => setBracketSetScore(live.id, setIndex, side, value)}
                 onWalkover={(pairId) => setBracketWalkover(live.id, pairId)}
                 onRetired={(pairId) => setBracketRetired(live.id, pairId)}
@@ -13077,7 +13108,6 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
             const origins = bracketOrigins(category, format);
             const total = category.bracket.length;
             const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
-            const bf = bracketFormat(format);
             return (
               <>
                 <BracketGrid
@@ -13093,6 +13123,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
                     const color = colorOf(ri);
                     const editable = m.pairA && m.pairB;
                     const w = walked.winners[ri][mi];
+                    const bf = bracketFormat(format, ri, total);
                     return (
                       <div className="rounded-lg p-3 text-sm space-y-2" style={{ ...F.body, backgroundColor: color + "0d", border: `1px solid ${color}40` }}>
                         {!isByeMatch(walked.byes, ri, mi) && <div className="flex flex-wrap items-baseline gap-x-2"><MatchNumber n={nums.get(m.id)} /><ScheduleLabel schedule={m.schedule} wrap /></div>}

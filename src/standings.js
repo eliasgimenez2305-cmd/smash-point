@@ -4,19 +4,26 @@
 
 export const DEFAULT_MATCH_FORMAT = { setsToPlay: 3, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: true };
 
-/* Formato de los partidos de la llave. El del torneo puede traer uno propio en format.bracket (por
-   ejemplo zonas a 2 sets con super tie-break y llaves al mejor de 3 sets completos); sin él, la
-   llave se juega igual que las zonas. Se puede aplicar dos veces: el de la llave no trae otro. */
-export function bracketFormat(format) {
+/* Formato de un partido de la llave, en la ronda roundIndex de una llave de totalRounds rondas. El
+   del torneo puede traer uno propio para la llave en format.bracket (por ejemplo zonas con super
+   tie-break y llaves al mejor de 3 sets completos), para toda la llave o solo para las últimas
+   rondas (format.bracket.lastRounds: 2 = semis y final, 1 = solo la final); las demás rondas, y
+   toda la llave si no hay formato propio, se juegan igual que las zonas. Se puede aplicar dos
+   veces con la misma ronda: el de la llave no trae otro y el de las zonas da lo mismo. */
+export function bracketFormat(format, roundIndex, totalRounds) {
   const f = format || DEFAULT_MATCH_FORMAT;
-  return f.bracket || f;
+  const b = f.bracket;
+  if (!b) return f;
+  if (!b.lastRounds || roundIndex == null || !totalRounds) return b;
+  return totalRounds - roundIndex <= b.lastRounds ? b : f;
 }
 
-/* Formato de un partido: los de la lista de horarios llevan location ("group" o "bracket") y con
-   eso se sabe si es de llave; los demás (los de los grupos, o los de la llave cuando ya se les pasa
-   el formato de la llave) usan el que reciben. */
+/* Formato de un partido: los de la lista de horarios llevan location ("group", o "bracket" con su
+   ronda y cuántas tiene la llave) y con eso se sabe cuál le toca; los demás (los de los grupos, o
+   los de la llave cuando ya se les pasa el formato de su ronda) usan el que reciben. */
 export function formatForMatch(format, match) {
-  return match && match.location && match.location.type === "bracket" ? bracketFormat(format) : format || DEFAULT_MATCH_FORMAT;
+  const loc = match && match.location;
+  return loc && loc.type === "bracket" ? bracketFormat(format, loc.roundIndex, loc.rounds) : format || DEFAULT_MATCH_FORMAT;
 }
 
 /* Puntos del super tie-break: a 10 (lo común) o a 11, como se juega en algunas zonas */
@@ -143,7 +150,6 @@ export function loserOf(m, format) {
    byes[r][i] = { pairA, pairB }: qué lugares del partido son un bye (nunca va a llegar nadie). Un
    partido con algún bye no se juega: no lleva horario ni cancha. */
 export function walkBracket(rounds, format) {
-  format = bracketFormat(format);
   const next = rounds.map((r) => r.map((m) => ({ ...m })));
   const winners = [];
   const byes = [];
@@ -154,7 +160,7 @@ export function walkBracket(rounds, format) {
     byes[r] = next[r].map((m, i) => ({ pairA: slotDead(m, i, "pairA"), pairB: slotDead(m, i, "pairB") }));
     const dead = byes[r].map((b) => b.pairA && b.pairB);
     winners[r] = next[r].map((m, i) => {
-      if (m.pairA && m.pairB) return matchWinnerId(m, format);
+      if (m.pairA && m.pairB) return matchWinnerId(m, bracketFormat(format, r, next.length));
       const lone = m.pairA || m.pairB;
       if (!lone) return null;
       return slotDead(m, i, m.pairA ? "pairB" : "pairA") ? lone : null;
