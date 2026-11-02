@@ -3,6 +3,8 @@
    ROWS_PER_PAGE partidos, se parte en varias (1/2, 2/2...). Se dibuja en un canvas en el
    navegador del organizador, sin librerías y sin guardar nada. */
 
+import { clockTime } from "./horas.js";
+
 export const FIXTURE_WIDTH = 1080;
 export const FIXTURE_HEIGHT = 1920;
 export const ROWS_PER_PAGE = 24;
@@ -271,7 +273,7 @@ export function drawFixture(canvas, page, tournamentName, logo, brandLogo) {
 
     // Hora
     ctx.fillStyle = C.cyan;
-    fitText(ctx, r.time, x + cols[3].w / 2, mid + fs(12), cols[3].w - 16, fs(34), 22, DISPLAY);
+    fitText(ctx, clockTime(r.time), x + cols[3].w / 2, mid + fs(12), cols[3].w - 16, fs(34), 22, DISPLAY);
 
     // Separadores de columnas
     ctx.fillStyle = C.line;
