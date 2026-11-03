@@ -10659,69 +10659,83 @@ const ingresoTurno = (r) => partesCobroTurno(r).filter((p) => p.medio !== "bonif
 // "Efectivo + Mercado Pago"
 const cobroTurnoLabel = (r) => (r.medio_pago2 ? `${medioPagoLabel(r.medio_pago)} + ${medioPagoLabel(r.medio_pago2)}` : medioPagoLabel(r.medio_pago));
 
-/* Cobro de un turno: importe y medio; si no cubre el precio aparece un segundo renglón con lo que
-   falta (hasta dos medios). onGuardar recibe { medio_pago, medio_pago2, monto_pago2 }. Sin precio,
-   solo se elige el medio. */
-function CobroTurnoEditor({ precio, inicial = null, busy, onGuardar, onCancelar }) {
-  const total = Number(precio) || 0;
-  const MEDIOS = MEDIOS_PAGO.filter(([k]) => k);
-  const [filas, setFilas] = useState(() => {
-    if (inicial?.medio_pago) return partesCobroTurno({ ...inicial, precio: total }).map((p) => ({ monto: String(p.monto), medio: p.medio }));
-    return [{ monto: String(total), medio: "efectivo" }];
-  });
+/* Pago en uno o dos medios: importe y medio; si no cubre el total aparece un segundo renglón con lo
+   que falta. exacto: tiene que sumar el total (el cobro de un turno); si no, se puede pagar menos y
+   queda debiendo (cuentas, inscripciones): el segundo renglón se saca con la ✕ y "+ Otro medio" lo
+   vuelve a poner. Sin total (sin precio), un solo importe libre. onGuardar recibe [{ medio, monto }].
+   inicial: las partes ya cobradas, para cambiarlas. */
+function PagosEditor({ total = null, medios, inicial = null, exacto = false, nota = null, textoGuardar = "Registrar pago", busy, onGuardar, onCancelar }) {
+  const tope = total == null ? null : Number(total) || 0;
+  const conImporte = !(exacto && !tope);
+  const [filas, setFilas] = useState(() => (inicial?.length ? inicial.map((p) => ({ monto: String(p.monto), medio: p.medio })) : [{ monto: tope ? String(tope) : "", medio: medios[0][0] }]));
   const [error, setError] = useState("");
   const monto = (f) => leerPrecio(f.monto) || 0;
   const suma = filas.reduce((s, f) => s + monto(f), 0);
-  const falta = total - suma;
+  const falta = tope == null ? 0 : tope - suma;
   const bonificado = filas.filter((f) => f.medio === "bonificado").reduce((s, f) => s + monto(f), 0);
-  const otroMedio = (usado) => MEDIOS.find(([k]) => k !== usado && k !== "bonificado")[0];
+  const otroMedio = (usado) => (medios.find(([k]) => k !== usado && k !== "bonificado") || medios.find(([k]) => k !== usado))[0];
   // Al cambiar el primer importe: si no alcanza aparece (o se ajusta) el segundo con lo que falta; si alcanza, se va
   const cambiarPrimero = (texto) => {
     const m = leerPrecio(texto) || 0;
     setError("");
     setFilas((fs) => {
       const primero = { ...fs[0], monto: texto };
-      if (m >= total || !total) return [primero];
-      const segundo = fs[1] ? { ...fs[1], monto: String(total - m) } : { monto: String(total - m), medio: otroMedio(fs[0].medio) };
+      if (!tope || m >= tope || m <= 0) return fs[1] && !tope ? [primero, fs[1]] : [primero];
+      const segundo = fs[1] ? { ...fs[1], monto: String(tope - m) } : { monto: String(tope - m), medio: otroMedio(fs[0].medio) };
       return [primero, segundo];
     });
   };
   const cambiar = (i, cambio) => { setError(""); setFilas((fs) => fs.map((f, j) => (j === i ? { ...f, ...cambio } : f))); };
+  const quitarSegundo = () => setFilas((fs) => [{ ...fs[0], monto: exacto && tope ? String(tope) : fs[0].monto }]);
+  const agregarSegundo = () => setFilas((fs) => [fs[0], { monto: tope && falta > 0 ? String(falta) : "", medio: otroMedio(fs[0].medio) }]);
   const guardar = () => {
     if (filas.length === 2 && filas[0].medio === filas[1].medio) { setError("Elegí dos medios distintos."); return; }
-    if (total && falta !== 0) { setError(`Los importes tienen que sumar ${formatoPrecio(total)}.`); return; }
-    if (filas.length === 2 && (monto(filas[0]) <= 0 || monto(filas[1]) <= 0)) { setError("Cada medio tiene que llevar un importe."); return; }
-    onGuardar({ medio_pago: filas[0].medio, medio_pago2: filas[1]?.medio || null, monto_pago2: filas[1] ? monto(filas[1]) : null });
+    if (conImporte && filas.some((f) => monto(f) <= 0)) { setError(filas.length === 2 ? "Cada medio tiene que llevar un importe." : "Poné el importe."); return; }
+    if (exacto && tope && falta !== 0) { setError(`Los importes tienen que sumar ${formatoPrecio(tope)}.`); return; }
+    onGuardar(filas.map((f) => ({ medio: f.medio, monto: conImporte ? monto(f) : 0 })));
   };
   const input = "px-3 py-2 rounded-lg border text-base";
 
   return (
     <div className="space-y-2">
+      {nota && <p className="text-xs text-teal-400">{nota}</p>}
       {filas.map((f, i) => (
         <div key={i} className="flex gap-2 items-center">
-          {total > 0 && (
+          {conImporte && (
             <input inputMode="numeric" value={f.monto} onChange={(e) => (i === 0 ? cambiarPrimero(e.target.value) : cambiar(1, { monto: e.target.value }))}
               aria-label={i === 0 ? "Importe" : "Importe del segundo medio"} placeholder="$ importe" className={`${input} w-32`} style={adminInput} />
           )}
           <select value={f.medio} onChange={(e) => cambiar(i, { medio: e.target.value })} aria-label={i === 0 ? "Medio de pago" : "Segundo medio de pago"} className={`${input} flex-1 min-w-0`} style={adminInput}>
-            {MEDIOS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            {medios.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
           </select>
-          {i === 1 && <button type="button" onClick={() => setFilas((fs) => [{ ...fs[0], monto: String(total) }])} aria-label="Quitar el segundo medio" className="text-teal-400 px-1">✕</button>}
+          {i === 1 && <button type="button" onClick={quitarSegundo} aria-label="Quitar el segundo medio" className="text-teal-400 px-1">✕</button>}
         </div>
       ))}
-      {total > 0 && (
+      {conImporte && filas.length === 1 && !exacto && <button type="button" onClick={agregarSegundo} className="text-xs text-teal-300 underline">+ Otro medio</button>}
+      {tope > 0 && conImporte && (
         <p className="text-xs">
-          {falta > 0 ? <span className="text-amber-300">Falta {formatoPrecio(falta)}</span>
-            : falta < 0 ? <span className="text-red-400">Sobran {formatoPrecio(-falta)}: revisá los importes</span>
-            : <span className="text-lime-400">Cubierto {formatoPrecio(total)}{bonificado > 0 && <span className="text-teal-400"> · entra a la caja {formatoPrecio(total - bonificado)}, bonificado {formatoPrecio(bonificado)}</span>}</span>}
+          {falta > 0 ? <span className="text-amber-300">{exacto ? `Falta ${formatoPrecio(falta)}` : `Queda debiendo ${formatoPrecio(falta)}`}</span>
+            : falta < 0 ? <span className={exacto ? "text-red-400" : "text-amber-300"}>{exacto ? `Sobran ${formatoPrecio(-falta)}: revisá los importes` : `Paga ${formatoPrecio(-falta)} de más`}</span>
+            : <span className="text-lime-400">Cubierto {formatoPrecio(tope)}</span>}
+          {bonificado > 0 && <span className="text-teal-400"> · entra a la caja {formatoPrecio(suma - bonificado)}, bonificado {formatoPrecio(bonificado)}</span>}
         </p>
       )}
       {error && <p className="text-red-400 text-xs">{error}</p>}
       <div className="flex gap-3 items-center">
-        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar cobro</button>
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : textoGuardar}</button>
         {onCancelar && <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>}
       </div>
     </div>
+  );
+}
+
+/* Cobro de un turno: hasta dos medios que sumen el precio. onGuardar recibe { medio_pago, medio_pago2,
+   monto_pago2 } (el primer medio lleva el resto del precio). Sin precio, solo se elige el medio. */
+function CobroTurnoEditor({ precio, inicial = null, busy, onGuardar, onCancelar }) {
+  const partes = inicial?.medio_pago ? partesCobroTurno({ ...inicial, precio: Number(precio) || 0 }) : null;
+  return (
+    <PagosEditor total={Number(precio) || 0} medios={MEDIOS_PAGO.filter(([k]) => k)} inicial={partes} exacto textoGuardar="Guardar cobro" busy={busy} onCancelar={onCancelar}
+      onGuardar={(ps) => onGuardar({ medio_pago: ps[0].medio, medio_pago2: ps[1]?.medio || null, monto_pago2: ps[1] ? ps[1].monto : null })} />
   );
 }
 const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
@@ -13452,7 +13466,6 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
   const [error, setError] = useState("");
   const [filtro, setFiltro] = useState("todos"); // todos | deben | pagaron
   const [cobrando, setCobrando] = useState(null); // clave del jugador con el formulario abierto
-  const [form, setForm] = useState({ monto: "", medio: "efectivo" });
   const [busy, setBusy] = useState(false);
   const [anulando, setAnulando] = useState(null);
   const [verHistorial, setVerHistorial] = useState(null);
@@ -13505,16 +13518,17 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
 
   const visibles = filas.filter((f) => filtro === "todos" || (filtro === "deben" ? f.debe == null ? f.pagado === 0 : f.debe > 0 : f.debe === 0 || (f.debe == null && f.pagado > 0)));
 
-  const abrir = (f) => { setCobrando(f.k); setForm({ monto: f.debe ? String(f.debe) : f.precio == null ? "" : "", medio: "efectivo" }); setError(""); };
-  const cobrar = async (f) => {
-    const monto = leerPrecio(form.monto);
-    if (!monto) { setError("Poné el monto."); return; }
+  const abrir = (f) => { setCobrando(f.k); setError(""); };
+  // partes: [{ medio, monto }] (uno o dos medios): un pago por cada una
+  const cobrar = async (f, partes) => {
     setBusy(true); setError("");
     try {
-      await supabaseTable("pagos_inscripcion", {
-        method: "POST", accessToken, prefer: "return=minimal",
-        body: { torneo_id: tournament.id, organizador_id: organizerId, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, monto, medio: form.medio },
-      });
+      for (const x of partes) {
+        await supabaseTable("pagos_inscripcion", {
+          method: "POST", accessToken, prefer: "return=minimal",
+          body: { torneo_id: tournament.id, organizador_id: organizerId, categoria_id: f.c.id, pareja_id: f.pair.id, jugador: f.jugador, monto: x.monto, medio: x.medio },
+        });
+      }
       setCobrando(null);
       await load();
     } catch (e) { setError(reservaErrorText(e)); }
@@ -13571,12 +13585,10 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
     finally { setBusy(false); }
   };
   // Inscripción + consumos de la cuenta en un solo pago (primero la inscripción)
-  const cobrarTodo = async (cuenta) => {
-    const monto = leerPrecio(form.monto);
-    if (!monto) { setError("Poné el monto."); return; }
+  const cobrarTodo = async (cuenta, partes) => {
     setBusy(true); setError("");
     try {
-      await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
+      for (const x of partes) await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: x.monto, p_medio: x.medio }, accessToken);
       setCobrandoTodo(null);
       setAvisoFila(null);
       await load();
@@ -13649,7 +13661,7 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                         const conConsumos = cuenta && Math.max(0, saldoDe(cuenta)) > 0;
                         if (cobrando === f.k || cobrandoTodo === f.k || (f.debe === 0 && !conConsumos)) return null;
                         return (
-                          <button type="button" onClick={() => { if (conConsumos) { setCobrandoTodo(f.k); setCobrando(null); setForm({ monto: String(todo), medio: "efectivo" }); setError(""); } else abrir(f); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+                          <button type="button" onClick={() => { if (conConsumos) { setCobrandoTodo(f.k); setCobrando(null); setError(""); } else abrir(f); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
                             {conConsumos ? `Cobrar ${formatoPrecio(todo)}` : "Cobrar"}
                           </button>
                         );
@@ -13717,34 +13729,17 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                           })()}
                           {cobrandoTodo === f.k && cuenta && (
                             <div className="space-y-2">
-                              <p className="text-teal-400">Inscripción {formatoPrecio(cuenta.debe_inscripciones)} + consumos {formatoPrecio(consumos)}. Primero se cancela la inscripción.</p>
-                              <div className="flex flex-wrap gap-2 items-center">
-                                <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-                                {MEDIOS_CUENTA.map(([m, l]) => (
-                                  <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border text-sm ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
-                                ))}
-                              </div>
-                              <div className="flex gap-3 items-center">
-                                <button type="button" disabled={busy} onClick={() => cobrarTodo(cuenta)} className="px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
-                                <button type="button" onClick={() => setCobrandoTodo(null)} className="text-teal-400 text-sm">Cancelar</button>
-                              </div>
+                              <PagosEditor total={totalDe(cuenta)} medios={MEDIOS_CUENTA} busy={busy}
+                                nota={`Inscripción ${formatoPrecio(cuenta.debe_inscripciones)} + consumos ${formatoPrecio(consumos)}. Primero se cancela la inscripción.`}
+                                onGuardar={(partes) => cobrarTodo(cuenta, partes)} onCancelar={() => setCobrandoTodo(null)} />
                             </div>
                           )}
                         </div>
                       );
                     })()}
                     {cobrando === f.k && (
-                      <div className="mt-3 space-y-2">
-                        <div className="flex flex-wrap gap-2 items-center">
-                          <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="Monto" aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
-                          {MEDIOS_CUENTA.map(([m, l]) => (
-                            <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
-                          ))}
-                        </div>
-                        <div className="flex gap-3 items-center">
-                          <button type="button" disabled={busy} onClick={() => cobrar(f)} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : "Registrar pago"}</button>
-                          <button type="button" onClick={() => setCobrando(null)} className="text-teal-400">Cancelar</button>
-                        </div>
+                      <div className="mt-3">
+                        <PagosEditor total={f.debe || null} medios={MEDIOS_CUENTA} busy={busy} onGuardar={(partes) => cobrar(f, partes)} onCancelar={() => setCobrando(null)} />
                       </div>
                     )}
                     {historial.length > 0 && (
@@ -18196,7 +18191,6 @@ async function guardarConsumos(accessToken, cuenta, items, otro) {
 function CuentaDetalle({ cuenta, complejoId, complejoNombre, accessToken, esDueno, onChanged }) {
   const [movs, setMovs] = useState(null);
   const [cobrando, setCobrando] = useState(false);
-  const [form, setForm] = useState({ monto: "", medio: "efectivo" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState("");
@@ -18226,22 +18220,26 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, accessToken, esDuen
     try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); return true; } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); return false; }
     finally { setBusy(false); }
   };
-  const cobrar = () => {
-    const monto = leerPrecio(form.monto);
-    if (!monto) { setError("Poné el monto."); return; }
+  // partes: [{ medio, monto }] (uno o dos medios): un pago por cada una
+  const cobrar = (partes) => {
+    const monto = partes.reduce((s, x) => s + x.monto, 0);
     run(async () => {
-      await supabaseTable("cuenta_pagos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: complejoId, cuenta_id: cuenta.id, monto, medio: form.medio } });
+      for (const x of partes) await supabaseTable("cuenta_pagos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: complejoId, cuenta_id: cuenta.id, monto: x.monto, medio: x.medio } });
       setCobrando(false);
     }, `Cobrado: ${formatoPrecio(monto)}`);
   };
-  // Un solo pago: primero las inscripciones y el resto a los consumos (lo reparte la base)
-  const cobrarTodo = () => {
-    const monto = leerPrecio(form.monto);
-    if (!monto) { setError("Poné el monto."); return; }
+  // Primero las inscripciones y el resto a los consumos (lo reparte la base); con dos medios, el primero
+  // va primero
+  const cobrarTodo = (partes) => {
+    const monto = partes.reduce((s, x) => s + x.monto, 0);
     let detalle = "";
     run(async () => {
-      const r = await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: monto, p_medio: form.medio }, accessToken);
-      detalle = [Number(r?.inscripciones) > 0 && `${formatoPrecio(r.inscripciones)} de inscripción`, Number(r?.consumos) > 0 && `${formatoPrecio(r.consumos)} de consumos`].filter(Boolean).join(" y ");
+      let ins = 0, con = 0;
+      for (const x of partes) {
+        const r = await supabaseRpc("cobrar_todo", { p_cuenta: cuenta.id, p_monto: x.monto, p_medio: x.medio }, accessToken);
+        ins += Number(r?.inscripciones) || 0; con += Number(r?.consumos) || 0;
+      }
+      detalle = [ins > 0 && `${formatoPrecio(ins)} de inscripción`, con > 0 && `${formatoPrecio(con)} de consumos`].filter(Boolean).join(" y ");
       setCobrandoTodo(false);
     }).then(() => { if (detalle) setAviso(`Cobrado ${formatoPrecio(monto)}: ${detalle}.`); });
   };
@@ -18284,23 +18282,15 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, accessToken, esDuen
       {aviso && <p className="text-lime-400">{aviso}</p>}
 
       <div className="flex flex-wrap gap-2 items-center">
-        {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); setForm({ monto: String(total), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
-        {!cobrando && !cobrandoTodo && saldo > 0 && <button type="button" onClick={() => { setCobrando(true); setForm({ monto: String(saldo), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">{debeInscripciones > 0 ? "Solo consumos" : "Cobrar"}</button>}
+        {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
+        {!cobrando && !cobrandoTodo && saldo > 0 && <button type="button" onClick={() => { setCobrando(true); }} className="px-4 py-2 rounded-lg border border-lime-400 text-lime-400 font-semibold">{debeInscripciones > 0 ? "Solo consumos" : "Cobrar"}</button>}
         {total > 0 && cuenta.telefono && <a href={waLink(cuenta.telefono, mensaje)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 text-lime-400 underline">Mandarle la cuenta por WhatsApp</a>}
       </div>
       {(cobrando || cobrandoTodo) && (
-        <div className="rounded-lg border border-teal-700 p-3 space-y-2">
-          {cobrandoTodo && <p className="text-xs text-teal-400">Primero se cancela la inscripción y lo que sobra va a los consumos.</p>}
-          <input inputMode="numeric" value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} aria-label="Monto" className="w-32 px-3 py-2 rounded-lg border text-base" style={adminInput} />
-          <div className="flex flex-wrap gap-2">
-            {MEDIOS_CUENTA.map(([m, l]) => (
-              <button key={m} type="button" onClick={() => setForm({ ...form, medio: m })} className={`px-3 py-1.5 rounded-lg border ${form.medio === m ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
-            ))}
-          </div>
-          <div className="flex gap-3 items-center">
-            <button type="button" disabled={busy} onClick={cobrandoTodo ? cobrarTodo : cobrar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Registrar pago</button>
-            <button type="button" onClick={() => { setCobrando(false); setCobrandoTodo(false); }} className="text-teal-400">Cancelar</button>
-          </div>
+        <div className="rounded-lg border border-teal-700 p-3">
+          <PagosEditor key={cobrandoTodo ? "todo" : "consumos"} total={cobrandoTodo ? total : saldo} medios={MEDIOS_CUENTA} busy={busy}
+            nota={cobrandoTodo ? "Primero se cancela la inscripción y lo que sobra va a los consumos." : null}
+            onGuardar={cobrandoTodo ? cobrarTodo : cobrar} onCancelar={() => { setCobrando(false); setCobrandoTodo(false); }} />
         </div>
       )}
 
