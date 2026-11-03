@@ -17115,13 +17115,20 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
 }
 
 /* "Cargar a" del ticket: a qué turno de hoy (Cancha) o a qué persona (Cliente) va el consumo.
-   destino: { tipo: "cancha", turno } | { tipo: "cliente", cuentaId?, nombre, telefono? } | null */
-function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
+   En Cliente se busca en las cuentas, en la agenda y en los jugadores de los torneos sin terminar
+   (torneos): el jugador sin cuenta queda con una nueva vinculada a su inscripción, como "+ Consumo"
+   en Cobros (ver 20261022_cobrar_todo.sql), así su cuenta muestra también lo que debe de inscripción.
+   destino: { tipo: "cancha", turno } | { tipo: "cliente", cuentaId?, nombre, telefono?, debe,
+   juega?, jugadorTorneo?: { torneoId, categoriaId, parejaId, jugador } } | null */
+function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir, torneos = [] }) {
   const [turnos, setTurnos] = useState(null);
   const [cuentas, setCuentas] = useState(null);
   const [agenda, setAgenda] = useState([]); // personas de la agenda (si se puede ver)
+  const [links, setLinks] = useState([]); // jugadores de torneos ya vinculados a una cuenta de este complejo
+  const [mismaPersona, setMismaPersona] = useState(null); // { o: jugador elegido, iguales: cuentas con su mismo nombre }
   const [buscar, setBuscar] = useState("");
   const [error, setError] = useState("");
+  const torneoIds = torneos.map((t) => t.id).join(",");
   const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
 
   useEffect(() => {
@@ -17135,8 +17142,13 @@ function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
       // Los clientes de la agenda (últimos 6 meses); si no tiene acceso a la agenda, solo las cuentas
       supabaseTable(`reservas?complejo_id=eq.${encodeURIComponent(complejoId)}&tipo=eq.turno&fecha=gte.${sumarDias(hoyArgentina(), -180)}&select=nombre,telefono&order=fecha.desc&limit=500`, { accessToken })
         .then((rows) => setAgenda(rows || [])).catch(() => setAgenda([]));
+      setLinks([]);
+      if (torneoIds) {
+        supabaseTable(`cuenta_jugadores?complejo_id=eq.${encodeURIComponent(complejoId)}&torneo_id=in.(${torneoIds.split(",").map(encodeURIComponent).join(",")})&select=torneo_id,categoria_id,pareja_id,jugador,cuenta_id`, { accessToken })
+          .then((rows) => setLinks(rows || [])).catch(() => setLinks([]));
+      }
     }
-  }, [tipo, complejoId, accessToken]);
+  }, [tipo, complejoId, accessToken, torneoIds]);
 
   if (tipo === "cancha") {
     if (error) return <p className="text-red-400">{error}</p>;
@@ -17164,19 +17176,63 @@ function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
       <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border" style={{ borderColor: BRAND.lime, backgroundColor: `${BRAND.lime}14` }}>
         <span className="min-w-0">
           <span className="block font-semibold text-slate-100 truncate">{destino.nombre}</span>
-          <span className="block text-xs text-slate-400">{destino.cuentaId ? `Cuenta${Number(destino.debe) > 0 ? ` · ya debe ${formatoPrecio(destino.debe)}` : " al día"}` : "Se le crea la cuenta"}</span>
+          <span className="block text-xs text-slate-400">
+            {destino.cuentaId ? `Cuenta${Number(destino.debe) > 0 ? ` · ya debe ${formatoPrecio(destino.debe)}` : " al día"}` : "Se le crea la cuenta"}
+            {destino.jugadorTorneo && ` · queda vinculada a su inscripción (${destino.juega})`}
+          </span>
         </span>
         <button type="button" onClick={() => onElegir(null)} className="text-xs text-slate-400 underline shrink-0">Cambiar</button>
+      </div>
+    );
+  }
+  // Jugador de un torneo sin cuenta, con una cuenta del mismo nombre: ¿es la misma persona?
+  if (mismaPersona) {
+    const { o, iguales } = mismaPersona;
+    return (
+      <div className="space-y-2">
+        <p className="text-slate-200">Ya hay {iguales.length === 1 ? "una cuenta" : `${iguales.length} cuentas`} a nombre de <span className="font-semibold">{o.nombre}</span>. ¿Es la misma persona que juega {o.juega}?</p>
+        {iguales.map((c) => (
+          <button key={c.id} type="button" onClick={() => { setMismaPersona(null); onElegir({ ...o, cuentaId: c.id, nombre: c.nombre, telefono: c.telefono, debe: Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0) }); }}
+            className="w-full text-left px-3 py-2 rounded-lg border hover:bg-white/5" style={{ borderColor: "#1f3a44" }}>
+            <span className="block text-slate-100">Sí, es {c.nombre}</span>
+            <span className="block text-xs text-slate-400">{c.telefono ? `WhatsApp …${c.telefono.slice(-4)} · ` : ""}la cuenta queda vinculada a su inscripción</span>
+          </button>
+        ))}
+        <button type="button" onClick={() => { setMismaPersona(null); onElegir(o); }} className="w-full text-left px-3 py-2 rounded-lg border border-dashed text-cyan-300" style={{ borderColor: "#1f3a44" }}>
+          No, es otra persona: crearle una cuenta nueva
+        </button>
+        <button type="button" onClick={() => setMismaPersona(null)} className="text-xs text-slate-400 underline">Volver</button>
       </div>
     );
   }
   const texto = claveNombre(buscar);
   const opciones = [];
   const vistos = new Set();
+  // Torneo y categoría de cada jugador ya vinculado, para mostrarlo en su cuenta
+  const juegaDe = (torneoId, categoriaId) => {
+    const t = torneos.find((x) => x.id === torneoId);
+    const c = t?.categories?.find((x) => x.id === categoriaId);
+    return t ? `${t.name}${c ? ` · ${c.name}` : ""}` : null;
+  };
   for (const c of cuentas || []) {
-    opciones.push({ cuentaId: c.id, nombre: c.nombre, telefono: c.telefono, debe: Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0) });
+    const juega = [...new Set(links.filter((l) => l.cuenta_id === c.id).map((l) => juegaDe(l.torneo_id, l.categoria_id)).filter(Boolean))].join(", ");
+    opciones.push({ cuentaId: c.id, nombre: c.nombre, telefono: c.telefono, debe: Math.max(0, saldoDe(c)) + Number(c.debe_inscripciones || 0), juega: juega || null });
     vistos.add(c.telefono ? `t${c.telefono}` : `n${claveNombre(c.nombre)}`);
     vistos.add(`n${claveNombre(c.nombre)}`);
+  }
+  // Jugadores de los torneos que todavía no tienen cuenta en este complejo (los vinculados ya salen
+  // con su cuenta). No se juntan con una cuenta del mismo nombre: al elegirlo se pregunta.
+  const jugadoresVistos = new Set();
+  for (const t of torneos) for (const c of t.categories || []) for (const pair of c.pairs || []) for (const j of jugadoresDePareja(c, pair)) {
+    if (links.some((l) => l.torneo_id === t.id && l.categoria_id === c.id && l.pareja_id === pair.id && l.jugador === j.jugador)) continue;
+    const k = `${t.id}|${c.id}|${claveNombre(j.nombre)}`;
+    if (jugadoresVistos.has(k)) continue;
+    jugadoresVistos.add(k);
+    vistos.add(`n${claveNombre(j.nombre)}`);
+    opciones.push({
+      cuentaId: null, nombre: j.nombre, telefono: null, debe: 0, juega: `${t.name} · ${c.name}`,
+      jugadorTorneo: { torneoId: t.id, categoriaId: c.id, parejaId: pair.id, jugador: j.jugador },
+    });
   }
   for (const r of agenda) {
     if (!r.nombre) continue;
@@ -17187,6 +17243,11 @@ function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
   }
   const coinciden = texto ? opciones.filter((o) => claveNombre(o.nombre).includes(texto) || (o.telefono || "").includes(buscar.replace(/\D/g, "") || "~")) : [];
   const exacta = coinciden.some((o) => claveNombre(o.nombre) === texto);
+  const elegir = (o) => {
+    const iguales = o.jugadorTorneo ? (cuentas || []).filter((c) => nameMatch(o.nombre, c.nombre) === "igual") : [];
+    if (iguales.length > 0) setMismaPersona({ o: { tipo: "cliente", ...o }, iguales });
+    else onElegir({ tipo: "cliente", ...o });
+  };
   return (
     <div className="space-y-2">
       <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar cliente por nombre o WhatsApp" aria-label="Buscar cliente" className="w-full px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
@@ -17194,9 +17255,13 @@ function ElegirDestino({ tipo, complejoId, accessToken, destino, onElegir }) {
       {cuentas === null ? <p className="text-slate-400">Cargando clientes…</p> : texto && (
         <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1" style={{ colorScheme: "dark" }}>
           {coinciden.slice(0, 8).map((o) => (
-            <button key={o.cuentaId || `${o.nombre}|${o.telefono}`} type="button" onClick={() => onElegir({ tipo: "cliente", ...o })} className="w-full text-left px-3 py-2 rounded-lg border hover:bg-white/5" style={{ borderColor: "#1f3a44" }}>
+            <button key={o.cuentaId || (o.jugadorTorneo ? `${o.jugadorTorneo.torneoId}|${o.jugadorTorneo.categoriaId}|${o.jugadorTorneo.parejaId}|${o.jugadorTorneo.jugador}` : `${o.nombre}|${o.telefono}`)} type="button" onClick={() => elegir(o)} className="w-full text-left px-3 py-2 rounded-lg border hover:bg-white/5" style={{ borderColor: "#1f3a44" }}>
               <span className="block text-slate-100">{o.nombre}</span>
-              <span className="block text-xs text-slate-400">{o.telefono ? `WhatsApp …${o.telefono.slice(-4)} · ` : ""}{o.cuentaId ? (o.debe > 0 ? `debe ${formatoPrecio(o.debe)}` : "cuenta al día") : "de la agenda, sin cuenta"}</span>
+              <span className="block text-xs text-slate-400">
+                {o.telefono ? `WhatsApp …${o.telefono.slice(-4)} · ` : ""}
+                {o.cuentaId ? (o.debe > 0 ? `debe ${formatoPrecio(o.debe)}` : "cuenta al día") : o.jugadorTorneo ? "juega, sin cuenta" : "de la agenda, sin cuenta"}
+                {o.juega && <span className="text-cyan-300"> · {o.juega}</span>}
+              </span>
             </button>
           ))}
           {!exacta && buscar.trim().length >= 2 && (
@@ -17242,6 +17307,10 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
   const [rubrosTabla, setRubrosTabla] = useState([]); // categorías del complejo, con orden e ícono
   const [eligiendoTalle, setEligiendoTalle] = useState(null); // producto con talles que se tocó
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
+  // Torneos cuyos jugadores se ofrecen en Cargar a: Cliente: los que no terminaron y son del dueño de
+  // este complejo (solo a esos se les puede vincular una cuenta, ver torneo_del_complejo)
+  const duenoComplejo = complejos.find((c) => c.id === complejoId)?.dueno_id;
+  const torneosCliente = useMemo(() => tournaments.filter((t) => !isInfoOnly(t) && tournamentStatusOf(t) !== STATUS.FINALIZADO && (!duenoComplejo || t.organizerId === duenoComplejo)), [tournaments, duenoComplejo]);
 
   const load = useCallback(async () => {
     try {
@@ -17347,6 +17416,14 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
         setAviso({ texto: `Cargado al turno de ${t.nombre} (${t.cancha} · ${hora(t.inicio)}): ${formatoPrecio(r.total) || "$0"}. Se cobra desde la agenda.`, tono: "ok" });
       } else {
         let cuentaId = destino.cuentaId;
+        const j = destino.jugadorTorneo;
+        const filtroJugador = j ? `torneo_id=eq.${encodeURIComponent(j.torneoId)}&categoria_id=eq.${encodeURIComponent(j.categoriaId)}&pareja_id=eq.${encodeURIComponent(j.parejaId)}&jugador=eq.${j.jugador}` : "";
+        // Jugador de un torneo: si mientras tanto alguien ya le vinculó una cuenta acá (por ejemplo
+        // desde Cobros), se usa esa en vez de crear otra
+        if (j && !cuentaId) {
+          const [ya] = await supabaseTable(`cuenta_jugadores?${filtroJugador}&complejo_id=eq.${encodeURIComponent(complejoId)}&select=cuenta_id`, { accessToken }).catch(() => []);
+          if (ya) cuentaId = ya.cuenta_id;
+        }
         if (!cuentaId) {
           try {
             const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: destino.nombre, telefono: destino.telefono || null }, accessToken, prefer: "return=representation" });
@@ -17358,10 +17435,21 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
             cuentaId = c.id;
           }
         }
+        // La cuenta queda vinculada a la inscripción (como "+ Consumo" en Cobros). Si ya estaba
+        // vinculada (23505) no pasa nada; si no se pudo, el consumo igual se carga y se avisa.
+        let sinVincular = false;
+        if (j) {
+          try {
+            await supabaseTable("cuenta_jugadores", { method: "POST", body: { torneo_id: j.torneoId, categoria_id: j.categoriaId, pareja_id: j.parejaId, jugador: j.jugador, cuenta_id: cuentaId, complejo_id: complejoId }, accessToken, prefer: "return=minimal" });
+          } catch (e) { if (e.pgCode !== "23505") sinVincular = true; }
+        }
         const r = await supabaseRpc("vender", { p_complejo: complejoId, p_items: items, p_pagos: [], p_ajuste: 0, p_cuenta: cuentaId }, accessToken);
         const nombre = destino.nombre;
         vendido(r);
-        setAviso({ texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Cuentas.`, tono: "ok" });
+        setAviso({
+          texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Cuentas.${sinVincular ? " No se pudo vincular la cuenta a su inscripción: hacelo desde Cobros del torneo." : ""}`,
+          tono: sinVincular ? "alerta" : "ok",
+        });
       }
     } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
     finally { setBusy(false); }
@@ -17399,7 +17487,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
             onCobrado={(texto) => { setCobrandoCuenta(false); setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setAviso({ texto, tono: "ok" }); load(); }} />
         )}
         {cargarA !== "mostrador" && (
-          <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
+          <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} torneos={torneosCliente} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
         )}
       </div>
       <div className="flex items-center justify-between border-t border-teal-900 pt-3">
