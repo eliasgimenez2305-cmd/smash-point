@@ -14,7 +14,7 @@ import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.j
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
 import { ocupacionMes, sumarPorMes, rankingProductos } from "./reportes.js";
-import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos, separarPagos, unMedioAlcanza } from "./caja.js";
+import { TIPOS_MOVIMIENTO, ORIGENES_LIBRO, aCentavos, centavosATexto, resumenLibro, barrasPorCategoria, signoMovimiento, filtrarMovimientos, separarPagos } from "./caja.js";
 import { RUBROS_SUGERIDOS, rubrosDe, subtotalDe, ajusteDe, leerPorcentaje, resumenPagos, vueltoDe, itemsParaVender, nombreLindo, estadoStock, masVendidos, minimoStock, claveTicket, deClave, tallesDe, buscarPorCodigo, TALLES_SUGERIDOS } from "./mostrador.js";
 import { PASO, DURACIONES, etiquetaHora, horarioCancha, duracionesOfrecidas, precioDe, iniciosPosibles, sumarDias, instante, minutoEnGrilla, hoyArgentina, etiquetaFecha, ocupacion, motivoNoEntra, filasAgenda, fechasSemanales, leerPrecio, formatoPrecio, iniciosLibres, horariosConLibres, franjaDe, FRANJAS, precioDesde, rangoPeriodo, fechaArgentina, sumarMeses, etiquetaMes, agruparSeries, canchaDelDia } from "./reservas.js";
 
@@ -10261,13 +10261,13 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
       verCantina ? supabaseTable(`productos?complejo_id=in.(${idsCantina})&activo=eq.true&stock=not.is.null&select=id,nombre,stock,aviso_stock,activo,complejo_id`, { accessToken }).catch(() => []) : nada,
       verCantina ? Promise.all(idsCantina.split(",").map((id) => supabaseRpc("cuentas_con_saldo", { p_complejo: decodeURIComponent(id) }, accessToken).catch(() => []))).then((r) => r.flat()) : nada,
       // La plata de hoy (solo el dueño): lo mismo que suma la Caja, para el día
-      verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata ? supabaseTable(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${desdeHoy}&medio=neq.bonificado&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata ? supabaseTable(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=eq.${hoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
-      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio`, { accessToken }).catch(() => []) : nada,
-      verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`reservas?complejo_id=in.(${idsTodos})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=eq.${hoy}&select=precio,medio_pago,medio_pago2,monto_pago2`, { accessToken }).then((rs) => rs.map((r) => ({ monto: ingresoTurno(r) }))).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`cuenta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&medio=neq.bonificado&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`venta_pagos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto,ventas!inner(anulada)&ventas.anulada=is.false`, { accessToken }).catch(() => []) : nada,
       // Lo mismo que suma la Caja: clases, compras pagadas hoy, pagos a profes y lo cargado en las cajas del día
-      verPlata && idsTodos ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
+      verPlata && idsTodos ? supabaseTable(`cuotas_alumnos?complejo_id=in.(${idsTodos})&${desdeHoy}&medio=neq.bonificado&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=eq.${hoy}&select=monto:total`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`pagos_profes?complejo_id=in.(${idsTodos})&${desdeHoy}&select=monto`, { accessToken }).catch(() => []) : nada,
       verPlata && idsTodos ? supabaseTable(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${desdeHoy}&select=tipo,monto`, { accessToken }).catch(() => []) : nada,
@@ -10641,8 +10641,89 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
 /* ---------- Reservas: panel del dueño del complejo ---------- */
 
 const HORAS_DEL_DIA = Array.from({ length: 48 }, (_, i) => etiquetaHora(i * PASO));
-const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"]];
+// "Bonificado" deja el turno pagado sin plata: no entra a la caja (ver 20261054_dos_medios_y_bonificado.sql)
+const MEDIOS_PAGO = [["", "Sin cobrar"], ["efectivo", "Efectivo"], ["mercado_pago", "Mercado Pago"], ["transferencia", "Transferencia"], ["debito", "Débito"], ["bonificado", "Bonificado"]];
 const medioPagoLabel = (m) => (MEDIOS_PAGO.find(([k]) => k === (m || ""))?.[1]);
+// Los consumos (ventas) no se bonifican: tienen su propio descuento en el Mostrador
+const MEDIOS_CONSUMOS = MEDIOS_PAGO.filter(([k]) => k && k !== "bonificado");
+
+/* Partes del cobro de un turno: [{ medio, monto }]. El segundo medio (medio_pago2) lleva monto_pago2
+   y el primero el resto del precio. */
+function partesCobroTurno(r) {
+  if (!r?.medio_pago || r.precio == null) return [];
+  const p2 = r.medio_pago2 ? Number(r.monto_pago2) || 0 : 0;
+  return [{ medio: r.medio_pago, monto: Number(r.precio) - p2 }, ...(r.medio_pago2 ? [{ medio: r.medio_pago2, monto: p2 }] : [])];
+}
+// Lo que entró de plata por un turno (sin lo bonificado)
+const ingresoTurno = (r) => partesCobroTurno(r).filter((p) => p.medio !== "bonificado").reduce((s, p) => s + p.monto, 0);
+// "Efectivo + Mercado Pago"
+const cobroTurnoLabel = (r) => (r.medio_pago2 ? `${medioPagoLabel(r.medio_pago)} + ${medioPagoLabel(r.medio_pago2)}` : medioPagoLabel(r.medio_pago));
+
+/* Cobro de un turno: importe y medio; si no cubre el precio aparece un segundo renglón con lo que
+   falta (hasta dos medios). onGuardar recibe { medio_pago, medio_pago2, monto_pago2 }. Sin precio,
+   solo se elige el medio. */
+function CobroTurnoEditor({ precio, inicial = null, busy, onGuardar, onCancelar }) {
+  const total = Number(precio) || 0;
+  const MEDIOS = MEDIOS_PAGO.filter(([k]) => k);
+  const [filas, setFilas] = useState(() => {
+    if (inicial?.medio_pago) return partesCobroTurno({ ...inicial, precio: total }).map((p) => ({ monto: String(p.monto), medio: p.medio }));
+    return [{ monto: String(total), medio: "efectivo" }];
+  });
+  const [error, setError] = useState("");
+  const monto = (f) => leerPrecio(f.monto) || 0;
+  const suma = filas.reduce((s, f) => s + monto(f), 0);
+  const falta = total - suma;
+  const bonificado = filas.filter((f) => f.medio === "bonificado").reduce((s, f) => s + monto(f), 0);
+  const otroMedio = (usado) => MEDIOS.find(([k]) => k !== usado && k !== "bonificado")[0];
+  // Al cambiar el primer importe: si no alcanza aparece (o se ajusta) el segundo con lo que falta; si alcanza, se va
+  const cambiarPrimero = (texto) => {
+    const m = leerPrecio(texto) || 0;
+    setError("");
+    setFilas((fs) => {
+      const primero = { ...fs[0], monto: texto };
+      if (m >= total || !total) return [primero];
+      const segundo = fs[1] ? { ...fs[1], monto: String(total - m) } : { monto: String(total - m), medio: otroMedio(fs[0].medio) };
+      return [primero, segundo];
+    });
+  };
+  const cambiar = (i, cambio) => { setError(""); setFilas((fs) => fs.map((f, j) => (j === i ? { ...f, ...cambio } : f))); };
+  const guardar = () => {
+    if (filas.length === 2 && filas[0].medio === filas[1].medio) { setError("Elegí dos medios distintos."); return; }
+    if (total && falta !== 0) { setError(`Los importes tienen que sumar ${formatoPrecio(total)}.`); return; }
+    if (filas.length === 2 && (monto(filas[0]) <= 0 || monto(filas[1]) <= 0)) { setError("Cada medio tiene que llevar un importe."); return; }
+    onGuardar({ medio_pago: filas[0].medio, medio_pago2: filas[1]?.medio || null, monto_pago2: filas[1] ? monto(filas[1]) : null });
+  };
+  const input = "px-3 py-2 rounded-lg border text-base";
+
+  return (
+    <div className="space-y-2">
+      {filas.map((f, i) => (
+        <div key={i} className="flex gap-2 items-center">
+          {total > 0 && (
+            <input inputMode="numeric" value={f.monto} onChange={(e) => (i === 0 ? cambiarPrimero(e.target.value) : cambiar(1, { monto: e.target.value }))}
+              aria-label={i === 0 ? "Importe" : "Importe del segundo medio"} placeholder="$ importe" className={`${input} w-32`} style={adminInput} />
+          )}
+          <select value={f.medio} onChange={(e) => cambiar(i, { medio: e.target.value })} aria-label={i === 0 ? "Medio de pago" : "Segundo medio de pago"} className={`${input} flex-1 min-w-0`} style={adminInput}>
+            {MEDIOS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+          {i === 1 && <button type="button" onClick={() => setFilas((fs) => [{ ...fs[0], monto: String(total) }])} aria-label="Quitar el segundo medio" className="text-teal-400 px-1">✕</button>}
+        </div>
+      ))}
+      {total > 0 && (
+        <p className="text-xs">
+          {falta > 0 ? <span className="text-amber-300">Falta {formatoPrecio(falta)}</span>
+            : falta < 0 ? <span className="text-red-400">Sobran {formatoPrecio(-falta)}: revisá los importes</span>
+            : <span className="text-lime-400">Cubierto {formatoPrecio(total)}{bonificado > 0 && <span className="text-teal-400"> · entra a la caja {formatoPrecio(total - bonificado)}, bonificado {formatoPrecio(bonificado)}</span>}</span>}
+        </p>
+      )}
+      {error && <p className="text-red-400 text-xs">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar cobro</button>
+        {onCancelar && <button type="button" onClick={onCancelar} className="text-teal-400">Cancelar</button>}
+      </div>
+    </div>
+  );
+}
 const rangoLabel = (desde, hasta) => `${etiquetaHora(desde)} a ${etiquetaHora(hasta)}`;
 
 /* Pestaña "Reservas" del organizador que es dueño de un complejo: la agenda del día y sus canchas */
@@ -11387,7 +11468,7 @@ function AgendaReservas({ complejoId, canchas: canchasBase, complejo = null, ven
         return (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
             <TarjetaResumen titulo="Turnos" tono="cyan" valor={String(turnos.length)} detalle={pedidos > 0 ? `+ ${pedidos} pedido${pedidos === 1 ? "" : "s"}` : "Confirmados"} />
-            <TarjetaResumen titulo="Cobrado" tono="lime" valor={formatoPrecio(cobrados.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${cobrados.length} turno${cobrados.length === 1 ? "" : "s"}`} />
+            <TarjetaResumen titulo="Cobrado" tono="lime" valor={formatoPrecio(cobrados.reduce((s, r) => s + ingresoTurno(r), 0)) || "$0"} detalle={`${cobrados.length} turno${cobrados.length === 1 ? "" : "s"}${(() => { const b = cobrados.reduce((s, r) => s + Number(r.precio) - ingresoTurno(r), 0); return b > 0 ? ` · ${formatoPrecio(b)} bonificado` : ""; })()}`} />
             <TarjetaResumen titulo="Por cobrar" tono="ambar" valor={formatoPrecio(porCobrar.reduce((s, r) => s + Number(r.precio), 0)) || "$0"} detalle={`${porCobrar.length} turno${porCobrar.length === 1 ? "" : "s"}`} />
             <TarjetaResumen titulo="Bloqueos" tono="gris" valor={String(lista.filter((r) => r.tipo === "bloqueo" && r.estado === "confirmada").length)} detalle="Horarios cerrados" />
           </div>
@@ -11428,7 +11509,7 @@ function AgendaReservas({ complejoId, canchas: canchasBase, complejo = null, ven
                           <span className="block opacity-80">{rangoLabel(desde, hasta)}</span>
                           {r.tipo !== "bloqueo" && (
                             <span className="block opacity-80">
-                              {r.estado === "pendiente" ? "Pendiente" : r.no_vino ? "No vino" : r.medio_pago ? `✓ ${medioPagoLabel(r.medio_pago)}` : formatoPrecio(r.precio)}
+                              {r.estado === "pendiente" ? "Pendiente" : r.no_vino ? "No vino" : r.medio_pago ? `✓ ${cobroTurnoLabel(r)}` : formatoPrecio(r.precio)}
                             </span>
                           )}
                         </button>
@@ -11817,9 +11898,15 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null
   const cancelarSiguientes = () => run(async () => { await supabaseTable(`reservas?serie_id=eq.${r.serie_id}&fecha=gte.${fecha}&estado=eq.confirmada&medio_pago=is.null`, { method: "PATCH", body: { estado: "cancelada", cancelada_at: new Date().toISOString(), cancelada_por: "complejo" }, accessToken, prefer: "return=minimal" }); onClose(); });
   const confirmar = () => patch({ estado: "confirmada" });
   const rechazar = () => run(async () => { await resolverPedido(r.id, false, accessToken); onClose(); });
-  const cobro = (medio) => run(async () => {
-    await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: { medio_pago: medio }, accessToken, prefer: "return=minimal" });
-    if (medio && !r.medio_pago && pendiente > 0) await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medio }, accessToken);
+  // Cobro de la cancha (uno o dos medios). Si es el primer cobro y hay consumos sin cobrar, van con el
+  // primer medio que sea plata (los consumos no se bonifican). null: saca el cobro.
+  const [cambiandoCobro, setCambiandoCobro] = useState(false);
+  const cobro = (body) => run(async () => {
+    const b = body || { medio_pago: null, medio_pago2: null, monto_pago2: null };
+    await supabaseTable(`reservas?id=eq.${r.id}`, { method: "PATCH", body: b, accessToken, prefer: "return=minimal" });
+    const medioConsumos = [b.medio_pago, b.medio_pago2].find((m) => m && m !== "bonificado");
+    if (b.medio_pago && !r.medio_pago && pendiente > 0 && medioConsumos) await supabaseRpc("cobrar_consumos_turno", { p_reserva: r.id, p_medio: medioConsumos }, accessToken);
+    setCambiandoCobro(false);
   });
   const cambiarBloqueo = async () => {
     setBusy(true); setError("");
@@ -11866,11 +11953,17 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null
               <>
                 <div>
                   <p className="text-xs text-teal-400 mb-1">Cobro de la cancha{!r.medio_pago && pendiente > 0 && r.precio != null ? ` · con los consumos: ${formatoPrecio(Number(r.precio) + pendiente)}` : ""}</p>
-                  <div className="flex flex-wrap gap-2">
-                    {MEDIOS_PAGO.map(([k, l]) => (
-                      <button key={k} type="button" disabled={busy} onClick={() => cobro(k || null)} className={`${btn} px-3 flex-auto ${(r.medio_pago || "") === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
-                    ))}
-                  </div>
+                  {r.medio_pago && !cambiandoCobro ? (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className="text-lime-400 font-semibold">
+                        ✓ {partesCobroTurno(r).length > 1 ? partesCobroTurno(r).map((p) => `${formatoPrecio(p.monto)} ${medioPagoLabel(p.medio)}`).join(" + ") : cobroTurnoLabel(r)}
+                      </span>
+                      <button type="button" disabled={busy} onClick={() => setCambiandoCobro(true)} className="text-xs text-teal-300 underline">Cambiar</button>
+                      <button type="button" disabled={busy} onClick={() => cobro(null)} className="text-xs text-red-300 underline">Sacar cobro</button>
+                    </div>
+                  ) : (
+                    <CobroTurnoEditor key={r.id} precio={r.precio} inicial={r.medio_pago ? r : null} busy={busy} onGuardar={cobro} onCancelar={r.medio_pago ? () => setCambiandoCobro(false) : null} />
+                  )}
                 </div>
                 {pendiente > 0 && (
                   <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b66" }}>
@@ -11878,12 +11971,12 @@ function DetalleReservaModal({ reserva: r, cancha, canchas = [], complejo = null
                     {consumos?.detalle && <p className="text-xs text-slate-400">{consumos.detalle}</p>}
                     {r.medio_pago ? (
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        {MEDIOS_PAGO.filter(([k]) => k).map(([k, l]) => (
+                        {MEDIOS_CONSUMOS.map(([k, l]) => (
                           <button key={k} type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className={`${btn} px-2 border-teal-700 text-slate-100`}>{l}</button>
                         ))}
                       </div>
                     ) : <p className="text-xs text-slate-400">Se cobran junto con la cancha, o solos:{" "}
-                      {MEDIOS_PAGO.filter(([k]) => k).map(([k, l], i) => <span key={k}>{i > 0 && " · "}<button type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className="underline text-slate-200">{l}</button></span>)}
+                      {MEDIOS_CONSUMOS.map(([k, l], i) => <span key={k}>{i > 0 && " · "}<button type="button" disabled={busy} onClick={() => cobrarConsumos(k)} className="underline text-slate-200">{l}</button></span>)}
                     </p>}
                     {verCuentas && <button type="button" disabled={busy} onClick={pasarACuenta} className="text-xs text-cyan-300 underline">Pasar a la cuenta de {r.nombre}</button>}
                   </div>
@@ -13335,8 +13428,9 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onP
 
 const MEDIOS_COBRO = [["efectivo", "Efectivo"], ["transferencia", "Transferencia"], ["mercado_pago", "Mercado Pago"]];
 // Cuentas e inscripciones también aceptan débito (ver 20261029_cargar_a_turno.sql)
-const MEDIOS_CUENTA = [...MEDIOS_COBRO, ["debito", "Débito"]];
-const medioCobroLabel = (m) => MEDIOS_VENTA.find(([k]) => k === m)?.[1] || m;
+// Inscripciones y cuentas de la cantina: también se pueden bonificar (quedan pagas sin entrar a la caja)
+const MEDIOS_CUENTA = [...MEDIOS_COBRO, ["debito", "Débito"], ["bonificado", "Bonificado"]];
+const medioCobroLabel = (m) => (m === "bonificado" ? "Bonificado" : MEDIOS_VENTA.find(([k]) => k === m)?.[1] || m);
 
 /* Precio por jugador de una categoría: el suyo o, si no tiene, el del torneo (null = sin precio) */
 function precioJugador(tournament, category) {
@@ -14414,10 +14508,11 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
   // Todos los movimientos del período en una sola lista
   const movimientos = datos ? [
     ...datos.pagos.map((p) => ({ key: `p${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "inscripcion", concepto: conceptoInscripcion(p, tournaments), monto: Number(p.monto), medio: p.medio })),
-    ...datos.turnos.filter((r) => r.precio != null).map((r) => ({
-      key: `t${r.id}`, fecha: r.fecha, tipo: "ingreso", origen: r.tipo === "clase" ? "clases" : "turno", monto: Number(r.precio), medio: r.medio_pago,
+    // Un turno en dos medios son dos movimientos
+    ...datos.turnos.filter((r) => r.precio != null).flatMap((r) => partesCobroTurno(r).map((parte, i) => ({
+      key: `t${r.id}-${i}`, fecha: r.fecha, tipo: "ingreso", origen: r.tipo === "clase" ? "clases" : "turno", monto: parte.monto, medio: parte.medio,
       concepto: [r.tipo === "clase" ? "Clase" : "Turno", datos.canchas.find((c) => c.id === r.cancha_id)?.nombre, etiquetaHora(minutoEnGrilla(r.fecha, r.inicio)), r.nombre].filter(Boolean).join(" · "),
-    })),
+    }))),
     ...datos.consumos.map((p) => ({ key: `c${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "consumo", concepto: `Cuenta · ${p.cuentas?.nombre || "cuenta"}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.ventas.map((p) => ({ key: `v${p.id}`, fecha: fechaArgentina(p.created_at), tipo: "ingreso", origen: "mostrador", concepto: `Mostrador · venta #${p.ventas?.numero ?? ""}`, monto: Number(p.monto), medio: p.medio })),
     ...datos.movTurnos.map((m) => ({ key: `d${m.id}`, fecha: fechaArgentina(m.created_at), tipo: m.tipo === "gasto" ? "gasto" : "ingreso", origen: "caja_dia", concepto: `${m.concepto}${m.hecho_por_email ? ` · ${m.hecho_por_email}` : ""}`, monto: Number(m.monto), medio: "efectivo" })),
@@ -14425,7 +14520,7 @@ function CajaPanel({ organizer, complejos = [], tournaments = [] }) {
     ...datos.pagosProfes.map((x) => ({ key: `pp${x.id}`, fecha: fechaArgentina(x.created_at), tipo: "gasto", origen: "profes", concepto: `Pago a ${x.profes_complejo?.nombre || "profe"} · ${etiquetaMes(x.periodo).split(" ")[0].toLowerCase()}`, monto: Number(x.monto), medio: x.medio })),
     ...datos.compras.map((x) => ({ key: `k${x.id}`, fecha: x.pagada_at, tipo: "gasto", origen: "compras", concepto: `Compra${x.proveedores?.nombre ? ` a ${x.proveedores.nombre}` : ""}`, monto: Number(x.total), medio: x.medio })),
     ...datos.manuales.map((m) => ({ key: `m${m.id}`, id: m.id, fecha: m.fecha, tipo: m.tipo, origen: m.gasto_fijo_id ? "fijo" : "manual", concepto: m.concepto + (m.torneo_id ? ` · ${tournaments.find((t) => t.id === m.torneo_id)?.name || "torneo"}` : ""), monto: Number(m.monto), medio: m.medio })),
-  ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : [];
+  ].filter((m) => m.medio !== "bonificado" && m.monto > 0).sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)) : []; // lo bonificado no es plata
   const suma = (lista) => lista.reduce((s, m) => s + m.monto, 0);
   const ingresos = movimientos.filter((m) => m.tipo === "ingreso");
   const gastos = movimientos.filter((m) => m.tipo === "gasto");
@@ -15666,7 +15761,7 @@ function ProfeDetalle({ profe: p, datos, complejoId, venueName, accessToken, esD
                       <span className="flex-1 min-w-[8rem] text-slate-100">{a.nombre}<span className="block text-xs text-teal-500">{formatoPrecio(a.cuota)} por mes</span></span>
                       {q ? <span className="text-xs px-2 py-0.5 rounded-full" style={{ color: BRAND.lime, backgroundColor: "#9fe0221a" }}>Pagó · {medioCobroLabel(q.medio)}</span>
                         : !a.activo ? <span className="text-xs text-teal-500">Pausado</span>
-                        : cobrando === a.id ? medios((m) => cobrarCuota(a, m))
+                        : cobrando === a.id ? medios((m) => cobrarCuota(a, m), [...MEDIOS_COBRO, ["bonificado", "Bonificado"]])
                         : <button type="button" onClick={() => setCobrando(a.id)} className="px-3 py-1 rounded-lg text-xs font-semibold border border-amber-400 text-amber-300">Cobrar cuota</button>}
                       {!q && a.telefono && a.activo && <a href={waLink(a.telefono, `Hola ${a.nombre.split(" ")[0]}! Te recordamos la cuota de ${etiquetaMes(mes).split(" ")[0].toLowerCase()} de las clases con ${p.nombre} en ${venueName}: ${formatoPrecio(a.cuota)}. ¡Gracias!`)} target="_blank" rel="noopener noreferrer" className="text-xs text-teal-300 underline">Recordar</a>}
                       <button type="button" onClick={() => setAlumnoForm({ id: a.id, nombre: a.nombre, telefono: a.telefono ? formatArPhone(a.telefono) : "", cuota: String(Math.round(a.cuota)) })} className="text-xs text-teal-400 underline">Editar</button>
@@ -15725,7 +15820,7 @@ function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCue
     let vivo = true;
     const c = encodeURIComponent(complejoId);
     Promise.all([
-      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
+      traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,medio_pago2,monto_pago2,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
       conCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
       supabaseTable(`canchas?complejo_id=eq.${c}&select=id,nombre`),
     ]).then(([reservas, cuentas, canchas]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas }); setError(""); } })
@@ -15958,15 +16053,15 @@ function ReportesPanel({ organizer, complejos, complejosReservas, complejosCanti
     Promise.all([
       idsReservas ? supabaseTable(`canchas?complejo_id=in.(${idsReservas})&activa=eq.true&order=orden.asc`) : nada,
       idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&fecha=gte.${mes}-01&fecha=lte.${hasta}&estado=eq.confirmada&select=tipo,estado,cancha_id,fecha,inicio,fin&order=fecha.asc`, accessToken)) : nada,
-      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio&order=fecha.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`reservas?complejo_id=in.(${idsReservas})&tipo=in.(turno,clase)&estado=eq.confirmada&medio_pago=not.is.null&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,precio,medio_pago,medio_pago2,monto_pago2&order=fecha.asc`, accessToken).then((rs) => rs.map((r) => ({ fecha: r.fecha, precio: ingresoTurno(r) })))) : nada,
       idsCantina ? suave(traerTodo(`venta_pagos?complejo_id=in.(${idsCantina})&${creado}&select=monto,created_at,ventas!inner(anulada)&ventas.anulada=is.false&order=created_at.asc`, accessToken)) : nada,
-      idsTodos ? suave(traerTodo(`cuenta_pagos?complejo_id=in.(${idsTodos})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
-      suave(traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)),
+      idsTodos ? suave(traerTodo(`cuenta_pagos?complejo_id=in.(${idsTodos})&${creado}&medio=neq.bonificado&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      suave(traerTodo(`pagos_inscripcion?organizador_id=eq.${organizer.id}&${creado}&medio=neq.bonificado&select=monto,created_at&order=created_at.asc`, accessToken)),
       suave(traerTodo(`caja_movimientos?organizador_id=eq.${organizer.id}&fecha=gte.${desde6}&fecha=lte.${hasta}&select=fecha,tipo,monto&order=fecha.asc`, accessToken)),
       idsTodos ? suave(traerTodo(`compras?complejo_id=in.(${idsTodos})&anulada=is.false&pagada_at=gte.${desde6}&pagada_at=lte.${hasta}&select=pagada_at,total&order=pagada_at.asc`, accessToken)) : nada,
       idsTodos ? suave(traerTodo(`caja_movimientos_turno?complejo_id=in.(${idsTodos})&tipo=in.(gasto,ingreso)&${creado}&select=tipo,monto,created_at&order=created_at.asc`, accessToken)) : nada,
       idsCantina ? suave(traerTodo(`venta_items?complejo_id=in.(${idsCantina})&select=producto_id,talle,descripcion,cantidad,precio_unitario,venta_items_costo(costo_unitario),ventas!inner(created_at,anulada)&ventas.anulada=is.false&ventas.created_at=gte.${enAr(`${mes}-01`)}&ventas.created_at=lt.${enAr(sumarDias(hasta, 1))}&order=id.asc`, accessToken)) : nada,
-      idsReservas ? suave(traerTodo(`cuotas_alumnos?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
+      idsReservas ? suave(traerTodo(`cuotas_alumnos?complejo_id=in.(${idsReservas})&${creado}&medio=neq.bonificado&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
       idsReservas ? suave(traerTodo(`pagos_profes?complejo_id=in.(${idsReservas})&${creado}&select=monto,created_at&order=created_at.asc`, accessToken)) : nada,
     ]).then(([canchas, reservasMes, turnosCobrados, ventas, cuentas, inscripciones, manuales, compras, movTurnos, vendidos, cuotas, pagosProfes]) => {
       if (!vivo) return;
@@ -16853,6 +16948,10 @@ function CajaTurnoDetalle({ caja, accessToken, propia = false, esDueno = false, 
                 <li key={m} className="px-3 py-1.5 flex justify-between"><span className="text-teal-200">{l}</span><span className="tabular-nums">{formatoPrecio(resumen.por_medio[m])}</span></li>
               ))}
               {totalCobrado === 0 && <li className="px-3 py-1.5 text-teal-400">Todavía no cobraste nada.</li>}
+              {/* No es plata: queda pagado, pero no suma al cobrado ni a la caja */}
+              {Number(resumen.bonificado) > 0 && (
+                <li className="px-3 py-1.5 flex justify-between text-teal-400"><span>Bonificado (no es plata)</span><span className="tabular-nums">{formatoPrecio(resumen.bonificado)}</span></li>
+              )}
             </ul>
             <ul className="rounded-lg border border-teal-900 divide-y divide-teal-900/70">
               <li className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-teal-500">Efectivo</li>
@@ -16989,7 +17088,7 @@ function RubroIcono({ rubro, icono, className = "w-6 h-6" }) {
    ticket. Se puede dividir el pago en dos medios. Cada cosa queda donde siempre. */
 const ERRORES_COBRO_MOSTRADOR = {
   monto_no_coincide: "Los pagos no suman el total.",
-  dividir_cancha: "La cancha se paga con un solo medio: uno de los dos pagos tiene que cubrirla entera.",
+  dividir_cancha: "La cancha se paga con dos medios como mucho.",
   nada_para_cobrar: "No hay nada para cobrar.",
   turno_invalido: "Ese turno ya no está confirmado.",
   torneo_invalido: "No se encontró el torneo.",
@@ -17061,7 +17160,6 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
   const cobrar = async () => {
     if (sinTicket <= 0) { setError(tab === "turno" ? "Elegí un turno con algo para cobrar." : "Elegí el jugador y el monto."); return; }
     if (dividir && dividir.medio === medio) { setError("Elegí dos medios distintos para dividir."); return; }
-    if (tab === "turno" && !unMedioAlcanza(pagos, turno.cancha_monto)) { setError(ERRORES_COBRO_MOSTRADOR.dividir_cancha); return; }
     setBusy(true); setError("");
     try {
       if (tab === "turno") {

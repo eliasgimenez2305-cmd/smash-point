@@ -12,7 +12,7 @@ function diasEntre(desde, hasta) {
   return Math.round((Date.parse(`${hasta}T12:00:00Z`) - Date.parse(`${desde}T12:00:00Z`)) / 86400000);
 }
 
-/* reservas: turnos (tipo turno) con nombre, telefono, fecha, estado, no_vino, precio, medio_pago
+/* reservas: turnos (tipo turno) con nombre, telefono, fecha, estado, no_vino, precio, medio_pago (y medio_pago2, monto_pago2)
    cuentas: [{ id, nombre, telefono, consumido, pagado }]
    inscripciones: [{ jugador1_nombre, telefono, estado, torneo_id }] */
 export function armarClientes({ reservas = [], cuentas = [], inscripciones = [], hoy, ahora }) {
@@ -47,7 +47,12 @@ export function armarClientes({ reservas = [], cuentas = [], inscripciones = [],
     if (r.no_vino) { c.noVino += 1; continue; }
     c.turnos += 1;
     if (!c.ultimaVisita || r.fecha > c.ultimaVisita) c.ultimaVisita = r.fecha;
-    if (r.medio_pago && r.precio != null) c.gastado += Number(r.precio);
+    // Lo que pagó de verdad: sin la parte bonificada (medio_pago2 lleva monto_pago2, el primero el resto)
+    if (r.medio_pago && r.precio != null) {
+      const p2 = r.medio_pago2 ? Number(r.monto_pago2) || 0 : 0;
+      if (r.medio_pago !== "bonificado") c.gastado += Number(r.precio) - p2;
+      if (r.medio_pago2 && r.medio_pago2 !== "bonificado") c.gastado += p2;
+    }
   }
   for (const k of cuentas) {
     const c = cliente(k.telefono, k.nombre);
