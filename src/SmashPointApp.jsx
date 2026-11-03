@@ -10304,7 +10304,7 @@ function InicioPanel({ organizer, colaborador, permisos, complejosReservas, comp
         {verPlata && <TarjetaResumen titulo="Ingresos de hoy" tono="lime" valor={cargando ? "…" : formatoPrecio(datos?.ingresos || 0)} detalle="Turnos, mostrador, cuentas, inscripciones" onClick={() => onIr("caja")} />}
         {verPlata && <TarjetaResumen titulo="Egresos de hoy" tono="rojo" valor={cargando ? "…" : formatoPrecio(datos?.egresos || 0)} detalle="Gastos, compras y pagos a profes" onClick={() => onIr("caja")} />}
         {verAgenda && <TarjetaResumen titulo="Turnos de hoy" tono="cyan" valor={cargando ? "…" : String(datos?.turnos.filter((r) => r.estado === "confirmada").length || 0)} detalle={pedidosPendientes > 0 ? `${pedidosPendientes} pedido${pedidosPendientes === 1 ? "" : "s"} por confirmar` : "Sin pedidos pendientes"} onClick={() => onIr("reservas")} />}
-        {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("consumos")} />}
+        {verCantina && <TarjetaResumen titulo="Fiado" tono="ambar" valor={cargando ? "…" : formatoPrecio(totalDeben)} detalle={datos ? `${datos.deudores.length} cuenta${datos.deudores.length === 1 ? "" : "s"} con saldo` : ""} onClick={() => onIr("deudores")} />}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -10463,7 +10463,11 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
   const planOrg = planDe("organizador", organizer.id);
   const verCaja = !colaborador && funciones.cantina && (complejosOperativos.length > 0 || !planOrg?.plan_nombre || planOrg.modulo_reservas || planOrg.modulo_cantina);
   const filasAviso = misPlanes.filter((f) => (f.tipo === "organizador" && !colaborador) || (f.tipo === "complejo" && complejos.some((c) => c.id === f.ref_id)));
-  const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "consumos"); // inicio | perfil | torneos | reservas | consumos | caja (solo el dueño)
+  const [seccion, setSeccion] = useState(verInicio ? "inicio" : verTorneos ? "torneos" : verReservas ? "reservas" : "clientes"); // inicio | perfil | torneos | reservas | clientes | caja (solo el dueño)
+  // Filtro con el que se abre Clientes ("deben" desde la tarjeta Fiado de Inicio); al salir vuelve a todos
+  const [filtroClientes, setFiltroClientes] = useState("todos");
+  useEffect(() => { if (seccion !== "clientes") setFiltroClientes("todos"); }, [seccion]);
+  const irA = (s) => { if (s === "deudores") { setFiltroClientes("deben"); setSeccion("clientes"); } else setSeccion(s); };
   const [tab, setTab] = useState("torneos"); // torneos | eventos | circuitos
   // Pedidos de turnos esperando confirmación, para marcarlos en la pestaña Reservas
   const [pedidosPendientes, setPedidosPendientes] = useState(0);
@@ -10493,7 +10497,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ...(verReservas ? [["reservas", "Reservas", "reservas", permisos.agenda ? pedidosPendientes : 0]] : []),
       ...(verClientes ? [["clientes", "Clientes", "clientes"]] : []),
       ...(verReservas && permisos.agenda ? [["clases", "Clases", "clases"]] : []),
-      ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"], ["consumos", "Cuentas", "consumos"]] : []),
+      ...(verConsumos ? [["mostrador", "Mostrador", "mostrador"]] : []),
       ...(verCajaDia ? [["cajadia", "Caja del día", "cajadia"]] : []),
     ] },
     { titulo: "Gestión", items: [
@@ -10532,14 +10536,14 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
           organizer={organizer} colaborador={colaborador} permisos={permisos}
           complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina}
           tournaments={tournaments} inscripciones={inscripciones} pedidosPendientes={pedidosPendientes}
-          verTorneos={verTorneos} onIr={setSeccion} onOpen={onOpen} venues={venues}
+          verTorneos={verTorneos} onIr={irA} onOpen={onOpen} venues={venues}
         />
       ) : seccion === "clases" && verReservas && permisos.agenda ? (
         <ClasesPanel complejos={complejosReservas} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "reportes" && verReportes ? (
         <ReportesPanel organizer={organizer} complejos={complejos} complejosReservas={complejosReservas} complejosCantina={complejosCantina} />
       ) : seccion === "clientes" && verClientes ? (
-        <ClientesPanel complejos={complejos} venues={venues} accessToken={organizer.accessToken} verCuentas={verConsumos} inscripciones={verTorneos ? inscripciones : []} />
+        <ClientesPanel key={filtroClientes} complejos={complejos} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} verCuentas={verConsumos} cantinaIds={complejosCantina.map((c) => c.id)} filtroInicial={filtroClientes} inscripciones={verTorneos ? inscripciones : []} />
       ) : seccion === "compras" && verConsumos && !colaborador ? (
         <ComprasPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} />
       ) : seccion === "cajadia" && verCajaDia ? (
@@ -10547,9 +10551,7 @@ function AdminHome({ torneoAbierto = null, onCerrarTorneo, organizer, tournament
       ) : seccion === "mostrador" && verConsumos ? (
         <MostradorPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} onVerCaja={verCajaDia ? () => setSeccion("cajadia") : null} tournaments={verTorneos ? tournaments : []} />
       ) : seccion === "productos" && verConsumos ? (
-        <ConsumosPanel key="productos" vistaFija="productos" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
-      ) : seccion === "consumos" && verConsumos ? (
-        <ConsumosPanel key="cuentas" vistaFija="cuentas" complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
+        <ProductosPanel complejos={complejosCantina} venues={venues} accessToken={organizer.accessToken} esDueno={!colaborador} />
       ) : seccion === "caja" && verCaja ? (
         <CajaLibro organizer={organizer} complejos={complejos} tournaments={tournaments} venues={venues} />
       ) : seccion === "perfil" && !colaborador ? (
@@ -15702,28 +15704,51 @@ async function traerTodo(path, accessToken) {
 
 const FILTROS_CLIENTES = [["todos", "Todos"], ["frecuentes", "Vienen seguido"], ["ausentes", "No vienen hace 30+ días"], ["deben", "Deben"]];
 
-function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripciones = [] }) {
+/* Clientes: todas las personas del complejo (agenda, cuentas de la cantina e inscriptos a torneos) y,
+   en la ficha de cada una, su cuenta de la cantina: anotar, cobrar y ver los movimientos. La cuenta
+   se ve con verCuentas (permiso de cantina) y si el complejo tiene Cantina (cantinaIds). */
+function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCuentas, cantinaIds = null, filtroInicial = "todos", inscripciones = [] }) {
   const hoy = hoyArgentina();
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas }
+  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas, productos }
+  const [recarga, setRecarga] = useState(0); // al anotar o cobrar en una cuenta se vuelven a traer las deudas
   const [error, setError] = useState("");
-  const [filtro, setFiltro] = useState("todos");
+  const [filtro, setFiltro] = useState(filtroInicial);
   const [buscar, setBuscar] = useState("");
   const [abierto, setAbierto] = useState(null); // clave del cliente
+  const [nueva, setNueva] = useState(null); // { nombre, telefono } de la cuenta que se está creando
+  const [busy, setBusy] = useState(false);
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "el complejo";
+  const conCuentas = verCuentas && (!cantinaIds || cantinaIds.includes(complejoId));
 
   useEffect(() => {
     let vivo = true;
-    setDatos(null);
     const c = encodeURIComponent(complejoId);
     Promise.all([
       traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
-      verCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
+      conCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
       supabaseTable(`canchas?complejo_id=eq.${c}&select=id,nombre`),
-    ]).then(([reservas, cuentas, canchas]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas }); setError(""); } })
+      conCuentas ? supabaseTable(`productos?complejo_id=eq.${c}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }).catch(() => []) : Promise.resolve([]),
+    ]).then(([reservas, cuentas, canchas, productos]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas, productos: productos || [] }); setError(""); } })
       .catch(() => { if (vivo) setError("No se pudieron cargar los clientes. Revisá la conexión."); });
     return () => { vivo = false; };
-  }, [complejoId, accessToken, verCuentas, hoy]);
+  }, [complejoId, accessToken, conCuentas, hoy, recarga]);
+  const recargar = () => setRecarga((n) => n + 1);
+
+  // Cuenta nueva: para alguien que todavía no está en la lista, o desde la ficha de un cliente sin
+  // cuenta. Devuelve la clave con que queda en la lista (para abrir su ficha), o null si no se pudo.
+  const crearCuenta = async ({ nombre, telefono: tel }) => {
+    const telefono = tel && tel.trim() ? normalizeArPhone(tel) : null;
+    if (!nombre.trim()) { setError("Poné el nombre."); return null; }
+    if (tel && tel.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return null; }
+    setBusy(true); setError("");
+    try {
+      await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: nombre.trim(), telefono }, accessToken, prefer: "return=minimal" });
+      recargar();
+      return telefono ? `t:${telefono}` : `n:${claveNombre(nombre)}`;
+    } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una cuenta con ese WhatsApp: buscala en la lista." : reservaErrorText(e)); return null; }
+    finally { setBusy(false); }
+  };
 
   const clientes = useMemo(() => (datos ? armarClientes({ reservas: datos.reservas, cuentas: datos.cuentas, inscripciones, hoy, ahora: Date.now() }) : []), [datos, inscripciones, hoy]);
   const frecuente = (c) => c.historial.filter((r) => r.fecha <= hoy && r.fecha >= sumarDias(hoy, -60) && !r.no_vino).length >= 4;
@@ -15738,33 +15763,58 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
   const ultima = (c) => (c.ultimaVisita ? (c.diasSinVenir === 0 ? "hoy" : `hace ${c.diasSinVenir} día${c.diasSinVenir === 1 ? "" : "s"}`) : "—");
   const cliente = clientes.find((c) => c.clave === abierto);
 
-  if (cliente) return <FichaCliente cliente={cliente} canchas={datos.canchas} venueName={nombreComplejo(complejoId)} hoy={hoy} onBack={() => setAbierto(null)} />;
+  const cuentaDe = (c) => (c?.cuentaId ? datos.cuentas.find((x) => x.id === c.cuentaId) || null : null);
+  const totalDeuda = clientes.reduce((s, c) => s + c.deuda, 0);
+
+  if (cliente) {
+    return (
+      <FichaCliente
+        cliente={cliente} canchas={datos.canchas} venueName={nombreComplejo(complejoId)} hoy={hoy} onBack={() => setAbierto(null)}
+        conCuentas={conCuentas} cuenta={cuentaDe(cliente)} productos={datos.productos} complejoId={complejoId} accessToken={accessToken} esDueno={esDueno}
+        busy={busy} error={error} onCuentaCambio={recargar} onAbrirCuenta={() => crearCuenta({ nombre: cliente.nombre, telefono: cliente.telefono || "" })}
+      />
+    );
+  }
 
   return (
     <div className="space-y-4 text-sm" style={F.body}>
       {complejos.length > 1 && (
-        <select value={complejoId} onChange={(e) => setComplejoId(e.target.value)} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
+        <select value={complejoId} onChange={(e) => { setDatos(null); setAbierto(null); setComplejoId(e.target.value); }} className="px-3 py-2 rounded border text-sm" style={adminInput} aria-label="Complejo">
           {complejos.map((x) => <option key={x.id} value={x.id}>{nombreComplejo(x.id)}</option>)}
         </select>
       )}
       {error && <p className="text-red-400">{error}</p>}
       {datos === null ? (!error && <p className="opacity-60">Cargando…</p>) : (
         <>
-          <div className={`grid grid-cols-2 ${verCuentas ? "lg:grid-cols-4" : "lg:grid-cols-3"} gap-3`}>
+          <div className={`grid grid-cols-2 ${conCuentas ? "lg:grid-cols-4" : "lg:grid-cols-3"} gap-3`}>
             <TarjetaResumen titulo="Clientes" tono="cyan" valor={String(clientes.length)} detalle="Últimos 6 meses" onClick={() => setFiltro("todos")} />
             <TarjetaResumen titulo="Vienen seguido" tono="lime" valor={String(clientes.filter(frecuente).length)} detalle={`4 o más turnos en 60 días · ${activos} vinieron en 30`} onClick={() => setFiltro("frecuentes")} />
             <TarjetaResumen titulo="No vienen" tono="ambar" valor={String(ausentes)} detalle="Hace más de 30 días" onClick={() => setFiltro("ausentes")} />
             {/* Sin acceso a las cuentas no hay deudas para mostrar */}
-            {verCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle="Cantina o inscripciones" onClick={() => setFiltro("deben")} />}
+            {conCuentas && <TarjetaResumen titulo="Deben" tono="rojo" valor={String(deben)} detalle={`${formatoPrecio(totalDeuda) || "$0"} de cantina e inscripciones`} onClick={() => setFiltro("deben")} />}
           </div>
           <div className="flex flex-wrap gap-2 items-center">
-            {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || verCuentas).map(([k, l]) => (
+            {FILTROS_CLIENTES.filter(([k]) => k !== "deben" || conCuentas).map(([k, l]) => (
               <button key={k} type="button" onClick={() => setFiltro(k)} className={`px-3 py-1.5 rounded-full border ${filtro === k ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`}>{l}</button>
             ))}
             <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cliente" className="flex-1 min-w-[15rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
+            {conCuentas && !nueva && <button type="button" onClick={() => setNueva({ nombre: buscar.trim(), telefono: "" })} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Nueva cuenta</button>}
           </div>
+          {nueva && (
+            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
+              <p className="text-xs text-teal-400">Cuenta de la cantina para alguien que todavía no está en la lista.</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input value={nueva.nombre} onChange={(e) => setNueva({ ...nueva, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
+                <input type="tel" value={nueva.telefono} onChange={(e) => setNueva({ ...nueva, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
+              </div>
+              <div className="flex gap-3 items-center">
+                <button type="button" disabled={busy} onClick={async () => { const k = await crearCuenta(nueva); if (k) { setNueva(null); setBuscar(""); setAbierto(k); } }} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Crear cuenta</button>
+                <button type="button" onClick={() => setNueva(null)} className="text-teal-400">Cancelar</button>
+              </div>
+            </div>
+          )}
           {filtro === "ausentes" && visibles.length > 0 && <p className="text-xs text-teal-400">Tocá un cliente para mandarle un WhatsApp invitándolo a volver.</p>}
-          {visibles.length === 0 ? <p className="text-teal-400">{clientes.length === 0 ? "Todavía no hay turnos cargados en los últimos 6 meses." : "No hay clientes con ese filtro."}</p> : (
+          {visibles.length === 0 ? <p className="text-teal-400">{clientes.length === 0 ? "Todavía no hay clientes: aparecen con los turnos de la agenda (últimos 6 meses), las cuentas de la cantina y los inscriptos a torneos." : "No hay clientes con ese filtro."}</p> : (
             <>
               <div className="hidden sm:block rounded-xl border border-teal-800 overflow-hidden">
                 <table className="w-full text-sm">
@@ -15774,7 +15824,7 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
                       <th className="px-3 py-2.5 font-semibold text-right">Turnos</th>
                       <th className="px-3 py-2.5 font-semibold">Última vez</th>
                       <th className="px-3 py-2.5 font-semibold text-right">Gastó en turnos</th>
-                      {verCuentas && <th className="px-3 py-2.5 font-semibold text-right">Debe</th>}
+                      {conCuentas && <th className="px-3 py-2.5 font-semibold text-right">Debe</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -15784,7 +15834,7 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
                         <td className="px-3 py-2.5 text-right tabular-nums">{c.turnos}{c.proximos > 0 && <span className="text-xs text-lime-400"> +{c.proximos}</span>}</td>
                         <td className={`px-3 py-2.5 ${noVienenHace(c) ? "text-amber-300" : "text-teal-300"}`}>{ultima(c)}</td>
                         <td className="px-3 py-2.5 text-right tabular-nums">{formatoPrecio(c.gastado) || "$0"}</td>
-                        {verCuentas && <td className="px-3 py-2.5 text-right tabular-nums">{c.deuda > 0 ? <span className="text-red-300 font-semibold">{formatoPrecio(c.deuda)}</span> : <span className="text-teal-600">—</span>}</td>}
+                        {conCuentas && <td className="px-3 py-2.5 text-right tabular-nums">{c.deuda > 0 ? <span className="text-red-300 font-semibold">{formatoPrecio(c.deuda)}</span> : <span className="text-teal-600">—</span>}</td>}
                       </tr>
                     ))}
                   </tbody>
@@ -15812,7 +15862,8 @@ function ClientesPanel({ complejos, venues, accessToken, verCuentas, inscripcion
   );
 }
 
-function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
+/* Ficha de un cliente: sus números, su cuenta de la cantina (con conCuentas) y sus turnos */
+function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack, conCuentas = false, cuenta = null, productos = [], complejoId, accessToken, esDueno, busy, error, onCuentaCambio, onAbrirCuenta }) {
   const nombreCancha = (id) => canchas.find((x) => x.id === id)?.nombre || "Cancha";
   const ahora = Date.now();
   const pasados = c.historial.filter((r) => yaEmpezo(r, hoy, ahora)).slice(0, 12);
@@ -15844,6 +15895,20 @@ function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack }) {
         <TarjetaResumen titulo="Gastó en turnos" tono="lime" valor={formatoPrecio(c.gastado) || "$0"} detalle={c.torneos ? `Jugó ${c.torneos} torneo${c.torneos === 1 ? "" : "s"}` : "Cobrados"} />
         <TarjetaResumen titulo="Debe" tono={c.deuda > 0 ? "rojo" : "gris"} valor={formatoPrecio(c.deuda) || "$0"} detalle={c.cuentaId ? "Cantina e inscripciones" : "Sin cuenta"} />
       </div>
+      {conCuentas && (
+        <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
+          {cuenta ? (
+            <CuentaDetalle key={cuenta.id} cuenta={cuenta} complejoId={complejoId} complejoNombre={venueName} productos={productos} accessToken={accessToken} esDueno={esDueno} onChanged={onCuentaCambio} />
+          ) : (
+            <div className="space-y-2">
+              <h3 className="text-sm uppercase tracking-wide text-teal-400">Cuenta de la cantina</h3>
+              <p className="text-teal-300">No tiene cuenta. Abrile una para anotarle consumos y cobrárselos después.</p>
+              {error && <p className="text-red-400">{error}</p>}
+              <button type="button" disabled={busy} onClick={onAbrirCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Abrirle cuenta</button>
+            </div>
+          )}
+        </section>
+      )}
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
           <h3 className="text-sm uppercase tracking-wide text-teal-400 mb-2">Próximos turnos</h3>
@@ -17449,7 +17514,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
         const nombre = destino.nombre;
         vendido(r);
         setAviso({
-          texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Cuentas.${sinVincular ? " No se pudo vincular la cuenta a su inscripción: hacelo desde Cobros del torneo." : ""}`,
+          texto: `Cargado a la cuenta de ${nombre}: ${formatoPrecio(r.total) || "$0"}. Se cobra desde Clientes.${sinVincular ? " No se pudo vincular la cuenta a su inscripción: hacelo desde Cobros del torneo." : ""}`,
           tono: sinVincular ? "alerta" : "ok",
         });
       }
@@ -17768,7 +17833,7 @@ function CobrarVenta({ complejoId, accessToken, subtotal, items, onClose, onVend
         {falta > 0 && (
           <div className="rounded-lg border p-3 space-y-2" style={{ borderColor: "#f59e0b88" }}>
             <p className="text-amber-300 font-semibold">Faltan {formatoPrecio(falta)}: quedan a cuenta de…</p>
-            <p className="text-xs text-teal-400">Sirve para una seña o para pagar en cuotas: el saldo se anota en su cuenta y se cobra desde Cuentas.</p>
+            <p className="text-xs text-teal-400">Sirve para una seña o para pagar en cuotas: el saldo se anota en su cuenta y se cobra desde Clientes.</p>
             {cuentaElegida ? (
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-slate-100">{cuentaElegida.nombre}</span>
@@ -17922,51 +17987,21 @@ function VentasDelDia({ complejoId, accessToken, esDueno, version, onChanged }) 
   );
 }
 
-/* Cuentas (fiado) o Productos y stock: cada una es una sección del menú */
-function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija }) {
+/* Productos y stock de la cantina (las cuentas de cada persona están en Clientes) */
+function ProductosPanel({ complejos, venues, accessToken, esDueno }) {
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const vista = vistaFija; // cuentas | productos
   const [productos, setProductos] = useState(null);
-  const [cuentas, setCuentas] = useState(null);
   const [error, setError] = useState("");
-  const [abierta, setAbierta] = useState(null); // id de la cuenta abierta
-  const [buscar, setBuscar] = useState("");
-  const [soloDeben, setSoloDeben] = useState(false);
-  const [nueva, setNueva] = useState(null); // { nombre, telefono }
-  const [busy, setBusy] = useState(false);
   const nombreComplejo = (id) => venues.find((v) => v.id === id)?.name || "Complejo";
 
   const load = useCallback(async () => {
     try {
-      const [ps, cs] = await Promise.all([
-        supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }),
-        supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken),
-      ]);
-      setProductos(ps); setCuentas(cs || []); setError("");
-    } catch { setError("No se pudieron cargar los consumos. Revisá la conexión."); }
+      setProductos(await supabaseTable(`productos?complejo_id=eq.${encodeURIComponent(complejoId)}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }));
+      setError("");
+    } catch { setError("No se pudieron cargar los productos. Revisá la conexión."); }
   }, [complejoId, accessToken]);
-  useEffect(() => { setProductos(null); setCuentas(null); setAbierta(null); load(); }, [load]);
+  useEffect(() => { setProductos(null); load(); }, [load]);
 
-  const crearCuenta = async () => {
-    const telefono = nueva.telefono.trim() ? normalizeArPhone(nueva.telefono) : null;
-    if (!nueva.nombre.trim()) { setError("Poné el nombre."); return; }
-    if (nueva.telefono.trim() && !telefono) { setError("Revisá el WhatsApp: número de Argentina con característica."); return; }
-    setBusy(true); setError("");
-    try {
-      const [c] = await supabaseTable("cuentas", { method: "POST", body: { complejo_id: complejoId, nombre: nueva.nombre.trim(), telefono }, accessToken, prefer: "return=representation" });
-      setNueva(null);
-      await load();
-      setAbierta(c.id);
-    } catch (e) { setError(e.pgCode === "23505" ? "Ya hay una cuenta con ese WhatsApp: buscala en la lista." : reservaErrorText(e)); }
-    finally { setBusy(false); }
-  };
-
-  const cuenta = (cuentas || []).find((c) => c.id === abierta);
-  const texto = buscar.trim().toLowerCase();
-  const lista = (cuentas || [])
-    .filter((c) => (!soloDeben || totalDe(c) > 0) && (!texto || c.nombre.toLowerCase().includes(texto) || (c.telefono || "").includes(texto.replace(/\D/g, "") || "~")))
-    .sort((a, b) => (totalDe(b) > 0) - (totalDe(a) > 0) || (a.ultimo < b.ultimo ? 1 : -1));
-  const totalDeuda = (cuentas || []).reduce((s, c) => s + totalDe(c), 0);
   const avisos = (productos || []).filter(pocoStock);
 
   return (
@@ -17980,59 +18015,10 @@ function ConsumosPanel({ complejos, venues, accessToken, esDueno, vistaFija }) {
       {avisos.length > 0 && (
         <p className="text-xs text-amber-300">⚠ Queda poco: {avisos.map((p) => `${p.nombre} (${p.stock})`).join(", ")}</p>
       )}
-
-      {productos === null || cuentas === null ? (
+      {productos === null ? (
         !error && <p className="opacity-60">Cargando…</p>
-      ) : vista === "productos" ? (
-        <ProductosConfig complejoId={complejoId} productos={productos} accessToken={accessToken} esDueno={esDueno} onChanged={load} />
-      ) : cuenta ? (
-        <CuentaDetalle cuenta={cuenta} complejoId={complejoId} complejoNombre={nombreComplejo(complejoId)} productos={productos} accessToken={accessToken} esDueno={esDueno} onBack={() => setAbierta(null)} onChanged={load} />
       ) : (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <TarjetaResumen titulo="Deuda total" tono="rojo" valor={formatoPrecio(totalDeuda) || "$0"} detalle="Consumos e inscripciones" />
-            <TarjetaResumen titulo="Deben" tono="ambar" valor={`${cuentas.filter((c) => totalDe(c) > 0).length} de ${cuentas.length}`} detalle="Cuentas con saldo" onClick={() => setSoloDeben(true)} />
-            <div className="col-span-2 sm:col-span-1"><TarjetaResumen titulo="Al día" tono="lime" valor={cuentas.length ? `${Math.round((cuentas.filter((c) => totalDe(c) <= 0).length / cuentas.length) * 100)}%` : "—"} detalle="De todas las cuentas" /></div>
-          </div>
-          <div className="flex flex-wrap gap-2 items-center">
-            <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar por nombre o WhatsApp" aria-label="Buscar cuenta" className="flex-1 min-w-[12rem] px-3 py-2 rounded-lg border text-base" style={adminInput} />
-            <label className="flex items-center gap-1 text-teal-300"><input type="checkbox" checked={soloDeben} onChange={(e) => setSoloDeben(e.target.checked)} /> Solo los que deben</label>
-          </div>
-          {nueva ? (
-            <div className="rounded-lg border border-teal-700 p-3 space-y-2">
-              <div className="grid gap-2 sm:grid-cols-2">
-                <input value={nueva.nombre} onChange={(e) => setNueva({ ...nueva, nombre: e.target.value })} maxLength={80} placeholder="Nombre" aria-label="Nombre" className="px-3 py-2 rounded-lg border text-base" style={adminInput} autoFocus />
-                <input type="tel" value={nueva.telefono} onChange={(e) => setNueva({ ...nueva, telefono: e.target.value })} placeholder="WhatsApp (opcional)" aria-label="WhatsApp" className="px-3 py-2 rounded-lg border text-base" style={adminInput} />
-              </div>
-              <div className="flex gap-3 items-center">
-                <button type="button" disabled={busy} onClick={crearCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Crear cuenta</button>
-                <button type="button" onClick={() => setNueva(null)} className="text-teal-400">Cancelar</button>
-              </div>
-            </div>
-          ) : (
-            <button type="button" onClick={() => setNueva({ nombre: buscar.trim(), telefono: "" })} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>+ Nueva cuenta</button>
-          )}
-          {lista.length === 0 ? (
-            <p className="text-teal-400">{cuentas.length === 0 ? "Todavía no hay cuentas. Creá una para anotarle consumos." : "No hay cuentas con ese filtro."}</p>
-          ) : (
-            <ul className="divide-y divide-teal-900/60 rounded-lg border border-teal-900">
-              {lista.map((c) => {
-                const saldo = totalDe(c);
-                return (
-                  <li key={c.id}>
-                    <button type="button" onClick={() => setAbierta(c.id)} className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-white/5">
-                      <span className="flex-1 min-w-0">
-                        <span className="block text-teal-100 font-semibold truncate">{c.nombre}</span>
-                        {c.telefono && <span className="block text-xs text-teal-500">{formatArPhone(c.telefono)}</span>}
-                      </span>
-                      <span className="text-sm font-semibold shrink-0" style={{ color: saldo > 0 ? "#f87171" : BRAND.lime }}>{saldo > 0 ? `Debe ${formatoPrecio(saldo)}` : "Al día"}</span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </>
+        <ProductosConfig complejoId={complejoId} productos={productos} accessToken={accessToken} esDueno={esDueno} onChanged={load} />
       )}
     </div>
   );
@@ -18107,8 +18093,9 @@ async function guardarConsumos(accessToken, cuenta, items, otro) {
   if (otro) await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, descripcion: otro.descripcion, cantidad: 1, precio_unitario: otro.precio } });
 }
 
-/* Una cuenta: anotar consumos (tocando productos), cobrar y ver todo lo anotado y pagado */
-function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessToken, esDueno, onBack, onChanged }) {
+/* Una cuenta: anotar consumos (tocando productos), cobrar y ver todo lo anotado y pagado. Va dentro
+   de la ficha del cliente (Clientes), que ya muestra el nombre y la vuelta a la lista. */
+function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessToken, esDueno, onChanged }) {
   const [movs, setMovs] = useState(null);
   const [cobrando, setCobrando] = useState(false);
   const [form, setForm] = useState({ monto: "", medio: "efectivo" });
@@ -18178,11 +18165,9 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
 
   return (
     <div className="space-y-4">
-      <button type="button" onClick={onBack} className="text-teal-400 hover:text-lime-400">← Cuentas</button>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex-1 min-w-[10rem]">
-          <p className="text-lg text-teal-100 font-semibold">{cuenta.nombre}</p>
-          {cuenta.telefono && <p className="text-xs text-teal-500">{formatArPhone(cuenta.telefono)}</p>}
+          <h3 className="text-sm uppercase tracking-wide text-teal-400">Cuenta de la cantina</h3>
         </div>
         <span className="text-lg font-semibold" style={{ color: total > 0 ? "#f87171" : BRAND.lime }}>{total > 0 ? `Debe ${formatoPrecio(total)}` : saldo < 0 ? `A favor ${formatoPrecio(-saldo)}` : "Al día"}</span>
       </div>
