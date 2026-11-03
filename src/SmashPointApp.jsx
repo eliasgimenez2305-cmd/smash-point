@@ -16975,7 +16975,9 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
       if (links[0]) {
         const cs = await supabaseRpc("cuentas_con_saldo", { p_complejo: links[0].complejo_id }, accessToken).catch(() => []);
         const c = (cs || []).find((x) => x.id === links[0].cuenta_id);
-        if (c && Number(c.saldo) > 0) cuenta = { id: c.id, saldo: Number(c.saldo), nombre: c.nombre };
+        // Lo que debe de consumos (cuentas_con_saldo trae lo consumido y lo pagado, no el saldo); la
+        // inscripción va aparte, en su propia línea
+        if (c && saldoDe(c) > 0) cuenta = { id: c.id, saldo: saldoDe(c), nombre: c.nombre };
       }
       const debe = j.precio == null ? 0 : Math.max(0, j.precio - pagado);
       setJugador({ ...j, pagado, cuenta });
