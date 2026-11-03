@@ -13660,10 +13660,20 @@ function CobrosPanel({ tournament, inscripciones = [], accessToken, organizerId,
                         const todo = cuenta ? totalDe(cuenta) : 0;
                         const conConsumos = cuenta && Math.max(0, saldoDe(cuenta)) > 0;
                         if (cobrando === f.k || cobrandoTodo === f.k || (f.debe === 0 && !conConsumos)) return null;
+                        // Con consumos en su cuenta: "Cobrar todo" (inscripción + cantina) o solo la inscripción
                         return (
-                          <button type="button" onClick={() => { if (conConsumos) { setCobrandoTodo(f.k); setCobrando(null); setError(""); } else abrir(f); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-                            {conConsumos ? `Cobrar ${formatoPrecio(todo)}` : "Cobrar"}
-                          </button>
+                          <>
+                            {conConsumos && (
+                              <button type="button" onClick={() => { setCobrandoTodo(f.k); setCobrando(null); setError(""); }} className="px-3 py-1.5 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+                                Cobrar todo {formatoPrecio(todo)}
+                              </button>
+                            )}
+                            {(!conConsumos || f.debe > 0) && (
+                              <button type="button" onClick={() => { setCobrandoTodo(null); abrir(f); }} className={conConsumos ? "px-3 py-1.5 rounded-lg border border-lime-400 text-lime-400 font-semibold" : "px-3 py-1.5 rounded-lg font-semibold"} style={conConsumos ? undefined : { backgroundColor: BRAND.lime, color: "#14181f" }}>
+                                {conConsumos ? "Solo inscripción" : "Cobrar"}
+                              </button>
+                            )}
+                          </>
                         );
                       })()}
                     </div>
@@ -17097,8 +17107,6 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
   const [jugador, setJugador] = useState(null); // { t, c, pair, jugador, nombre, precio, pagado, cuenta: { id, saldo } | null }
   const [montoIns, setMontoIns] = useState("");
   const [conCuenta, setConCuenta] = useState(true);
-  const [medio, setMedio] = useState("efectivo");
-  const [dividir, setDividir] = useState(null); // { medio, monto } del segundo pago
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const hora = (iso) => new Date(iso).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Argentina/Buenos_Aires" });
@@ -17149,12 +17157,9 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
     : (jugador && jugador.pagado != null ? [leerPrecio(montoIns) > 0 && ["Inscripción", leerPrecio(montoIns)], jugador.cuenta && conCuenta && [`Cuenta de ${jugador.cuenta.nombre}`, jugador.cuenta.saldo]].filter(Boolean) : []);
   const sinTicket = partes.reduce((s, [, m]) => s + m, 0);
   const total = sinTicket + (renglones.length ? subtotal : 0);
-  const segundo = dividir ? Math.min(total, leerPrecio(dividir.monto) || 0) : 0;
-  const pagos = [{ medio, monto: total - segundo }, ...(segundo > 0 ? [{ medio: dividir.medio, monto: segundo }] : [])].filter((p) => p.monto > 0);
-
-  const cobrar = async () => {
+  // pagos: [{ medio, monto }] del editor (uno o dos medios que suman el total)
+  const cobrar = async (pagos) => {
     if (sinTicket <= 0) { setError(tab === "turno" ? "Elegí un turno con algo para cobrar." : "Elegí el jugador y el monto."); return; }
-    if (dividir && dividir.medio === medio) { setError("Elegí dos medios distintos para dividir."); return; }
     setBusy(true); setError("");
     try {
       if (tab === "turno") {
@@ -17177,7 +17182,6 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
     } finally { setBusy(false); }
   };
 
-  const chip = (activo) => `px-3 py-1.5 rounded-lg border text-sm ${activo ? "border-lime-400 text-lime-400" : "border-teal-800 text-teal-300"}`;
   return (
     <Modal title="Cobrar turno o inscripción" onClose={onClose}>
       <div className="space-y-3 text-sm" style={F.body}>
@@ -17246,28 +17250,10 @@ function CobrarTurnoInscripcion({ complejoId, accessToken, tournaments, renglone
           </div>
         )}
 
-        <div className="space-y-2">
-          <div className="flex flex-wrap gap-2">{MEDIOS_VENTA.map(([m, l]) => <button key={m} type="button" onClick={() => setMedio(m)} className={chip(medio === m)}>{l}</button>)}</div>
-          {dividir ? (
-            <div className="flex flex-wrap items-center gap-2 text-teal-200">
-              <span>y</span>
-              <input inputMode="numeric" value={dividir.monto} onChange={(e) => setDividir({ ...dividir, monto: e.target.value })} placeholder="$" className="w-28 px-2 py-1.5 rounded border text-base" style={adminInput} />
-              <span>con</span>
-              <select value={dividir.medio} onChange={(e) => setDividir({ ...dividir, medio: e.target.value })} className="px-2 py-1.5 rounded border text-base" style={adminInput}>
-                {MEDIOS_VENTA.filter(([m]) => m !== medio).map(([m, l]) => <option key={m} value={m}>{l}</option>)}
-              </select>
-              <button type="button" onClick={() => setDividir(null)} className="text-xs text-teal-400">Sin dividir</button>
-              {total > 0 && segundo > 0 && <span className="w-full text-xs text-teal-400">{formatoPrecio(total - segundo)} con {medioCobroLabel(medio)} y {formatoPrecio(segundo)} con {medioCobroLabel(dividir.medio)}</span>}
-            </div>
-          ) : (
-            <button type="button" onClick={() => setDividir({ medio: MEDIOS_VENTA.find(([m]) => m !== medio)[0], monto: "" })} className="text-xs text-teal-400 underline">Dividir el pago en dos medios</button>
-          )}
-        </div>
-
+        {total > 0 && (
+          <PagosEditor key={`${tab}|${total}`} total={total} medios={MEDIOS_VENTA} exacto textoGuardar={`Cobrar ${formatoPrecio(total)}`} busy={busy} onGuardar={cobrar} />
+        )}
         {error && <p className="text-red-400">{error}</p>}
-        <button type="button" disabled={busy || total <= 0} onClick={cobrar} className="w-full px-4 py-3 rounded-lg font-bold disabled:opacity-40" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-          {busy ? "Cobrando…" : `Cobrar ${formatoPrecio(total) || "$0"}`}
-        </button>
       </div>
     </Modal>
   );
