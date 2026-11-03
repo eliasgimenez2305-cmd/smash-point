@@ -15710,7 +15710,7 @@ const FILTROS_CLIENTES = [["todos", "Todos"], ["frecuentes", "Vienen seguido"], 
 function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCuentas, cantinaIds = null, filtroInicial = "todos", inscripciones = [] }) {
   const hoy = hoyArgentina();
   const [complejoId, setComplejoId] = useState(complejos[0].id);
-  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas, productos }
+  const [datos, setDatos] = useState(null); // { reservas, cuentas, canchas }
   const [recarga, setRecarga] = useState(0); // al anotar o cobrar en una cuenta se vuelven a traer las deudas
   const [error, setError] = useState("");
   const [filtro, setFiltro] = useState(filtroInicial);
@@ -15728,8 +15728,7 @@ function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCue
       traerTodo(`reservas?complejo_id=eq.${c}&tipo=eq.turno&fecha=gte.${sumarDias(hoy, -180)}&select=id,nombre,telefono,fecha,inicio,fin,estado,no_vino,precio,medio_pago,cancha_id,serie_id&order=fecha.desc`, accessToken).catch(() => []), // sin permiso de agenda, solo las cuentas
       conCuentas ? supabaseRpc("cuentas_con_saldo", { p_complejo: complejoId }, accessToken).catch(() => []) : Promise.resolve([]),
       supabaseTable(`canchas?complejo_id=eq.${c}&select=id,nombre`),
-      conCuentas ? supabaseTable(`productos?complejo_id=eq.${c}&order=orden.asc,nombre.asc&select=*,producto_talles(talle,stock,codigo,orden)`, { accessToken }).catch(() => []) : Promise.resolve([]),
-    ]).then(([reservas, cuentas, canchas, productos]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas, productos: productos || [] }); setError(""); } })
+    ]).then(([reservas, cuentas, canchas]) => { if (vivo) { setDatos({ reservas, cuentas: cuentas || [], canchas }); setError(""); } })
       .catch(() => { if (vivo) setError("No se pudieron cargar los clientes. Revisá la conexión."); });
     return () => { vivo = false; };
   }, [complejoId, accessToken, conCuentas, hoy, recarga]);
@@ -15770,7 +15769,7 @@ function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCue
     return (
       <FichaCliente
         cliente={cliente} canchas={datos.canchas} venueName={nombreComplejo(complejoId)} hoy={hoy} onBack={() => setAbierto(null)}
-        conCuentas={conCuentas} cuenta={cuentaDe(cliente)} productos={datos.productos} complejoId={complejoId} accessToken={accessToken} esDueno={esDueno}
+        conCuentas={conCuentas} cuenta={cuentaDe(cliente)} complejoId={complejoId} accessToken={accessToken} esDueno={esDueno}
         busy={busy} error={error} onCuentaCambio={recargar} onAbrirCuenta={() => crearCuenta({ nombre: cliente.nombre, telefono: cliente.telefono || "" })}
       />
     );
@@ -15863,7 +15862,7 @@ function ClientesPanel({ complejos, venues, accessToken, esDueno = false, verCue
 }
 
 /* Ficha de un cliente: sus números, su cuenta de la cantina (con conCuentas) y sus turnos */
-function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack, conCuentas = false, cuenta = null, productos = [], complejoId, accessToken, esDueno, busy, error, onCuentaCambio, onAbrirCuenta }) {
+function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack, conCuentas = false, cuenta = null, complejoId, accessToken, esDueno, busy, error, onCuentaCambio, onAbrirCuenta }) {
   const nombreCancha = (id) => canchas.find((x) => x.id === id)?.nombre || "Cancha";
   const ahora = Date.now();
   const pasados = c.historial.filter((r) => yaEmpezo(r, hoy, ahora)).slice(0, 12);
@@ -15898,11 +15897,11 @@ function FichaCliente({ cliente: c, canchas, venueName, hoy, onBack, conCuentas 
       {conCuentas && (
         <section className="rounded-xl border border-teal-800 p-4 min-w-0" style={{ backgroundColor: "rgba(8,18,24,0.6)" }}>
           {cuenta ? (
-            <CuentaDetalle key={cuenta.id} cuenta={cuenta} complejoId={complejoId} complejoNombre={venueName} productos={productos} accessToken={accessToken} esDueno={esDueno} onChanged={onCuentaCambio} />
+            <CuentaDetalle key={cuenta.id} cuenta={cuenta} complejoId={complejoId} complejoNombre={venueName} accessToken={accessToken} esDueno={esDueno} onChanged={onCuentaCambio} />
           ) : (
             <div className="space-y-2">
               <h3 className="text-sm uppercase tracking-wide text-teal-400">Cuenta de la cantina</h3>
-              <p className="text-teal-300">No tiene cuenta. Abrile una para anotarle consumos y cobrárselos después.</p>
+              <p className="text-teal-300">No tiene cuenta. Abrile una para cargarle consumos desde el Mostrador y cobrárselos después.</p>
               {error && <p className="text-red-400">{error}</p>}
               <button type="button" disabled={busy} onClick={onAbrirCuenta} className="px-4 py-2 rounded-lg font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Abrirle cuenta</button>
             </div>
@@ -18093,9 +18092,10 @@ async function guardarConsumos(accessToken, cuenta, items, otro) {
   if (otro) await supabaseTable("cuenta_consumos", { method: "POST", accessToken, prefer: "return=minimal", body: { complejo_id: cuenta.complejo_id, cuenta_id: cuenta.id, descripcion: otro.descripcion, cantidad: 1, precio_unitario: otro.precio } });
 }
 
-/* Una cuenta: anotar consumos (tocando productos), cobrar y ver todo lo anotado y pagado. Va dentro
-   de la ficha del cliente (Clientes), que ya muestra el nombre y la vuelta a la lista. */
-function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessToken, esDueno, onChanged }) {
+/* Una cuenta: cobrar y ver todo lo anotado y pagado. Va dentro de la ficha del cliente (Clientes),
+   que ya muestra el nombre y la vuelta a la lista. Los consumos se anotan desde el Mostrador
+   (Cargar a: Cliente) o desde Cobros del torneo (+ Consumo). */
+function CuentaDetalle({ cuenta, complejoId, complejoNombre, accessToken, esDueno, onChanged }) {
   const [movs, setMovs] = useState(null);
   const [cobrando, setCobrando] = useState(false);
   const [form, setForm] = useState({ monto: "", medio: "efectivo" });
@@ -18128,7 +18128,6 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
     try { await fn(); await onChanged(); await load(); if (okMsg) setAviso(okMsg); return true; } catch (e) { setError(pedidoErrorText(e) !== PEDIDO_ERRORES_GENERICO ? pedidoErrorText(e) : reservaErrorText(e)); return false; }
     finally { setBusy(false); }
   };
-  const anotar = (items, otro, totalAnotado) => run(() => guardarConsumos(accessToken, { id: cuenta.id, complejo_id: complejoId }, items, otro), `Anotado: ${formatoPrecio(totalAnotado)}`);
   const cobrar = () => {
     const monto = leerPrecio(form.monto);
     if (!monto) { setError("Poné el monto."); return; }
@@ -18185,8 +18184,6 @@ function CuentaDetalle({ cuenta, complejoId, complejoNombre, productos, accessTo
       )}
       {error && <p className="text-red-400">{error}</p>}
       {aviso && <p className="text-lime-400">{aviso}</p>}
-
-      <AnotarConsumo productos={productos} esDueno={esDueno} busy={busy} onAnotar={anotar} />
 
       <div className="flex flex-wrap gap-2 items-center">
         {!cobrando && !cobrandoTodo && debeInscripciones > 0 && <button type="button" onClick={() => { setCobrandoTodo(true); setForm({ monto: String(total), medio: "efectivo" }); }} className="px-4 py-2 rounded-lg font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Cobrar todo {formatoPrecio(total)}</button>}
