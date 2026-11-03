@@ -10663,12 +10663,14 @@ const cobroTurnoLabel = (r) => (r.medio_pago2 ? `${medioPagoLabel(r.medio_pago)}
    que falta. exacto: tiene que sumar el total (el cobro de un turno); si no, se puede pagar menos y
    queda debiendo (cuentas, inscripciones): el segundo renglón se saca con la ✕ y "+ Otro medio" lo
    vuelve a poner. Sin total (sin precio), un solo importe libre. onGuardar recibe [{ medio, monto }].
-   inicial: las partes ya cobradas, para cambiarlas. */
-function PagosEditor({ total = null, medios, inicial = null, exacto = false, nota = null, textoGuardar = "Registrar pago", busy, onGuardar, onCancelar }) {
+   inicial: las partes ya cobradas, para cambiarlas. alCambiar(filas): avisa los renglones al cambiar
+   (el Mostrador muestra el vuelto si es todo en efectivo). */
+function PagosEditor({ total = null, medios, inicial = null, exacto = false, nota = null, textoGuardar = "Registrar pago", busy, onGuardar, onCancelar, alCambiar = null }) {
   const tope = total == null ? null : Number(total) || 0;
   const conImporte = !(exacto && !tope);
   const [filas, setFilas] = useState(() => (inicial?.length ? inicial.map((p) => ({ monto: String(p.monto), medio: p.medio })) : [{ monto: tope ? String(tope) : "", medio: medios[0][0] }]));
   const [error, setError] = useState("");
+  useEffect(() => { if (alCambiar) alCambiar(filas); }, [filas]); // eslint-disable-line react-hooks/exhaustive-deps
   const monto = (f) => leerPrecio(f.monto) || 0;
   const suma = filas.reduce((s, f) => s + monto(f), 0);
   const falta = tope == null ? 0 : tope - suma;
@@ -17440,7 +17442,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
   const [carrito, setCarrito] = useState({}); // productoId -> cantidad
   const [sueltos, setSueltos] = useState([]); // [{ descripcion, precio, cantidad }]
   const [suelto, setSuelto] = useState(null); // formulario de "algo que no está en la lista"
-  const [medio, setMedio] = useState("efectivo");
+  const [filasPago, setFilasPago] = useState([]); // renglones del editor de pago (para el vuelto)
   const [pagaCon, setPagaCon] = useState("");
   const [busy, setBusy] = useState(false);
   const [dividiendo, setDividiendo] = useState(false);
@@ -17502,7 +17504,9 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
   ];
   const subtotal = subtotalDe(renglones);
   const cantidadTotal = renglones.reduce((s, r) => s + r.cantidad, 0);
-  const vuelto = medio === "efectivo" ? vueltoDe(leerPrecio(pagaCon), subtotal) : null;
+  // Vuelto: solo si se paga todo en efectivo (un solo renglón)
+  const todoEfectivo = filasPago.length === 1 && filasPago[0].medio === "efectivo";
+  const vuelto = todoEfectivo ? vueltoDe(leerPrecio(pagaCon), subtotal) : null;
 
   // Tocar un producto: lo suma al ticket; si tiene talles, primero se elige el talle
   const tocar = (p, talle = null) => {
@@ -17543,7 +17547,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
     setSuelto(null); setVacio(false);
   };
   const vendido = (r, conVuelto = null) => {
-    setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setSinDestino(false);
+    setDividiendo(false); vaciar(); setCargarA("mostrador"); setDestino(null); setSinDestino(false);
     setAviso({ texto: `Venta #${r.numero} cobrada: ${formatoPrecio(r.total) || "$0"}${Number(r.a_cuenta) > 0 ? ` (${formatoPrecio(r.a_cuenta)} a cuenta)` : ""}${conVuelto ? ` · Vuelto ${formatoPrecio(conVuelto)}` : ""}.`, tono: "ok" });
     load();
   };
@@ -17599,14 +17603,15 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
     } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
     finally { setBusy(false); }
   };
-  const cobrar = async () => {
+  // partes: [{ medio, monto }] del editor de pago (uno o dos medios que suman el total)
+  const cobrar = async (partes = []) => {
     if (renglones.length === 0) { setVacio(true); return; }
     if (cargarA !== "mostrador") { await cargarALaCuenta(); return; }
     setBusy(true);
     try {
       const r = await supabaseRpc("vender", {
         p_complejo: complejoId, p_items: itemsParaVender(carrito, sueltos),
-        p_pagos: subtotal > 0 ? [{ medio, monto: subtotal }] : [], p_ajuste: 0, p_cuenta: null,
+        p_pagos: subtotal > 0 ? partes : [], p_ajuste: 0, p_cuenta: null,
       }, accessToken);
       vendido(r, vuelto);
     } catch (e) { setAviso({ texto: ventaErrorText(e), tono: "alerta" }); }
@@ -17629,7 +17634,7 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
         {cobrandoCuenta && (
           <CobrarTurnoInscripcion complejoId={complejoId} accessToken={accessToken} tournaments={tournaments} renglones={renglones} subtotal={subtotal}
             items={() => itemsParaVender(carrito, sueltos)} onClose={() => setCobrandoCuenta(false)}
-            onCobrado={(texto) => { setCobrandoCuenta(false); setDividiendo(false); vaciar(); setMedio("efectivo"); setCargarA("mostrador"); setDestino(null); setAviso({ texto, tono: "ok" }); load(); }} />
+            onCobrado={(texto) => { setCobrandoCuenta(false); setDividiendo(false); vaciar(); setCargarA("mostrador"); setDestino(null); setAviso({ texto, tono: "ok" }); load(); }} />
         )}
         {cargarA !== "mostrador" && (
           <ElegirDestino key={cargarA + complejoId} tipo={cargarA} complejoId={complejoId} accessToken={accessToken} destino={destino} torneos={torneosCliente} onElegir={(d) => { setDestino(d); setSinDestino(false); }} />
@@ -17672,25 +17677,26 @@ function MostradorPanel({ complejos, venues, accessToken, esDueno, onVerCaja, to
         <span className="text-slate-300">Total</span>
         <span className="text-3xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(subtotal) || "$0"}</span>
       </div>
-      {cargarA === "mostrador" && <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Medio de pago">
-        {MEDIOS_MOSTRADOR.map(([m, l]) => (
-          <button key={m} type="button" role="radio" aria-checked={medio === m} onClick={() => setMedio(m)} className="py-2.5 rounded-xl border text-sm transition" style={medio === m ? { borderColor: BRAND.lime, color: BRAND.lime, backgroundColor: `${BRAND.lime}14` } : { borderColor: "#1f3a44", color: "#cbd5e1" }}>{l}</button>
-        ))}
-      </div>}
-      {cargarA === "mostrador" && medio === "efectivo" && renglones.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-slate-400">
-          <span>Paga con</span>
-          <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$ (opcional)" aria-label="Paga con" className="w-32 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
-          {vuelto != null && <span className="font-semibold text-slate-100">Vuelto {formatoPrecio(vuelto) || "$0"}</span>}
-        </div>
+      {cargarA === "mostrador" && subtotal > 0 ? (
+        <>
+          <PagosEditor key={subtotal} total={subtotal} medios={MEDIOS_MOSTRADOR} exacto textoGuardar={`Cobrar ${formatoPrecio(subtotal)}`} busy={busy} onGuardar={cobrar} alCambiar={setFilasPago} />
+          {todoEfectivo && (
+            <div className="flex flex-wrap items-center gap-2 text-slate-400">
+              <span>Paga con</span>
+              <input inputMode="numeric" value={pagaCon} onChange={(e) => setPagaCon(e.target.value)} placeholder="$ (opcional)" aria-label="Paga con" className="w-32 px-2 py-1.5 rounded-lg border text-base" style={adminInput} />
+              {vuelto != null && <span className="font-semibold text-slate-100">Vuelto {formatoPrecio(vuelto) || "$0"}</span>}
+            </div>
+          )}
+        </>
+      ) : (
+        <button type="button" disabled={busy} onClick={() => cobrar()} className="w-full py-3.5 rounded-xl font-bold text-lg disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
+          {busy ? "Guardando…" : cargarA !== "mostrador" ? `${cargarA === "cancha" ? "Cargar al turno" : "Cargar a la cuenta"}${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
+        </button>
       )}
-      <button type="button" disabled={busy} onClick={cobrar} className="w-full py-3.5 rounded-xl font-bold text-lg disabled:opacity-60" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>
-        {busy ? "Guardando…" : cargarA !== "mostrador" ? `${cargarA === "cancha" ? "Cargar al turno" : "Cargar a la cuenta"}${renglones.length ? ` ${formatoPrecio(subtotal) || "$0"}` : ""}` : renglones.length === 0 ? "Cobrar" : `Cobrar ${formatoPrecio(subtotal) || "$0"}`}
-      </button>
       {sinDestino && renglones.length > 0 && <p role="alert" className="text-center text-amber-300">{cargarA === "cancha" ? "Elegí a qué turno lo cargás." : "Elegí o escribí el cliente."}</p>}
       {vacio && renglones.length === 0 && <p role="alert" className="text-center text-amber-300">Agregá al menos un producto.</p>}
       {renglones.length > 0 && cargarA === "mostrador" && (
-        <button type="button" onClick={() => setDividiendo(true)} className="block mx-auto text-xs text-slate-400 hover:text-slate-200 underline">Descuento / dividir pago</button>
+        <button type="button" onClick={() => setDividiendo(true)} className="block mx-auto text-xs text-slate-400 hover:text-slate-200 underline">Descuento, seña o a cuenta</button>
       )}
     </div>
   );
