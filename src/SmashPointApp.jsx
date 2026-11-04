@@ -7731,7 +7731,7 @@ function ExplorarTorneoCard({ t, circuito, onOpen, onRegister }) {
         {pocoLugar && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>Queda poco</span>}
       </div>
       {circuito && <p className="text-xs truncate" style={{ color: BRAND.cyan }}>{circuito}</p>}
-      <button type="button" onClick={() => onOpen(t)} className="text-left">
+      <button type="button" onClick={() => onOpen(t.id)} className="text-left">
         <h3 className="text-base font-semibold text-slate-100 leading-snug hover:text-lime-400">{t.name}</h3>
       </button>
       <p className="text-sm text-slate-400">{fechasCortas(t)}</p>
@@ -7744,7 +7744,7 @@ function ExplorarTorneoCard({ t, circuito, onOpen, onRegister }) {
         </span>
         {est.clave === "abierto"
           ? <button type="button" onClick={() => onRegister(t)} className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Inscribirme</button>
-          : <button type="button" onClick={() => onOpen(t)} className="shrink-0 text-xs font-semibold" style={{ color: BRAND.lime }}>Ver ›</button>}
+          : <button type="button" onClick={() => onOpen(t.id)} className="shrink-0 text-xs font-semibold" style={{ color: BRAND.lime }}>Ver ›</button>}
       </div>
     </article>
   );
@@ -7883,7 +7883,7 @@ function ExplorarPublico({ tournaments, events, circuits, organizers, venues, co
   );
 }
 
-function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
+function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi, navInicial = null, onNavUsado = null }) {
   const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
   // Dentro de Complejos: reservar en uno (su id) o ver las reservas del jugador
@@ -7915,6 +7915,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     if (key === "todos") openAll();
     else if (key !== "inicio") setTimeout(() => document.getElementById(key)?.scrollIntoView({ behavior: "smooth" }), 60);
   };
+  // Sección pedida desde otra página (por ejemplo, el menú de la página de un torneo)
+  useEffect(() => { if (navInicial) { onNav(navInicial); onNavUsado?.(); } }, [navInicial]); // eslint-disable-line react-hooks/exhaustive-deps
   const navActual = tab !== "torneos" ? tab : showAll ? "todos" : selectedOrgId || selectedEventId ? null : "inicio";
   // Ranking: los circuitos del primer organizador que tenga alguno
   const circuitoRanking = circuits.find((c) => organizers.some((o) => o.id === c.organizerId));
@@ -8301,7 +8303,149 @@ function InfoTournamentDetail({ tournament, onBack }) {
   );
 }
 
-function PublicTournament({ tournament, organizers, onBack, jugadorApi = null }) {
+/* ---------- Página pública del torneo: encabezado, datos clave y categorías ---------- */
+
+/* Estado de una categoría para su tarjeta: terminada (con los campeones), en llaves (con la ronda,
+   o "Final hoy" con la hora), en grupos, o por armar. tono: color del cartel. */
+function estadoCategoriaPublico(t, c) {
+  const format = t.matchFormat || DEFAULT_MATCH_FORMAT;
+  const nombres = categoryEntitiesById(c);
+  if (isSuper8(c)) {
+    const ms = (c.groups || []).flatMap((g) => g.matches || []);
+    const jugados = ms.filter((m) => matchIsPlayed(m, format)).length;
+    if (ms.length && jugados === ms.length) return { texto: "Terminada", tono: "#94a3b8" };
+    return jugados ? { texto: "En juego", tono: BRAND.lime } : { texto: "Por empezar", tono: BRAND.cyan };
+  }
+  if (c.bracket && c.bracketPublished) {
+    const { rounds, winners, byes } = walkBracket(c.bracket, format);
+    const campeon = winners[rounds.length - 1]?.[0];
+    if (campeon) return { texto: "Terminada", tono: "#94a3b8", campeon: nombres[campeon]?.name };
+    const ri = rounds.findIndex((r, i) => r.some((m, mi) => !isByeMatch(byes, i, mi) && !winners[i][mi]));
+    const final = rounds[rounds.length - 1]?.[0];
+    if (ri === rounds.length - 1 && final?.schedule?.date === todayISO()) return { texto: `Final hoy ${formatHour(final.schedule.time)}`, tono: BRAND.lime };
+    return { texto: ri >= 0 ? `En llaves · ${roundStageLabel(rounds.length, ri).toLowerCase()}` : "En llaves", tono: BRAND.lime };
+  }
+  if ((c.groups || []).length) {
+    const terminados = c.groups.every((g) => g.matches.length > 0 && g.matches.every((m) => matchIsPlayed(m, format)));
+    return { texto: terminados ? "Grupos terminados" : "En grupos", tono: BRAND.cyan };
+  }
+  return { texto: categoryAcceptsRegistrations(c) && registrationStatus(t) === "abierto" ? "Inscripción abierta" : "Por armar", tono: "#cbd5e1" };
+}
+
+/* Datos clave en recuadros: inscripción (con el precio), cuándo empieza, el día de llaves (o cuándo
+   termina) y la sede */
+function TorneoDatosClave({ t }) {
+  const dias = [...(t.playDates || [])].filter((d) => d.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const primero = dias[0];
+  const diaLlaves = dias.find((d) => dayUse(d) === "llaves");
+  const ultimo = dias[dias.length - 1];
+  const ins = registrationStatus(t);
+  const precios = [...new Set((t.categories || []).map((c) => precioJugador(t, c)).filter((p) => p != null))];
+  const st = tournamentStatusOf(t);
+  const recuadros = [
+    ["Inscripción", ins === "abierto" ? "Abierta" : ins === "completo" ? "Cupo completo" : st === STATUS.FINALIZADO ? "Terminada" : "Cerrada", precios.length === 1 ? `${formatoPrecio(precios[0])} por jugador` : null],
+    ["Empieza", formatDateShort(primero?.date || t.date), primero?.from ? `${formatHour(primero.from)}${diaLlaves ? " · grupos" : ""}` : null],
+    diaLlaves ? ["Llaves", formatDateShort(diaLlaves.date), diaLlaves.from ? `desde las ${formatHour(diaLlaves.from)}` : null]
+      : ultimo && ultimo.date !== primero?.date ? ["Termina", formatDateShort(ultimo.date), null] : null,
+    t.venue ? ["Sede", t.venue, t.courtsCount ? `${t.courtsCount} canchas` : null] : null,
+  ].filter(Boolean);
+  return (
+    <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2" style={F.body}>
+      {recuadros.map(([k, v, extra]) => (
+        <div key={k} className="rounded-xl px-3 py-2.5 min-w-0" style={tarjetaPortada}>
+          <p className="text-[10px] uppercase tracking-[1.5px] text-slate-400">{k}</p>
+          <p className="font-semibold text-slate-100 truncate">{v}</p>
+          {extra && <p className="text-xs text-slate-400 truncate">{extra}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Encabezado: portada, logo del organizador, estado, tipo y circuito, nombre, números y botones
+   (cómo llegar, consultar por WhatsApp a la sede, ranking del circuito, compartir) */
+function TorneoEncabezado({ t, organizer, circuito, sede, onRanking }) {
+  const st = tournamentStatusOf(t);
+  const { type } = tournamentConfig(t);
+  const colorTipo = TOURNAMENT_TYPE_COLOR[type];
+  const estado = st === STATUS.EN_CURSO ? ["● En juego", BRAND.lime] : st === STATUS.FINALIZADO ? ["Terminado", "#94a3b8"] : registrationStatus(t) === "abierto" ? ["Inscripción abierta", BRAND.cyan] : ["Próximamente", "#cbd5e1"];
+  const parejas = (t.categories || []).reduce((s, c) => s + categoryPairsCount(c), 0);
+  const individual = (t.categories || []).length > 0 && t.categories.every((c) => c.format === "super8_individual");
+  const avance = tournamentProgress(t);
+  const [copiado, setCopiado] = useState(false);
+  const link = `${window.location.origin}${window.location.pathname}?torneo=${encodeURIComponent(t.id)}`;
+  const compartir = async () => {
+    if (navigator.share) { try { await navigator.share({ title: t.name, url: link }); } catch {} return; }
+    try { await navigator.clipboard.writeText(link); setCopiado(true); setTimeout(() => setCopiado(false), 2500); } catch {}
+  };
+  const direccion = sede?.address ? `${sede.name}, ${sede.address}` : t.venue;
+  const wa = normalizeArPhone(sede?.whatsapp || "");
+  const boton = "px-3 py-1.5 rounded-lg text-sm inline-flex items-center gap-1.5 border";
+  const estiloBoton = { borderColor: "#1f3a44", color: "#cbd5e1" };
+  return (
+    <div className="rounded-2xl overflow-hidden" style={{ ...F.body, ...tarjetaPortada }}>
+      {t.coverImageUrl
+        ? <img src={t.coverImageUrl} alt="" className="w-full h-32 sm:h-48 object-cover" />
+        : <div className="h-10" style={{ backgroundColor: "#12303a" }} />}
+      <div className="px-4 pb-4 flex flex-wrap items-start gap-x-4 gap-y-2">
+        <div className="-mt-7 shrink-0 rounded-2xl p-1" style={{ backgroundColor: "#071319", border: `2px solid ${BRAND.lime}` }}>
+          <OrganizerAvatar organizer={organizer || { name: t.name }} size={56} />
+        </div>
+        <div className="flex-1 min-w-[12rem] pt-2">
+          <div className="flex flex-wrap gap-1.5">
+            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: `${estado[1]}26`, color: estado[1] }}>{estado[0]}</span>
+            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ border: `1px solid ${colorTipo}88`, color: colorTipo }}>{tournamentTypeName(t)}</span>
+            {circuito && <span className="px-2 py-0.5 rounded-full text-[11px]" style={{ border: `1px solid ${BRAND.cyan}55`, color: BRAND.cyan }}>{circuito.name}</span>}
+          </div>
+          <h1 className="mt-1.5 text-2xl sm:text-3xl leading-tight" style={{ ...F.display, color: BRAND.ink }}>{t.name}</h1>
+          {organizer?.name && <p className="text-sm text-slate-400">Organiza {organizer.name}</p>}
+        </div>
+        <div className="flex gap-5 pt-2">
+          <div><p className="text-[10px] uppercase tracking-[1.5px] text-slate-400">Categorías</p><p className="text-xl font-bold text-slate-100">{(t.categories || []).length}</p></div>
+          <div><p className="text-[10px] uppercase tracking-[1.5px] text-slate-400">{individual ? "Jugadores" : "Parejas"}</p><p className="text-xl font-bold text-slate-100">{parejas}</p></div>
+          {avance.total > 0 && <div><p className="text-[10px] uppercase tracking-[1.5px] text-slate-400">Partidos</p><p className="text-xl font-bold text-slate-100">{avance.played}<span className="text-xs text-slate-400 font-normal">/{avance.total}</span></p></div>}
+        </div>
+      </div>
+      <div className="px-4 pb-4 flex flex-wrap gap-2">
+        {direccion && <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(direccion)}`} target="_blank" rel="noopener noreferrer" className={boton} style={estiloBoton}>Cómo llegar</a>}
+        {wa && <a href={waLink(wa, `Hola! Te consulto por el torneo ${t.name}.`)} target="_blank" rel="noopener noreferrer" className={boton} style={{ borderColor: "#25d36655", color: "#25d366" }}>Consultar por WhatsApp</a>}
+        {onRanking && <button type="button" onClick={onRanking} className={boton} style={estiloBoton}>Ranking del circuito</button>}
+        <button type="button" onClick={compartir} className={boton} style={estiloBoton}>{copiado ? "Link copiado" : "Compartir"}</button>
+      </div>
+    </div>
+  );
+}
+
+/* Categorías en tarjetas: estado, parejas y grupos, cuándo empieza si tiene inicio propio, y los
+   campeones si terminó. Tocar una muestra su cuadro abajo. */
+function TorneoCategorias({ t, actual, onElegir }) {
+  const cats = t.categories || [];
+  if (cats.length === 0) return null;
+  return (
+    <section className="mt-5" style={F.body}>
+      <h2 className="text-base mb-2" style={{ ...F.display, color: BRAND.ink }}>Categorías</h2>
+      <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+        {cats.map((c) => {
+          const est = estadoCategoriaPublico(t, c);
+          const inicio = categoryStartLabel(c);
+          return (
+            <button key={c.id} type="button" onClick={() => onElegir(c)} className="rounded-xl p-3 text-left min-w-0 transition hover:brightness-125"
+              style={{ ...tarjetaPortada, ...(actual === c.id ? { borderColor: `${BRAND.lime}99` } : {}) }}>
+              <p className="font-semibold text-slate-100 truncate">{c.name}</p>
+              <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: `${est.tono}26`, color: est.tono }}>{est.texto}</span>
+              <p className="mt-1.5 text-xs text-slate-400">{categoryPairsCount(c)} {c.format === "super8_individual" ? "jugadores" : "parejas"}{(c.groups || []).length && !isSuper8(c) ? ` · ${c.groups.length} grupos` : ""}</p>
+              {inicio && <p className="text-xs text-slate-400">Empieza {inicio}</p>}
+              {est.campeon && <p className="mt-1 text-xs truncate" style={{ color: BRAND.lime }}>🏆 {est.campeon}</p>}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PublicTournament({ tournament, organizers, onBack, jugadorApi = null, venues = [], circuits = [], tournaments = [], onNav = null, onCuenta = null }) {
+  const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const format = tournament.matchFormat || DEFAULT_MATCH_FORMAT;
   const usesSchedule = tournamentUsesSchedule(tournament);
   const super8Tournament = tournamentType(tournament) === "super8";
@@ -8315,10 +8459,22 @@ function PublicTournament({ tournament, organizers, onBack, jugadorApi = null })
   const organizerName = organizer?.name;
   const [registering, setRegistering] = useState(false);
   const showRegister = registrationStatus(tournament) !== "cerrado";
+  // Encabezado nuevo: la sede del directorio (dirección y WhatsApp), el circuito y su ranking
+  const sede = tournament.venue ? venues.find((v) => normalizeName(v.name) === normalizeName(tournament.venue)) || null : null;
+  const circuito = circuits.find((c) => c.id === tournament.circuitId) || null;
+  const [verRanking, setVerRanking] = useState(false);
+  const tabsRef = useRef(null);
+  // Tocar una categoría: su cuadro (la llave si ya está publicada) y bajar hasta ahí
+  const elegirCategoria = (c) => {
+    setCategoryId(c.id);
+    if (!super8Tournament) setView(c.bracket && c.bracketPublished ? "llaves" : "grupos");
+    setTimeout(() => tabsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  };
 
   return (
     <CourtNamesContext.Provider value={tournament}>
-      <div className="px-6 py-8 max-w-4xl mx-auto">
+      {onNav && <SiteHeader actual="todos" onNav={onNav} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }} />}
+      <div className="px-4 sm:px-6 py-6 max-w-4xl mx-auto">
         {/* Inscripción: botón fijo abajo, por encima de la barra del celular (safe area) */}
         {showRegister && (
           <div className="fixed inset-x-0 bottom-0 z-40 px-4 pt-3" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.75rem)", background: "linear-gradient(0deg, rgba(8,18,24,0.98) 60%, rgba(8,18,24,0))" }}>
@@ -8328,30 +8484,13 @@ function PublicTournament({ tournament, organizers, onBack, jugadorApi = null })
           </div>
         )}
         {registering && <RegistrationSheet tournament={tournament} organizer={organizer} onClose={() => setRegistering(false)} jugadorApi={jugadorApi} />}
-        <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Todos los torneos</button>
-        {tournament.coverImageUrl && (
-          <img src={tournament.coverImageUrl} alt="" className="w-full h-40 sm:h-56 object-cover rounded-lg border border-teal-800 mb-4" />
-        )}
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <h1 className="text-2xl" style={F.display}>{tournament.name.toUpperCase()}</h1>
-          <Badge status={tournamentStatusOf(tournament)} />
-        </div>
-        <p className="text-xs text-teal-500 mt-2" style={F.body}>
-          {tournamentTypeSummary(tournament)}
-          {tournament.venue ? ` · Sede: ${tournament.venue}` : ""}
-        </p>
-        {organizerName && <p className="text-xs text-teal-600 mt-1" style={F.body}>Organiza: {organizerName}</p>}
-        <p className="text-sm text-lime-400 font-semibold mt-2" style={F.body}>{tournamentWhenLabel(tournament)}</p>
-        {/* Clásico con inicio propio por categoría: cuándo arranca cada una */}
-        {tournament.categories.some((c) => categoryStartLabel(c)) && (
-          <ul className="mt-1 text-xs text-teal-300 space-y-0.5" style={F.body}>
-            {tournament.categories.filter((c) => categoryStartLabel(c)).map((c) => (
-              <li key={c.id}><span className="font-semibold text-teal-100">{c.name}</span>: empieza {categoryStartLabel(c)}</li>
-            ))}
-          </ul>
-        )}
+        <button onClick={onBack} className="text-sm text-teal-300 hover:text-lime-400 mb-4" style={F.body}>← Volver</button>
+        <TorneoEncabezado t={tournament} organizer={organizer} circuito={circuito} sede={sede} onRanking={circuito ? () => setVerRanking((v) => !v) : null} />
+        {verRanking && circuito && <div className="mt-3"><CircuitPublicCard circuit={circuito} tournaments={tournaments.length ? tournaments : [tournament]} /></div>}
+        <TorneoDatosClave t={tournament} />
+        <TorneoCategorias t={tournament} actual={category?.id} onElegir={elegirCategoria} />
 
-        <div className="flex gap-2 mt-4 overflow-x-auto">
+        <div ref={tabsRef} className="flex gap-2 mt-6 overflow-x-auto scroll-mt-24">
           {viewTabs.map(([key, label]) => (
             <button
               key={key}
@@ -19627,6 +19766,19 @@ function SmashPointAppInner() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const [selectedId, setSelectedId] = useState(null);
+  // Sección de la portada que se pide desde otra página (el menú de la página de un torneo)
+  const [navPortada, setNavPortada] = useState(null);
+  // Link directo a un torneo (?torneo=<id>, el que arma "Compartir"): se abre y se limpia del link
+  useEffect(() => {
+    try {
+      const u = new URL(window.location.href);
+      const id = u.searchParams.get("torneo");
+      if (!id) return;
+      setSelectedId(id); setRoute("public-tournament");
+      u.searchParams.delete("torneo");
+      window.history.replaceState(window.history.state, "", u.pathname + u.search + u.hash);
+    } catch {}
+  }, []);
   const [session, setSession] = useState(null);
   // El plan propio (lo administra el creador): carteles, solo lectura y créditos por torneo
   const [misPlanes, setMisPlanes] = useState([]);
@@ -20182,14 +20334,15 @@ function SmashPointAppInner() {
   // organizador ya la muestran adentro, y en el login y los paneles no va
   let showFooterAds = false;
   if (route === "public-home") {
-    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
+    content = <PublicHome tournaments={publicTournaments} ads={publicAds} circuits={circuits} organizers={publicOrganizers} venues={venues} coaches={coaches} events={events} complejos={publicComplejos} jugadorApi={jugadorApi} onOpen={(id) => { setSelectedId(id); setRoute("public-tournament"); }} onGoLogin={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} navInicial={navPortada} onNavUsado={() => setNavPortada(null)} />;
   } else if (route === "public-tournament" && selected && (esPublico(selected) || session?.role === "creador" || selected.organizerId === session?.id)) {
     showFooterAds = true;
     content = isInfoOnly(selected)
       ? <InfoTournamentDetail tournament={selected} onBack={() => setRoute("public-home")} />
       : selected._light
         ? <LoadingTournament />
-        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} jugadorApi={jugadorApi} />;
+        : <PublicTournament tournament={selected} organizers={organizers} onBack={() => setRoute("public-home")} jugadorApi={jugadorApi} venues={venues} circuits={circuits} tournaments={publicTournaments}
+            onNav={(k) => { setNavPortada(k); setRoute("public-home"); window.scrollTo(0, 0); }} onCuenta={() => setRoute(jugadorApi.jugador ? "cuenta" : "login")} />;
   } else if (route === "login") {
     content = <Login jugadorApi={jugadorApi} aviso={avisoCuenta} onEntro={despuesDeEntrar} onBack={() => { setAvisoCuenta(null); setRoute("public-home"); }} />;
   } else if (route === "nueva-clave" && jugadorApi.jugador) {
