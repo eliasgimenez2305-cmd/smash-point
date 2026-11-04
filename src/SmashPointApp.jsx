@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import logoMarkUrl from "./assets/logo-mark.png";
+import heroPortadaCompu from "./assets/hero/portada-compu.jpg";
+import heroPortadaTablet from "./assets/hero/portada-tablet.jpg";
+import heroOrgCompu from "./assets/hero/organizadores-compu.jpg";
+import heroOrgTablet from "./assets/hero/organizadores-tablet.jpg";
+import heroComCompu from "./assets/hero/complejos-compu.jpg";
+import heroComTablet from "./assets/hero/complejos-tablet.jpg";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet, bracketFormat, formatForMatch, superTiebreakPoints } from "./standings.js";
 import { dayEndMin, validDayRange, clockTime, endsAfterMidnight } from "./horas.js";
@@ -5864,7 +5870,8 @@ function homeStats(tournaments) {
   const matchesToday = tournaments.reduce((sum, t) => sum + (t._stats
     ? t._stats.matchesByDate[today] || 0
     : collectScheduleableMatches(t).filter((m) => m.schedule && m.schedule.date === today && !m.draft).length), 0);
-  return { active: active.length, players, matchesToday };
+  const played = tournaments.reduce((sum, t) => sum + tournamentProgress(t).played, 0);
+  return { active: active.length, players, matchesToday, played };
 }
 
 
@@ -7563,18 +7570,12 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 // Tarjeta de la portada: fondo oscuro, borde turquesa suave
 const tarjetaPortada = { backgroundColor: "rgba(11,28,36,0.85)", border: "1px solid #1f3a44" };
 
-/* Presentación: título, botones y los números del momento (torneos activos, jugadores, partidos de
-   hoy y complejos), más el acceso al ranking del circuito si hay alguno */
+/* Presentación: título, botones, el ranking del circuito si hay alguno y la imagen de la app con los
+   números del momento (partidos jugados, torneos activos y jugadores) */
 function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking }) {
   const stats = useMemo(() => homeStats(tournaments), [tournaments]);
-  const numeros = [
-    ["Torneos activos", stats.active, BRAND.lime],
-    ["Jugadores", stats.players, BRAND.ink],
-    ["Partidos hoy", stats.matchesToday, BRAND.ink],
-    ["Complejos", venues.length, BRAND.cyan],
-  ];
   return (
-    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.3fr_1fr] lg:items-center" style={F.body}>
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-center" style={F.body}>
       <div className="min-w-0">
         <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>Pádel en Entre Ríos, en vivo</span>
         <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
@@ -7587,21 +7588,13 @@ function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking 
           <button type="button" onClick={onVerTorneos} className="px-5 py-2.5 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver torneos</button>
           <button type="button" onClick={onReservar} className="px-5 py-2.5 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Reservar cancha</button>
         </div>
+        {onRanking && <button type="button" onClick={onRanking} className="mt-4 inline-flex items-center gap-2 text-sm font-semibold" style={{ color: BRAND.cyan }}><TrophyIcon size={16} /> Ver el ranking del circuito ›</button>}
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        {numeros.map(([label, valor, color]) => (
-          <div key={label} className="rounded-2xl px-4 py-3" style={tarjetaPortada}>
-            <p className="text-xs text-slate-400">{label}</p>
-            <p className="text-2xl sm:text-3xl font-bold leading-tight" style={{ color }}>{valor}</p>
-          </div>
-        ))}
-        {onRanking && (
-          <button type="button" onClick={onRanking} className="col-span-2 rounded-2xl px-4 py-3 flex items-center justify-between gap-2 text-left" style={tarjetaPortada}>
-            <span className="flex items-center gap-2 text-slate-200"><TrophyIcon size={18} /> Ranking del circuito</span>
-            <span className="text-sm font-semibold" style={{ color: BRAND.cyan }}>Ver ranking ›</span>
-          </button>
-        )}
-      </div>
+      <HeroDispositivos compu={heroPortadaCompu} tablet={heroPortadaTablet} tarjetas={[
+        ["barras", "Partidos jugados", stats.played.toLocaleString("es-AR")],
+        ["trofeo", "Torneos activos", stats.active],
+        ["parejas", "Jugadores", stats.players.toLocaleString("es-AR")],
+      ]} />
     </section>
   );
 }
@@ -7696,12 +7689,40 @@ const ICONOS_LANDING = {
   agenda: "M6 3h12v18H6zM10 9a2 2 0 1 0 4 0 2 2 0 0 0-4 0M8.5 16c.5-1.8 2-2.8 3.5-2.8s3 1 3.5 2.8M3 7h3M3 12h3M3 17h3",
   caja: "M4 11h16v9H4zM7 11V5h10v6M9 8h6M8 15h2M14 15h2",
   barras: "M4 20h16M7 17V11M12 17V6M17 17v-4",
+  trofeo: "M8 4h8v5a4 4 0 0 1-8 0zM8 6H5.5a2.5 2.5 0 0 0 3 3.5M16 6h2.5a2.5 2.5 0 0 1-3 3.5M12 13v4M9 20h6M10 17h4v3h-4z",
 };
 function IconoLanding({ nombre, size = 22 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d={ICONOS_LANDING[nombre]} />
     </svg>
+  );
+}
+
+/* Imagen de presentación: una captura de la app en una compu, otra en una tablet encima y tarjetas
+   flotantes con un dato cada una ([ícono, título, valor]). En el celular se ve solo la primera tarjeta. */
+function HeroDispositivos({ compu, tablet, tarjetas = [] }) {
+  const marco = { border: "6px solid #1c2a30", backgroundColor: "#0d1a20" };
+  const lugares = ["left-[6%] bottom-0", "left-0 top-0", "right-0 top-[4%]"];
+  return (
+    <div className="relative w-full max-w-xl mx-auto lg:mx-0 pt-9 pb-10" aria-hidden="true">
+      <div className="w-[84%] rounded-xl overflow-hidden" style={marco}>
+        <img src={compu} alt="" className="block w-full aspect-[16/10] object-cover object-top" />
+      </div>
+      <div className="absolute right-0 top-[30%] w-[33%] rounded-2xl overflow-hidden" style={marco}>
+        <img src={tablet} alt="" className="block w-full aspect-[3/4] object-cover object-top" />
+      </div>
+      {tarjetas.slice(0, 3).map(([icono, titulo, valor], i) => (
+        <div key={titulo} className={`absolute ${lugares[i]} ${i > 0 ? "hidden sm:flex" : "flex"} items-center gap-2.5 rounded-xl px-3 py-2`}
+          style={{ backgroundColor: "#0b1c24", border: "1px solid #1f3a44" }}>
+          <span className="rounded-lg p-1.5" style={{ backgroundColor: "#12303a", color: BRAND.lime }}><IconoLanding nombre={icono} size={20} /></span>
+          <span className="leading-tight">
+            <span className="block text-[11px] text-slate-400">{titulo}</span>
+            <span className="block text-base font-bold text-slate-100">{valor}</span>
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -7727,6 +7748,7 @@ const LANDINGS = {
       ["foto", "Fixture para redes", "Imágenes listas para Instagram por sede y día."],
       ["plata", "Cobros y circuitos", "Quién pagó, a cuenta, bonificados y ranking por fecha."],
     ],
+    imagen: { compu: heroOrgCompu, tablet: heroOrgTablet, tarjetas: [["reloj", "Horarios", "Armados solos"], ["parejas", "Inscripción", "Online"], ["vivo", "Resultados", "En vivo"]] },
     pasos: ["Nos contás cómo es tu torneo", "Cargamos juntos la primera fecha", "Abrís las inscripciones", "La próxima fecha la duplicás en un toque"],
     preguntas: [
       ["¿Cuánto cuesta?", "Depende del plan: por mes o por torneo. Los precios están arriba y los primeros 20 días son sin cargo, para que lo pruebes con un torneo de verdad."],
@@ -7756,6 +7778,7 @@ const LANDINGS = {
       ["caja", "Caja del día y arqueo", "Cada empleado con su caja, cierre y diferencias."],
       ["barras", "Reportes", "Ocupación, ingresos y gastos mes a mes."],
     ],
+    imagen: { compu: heroComCompu, tablet: heroComTablet, tarjetas: [["calendario", "Reservas online", "Las 24 horas"], ["plata", "Caja", "Al día"], ["barras", "Ocupación", "Mes a mes"]] },
     pasos: ["Cargamos tus canchas y precios", "Sumás a tus empleados con sus permisos", "Compartís el link de reservas", "Cobrás y mirás la caja desde el celular"],
     preguntas: [
       ["¿Necesito instalar algo?", "No. Funciona en el navegador del celular, la tablet o la compu. Entrás con tu usuario y listo."],
@@ -7841,7 +7864,8 @@ function LandingPublica({ tipo }) {
   const seccion = "max-w-5xl mx-auto px-4 sm:px-6 pt-10";
   return (
     <div style={F.body}>
-      <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12">
+      <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 grid gap-4 lg:grid-cols-[1.05fr_1fr] lg:items-center">
+        <div className="min-w-0">
         <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>{d.etiqueta}</span>
         <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
           {d.titulo[0]}<br /><span style={{ color: BRAND.lime }}>{d.titulo[1]}</span>
@@ -7851,6 +7875,8 @@ function LandingPublica({ tipo }) {
           <a href={contacto(d.asunto)} className="px-5 py-2.5 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{d.cta}</a>
           <button type="button" onClick={() => document.getElementById("planes-landing")?.scrollIntoView({ behavior: "smooth" })} className="px-5 py-2.5 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Ver planes</button>
         </div>
+        </div>
+        <HeroDispositivos {...d.imagen} />
       </section>
 
       <section className={seccion}>
