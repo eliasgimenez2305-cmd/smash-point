@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import portadaUrl from "./assets/portada.jpg";
 import logoMarkUrl from "./assets/logo-mark.png";
 import { fixturePages, fixtureFileName, fixtureDateLabel, drawFixture, loadImage } from "./fixtureImage.js";
 import { DEFAULT_MATCH_FORMAT, countedSets, matchIsPlayed, matchHasScore, matchWinnerId, winnerOf, loserOf, effectiveSets, computeStandings, walkBracket, isByeMatch, setIsComplete, isSuperTiebreakSet, bracketFormat, formatForMatch, superTiebreakPoints } from "./standings.js";
@@ -5717,7 +5716,8 @@ function ChevronCircle({ color }) {
   );
 }
 
-const PUBLIC_TABS = [["torneos", "TORNEOS"], ["canchas", "COMPLEJOS"], ["profes", "ENTRENAMIENTOS"]];
+// Menú público: Inicio, todos los torneos, complejos, entrenamientos y las secciones para organizadores y complejos de la portada
+const PUBLIC_NAV = [["inicio", "Inicio"], ["todos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["para-organizadores", "Para organizadores"], ["para-complejos", "Para complejos"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
 /* Política de privacidad (se llega con #privacidad en la dirección). Ley 25.326 de Protección de
@@ -5782,62 +5782,74 @@ function PrivacidadView({ onBack }) {
 
 /* Contacto al pie de las pantallas públicas, con el ingreso de organizadores y de empleados de
    complejos (discreto, para que la portada sea del público) */
-function ContactFooter({ onGoLogin, conCuentas = true }) {
+/* Pie público: franja de contacto y columnas Plataforma (con onNav, las secciones del menú), Ayuda
+   y Legal */
+function ContactFooter({ onGoLogin, conCuentas = true, onNav = null }) {
+  const link = "block py-0.5 text-slate-400 hover:text-lime-400 text-left";
   return (
-    <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-10 text-center" style={F.body}>
-      <div className="rounded-2xl px-4 py-5" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(8,18,24,0.6)" }}>
-        <p className="text-sm uppercase mb-1" style={{ ...F.display, color: BRAND.ink }}>Contacto</p>
-        <p className="text-sm text-teal-300 mb-3">¿Organizás torneos, tenés un complejo o das clases? Escribinos.</p>
-        <a href={`mailto:${CONTACT_EMAIL}`} className="inline-block px-4 py-2 rounded-full text-sm font-semibold break-all" style={{ ...neonStyle(BRAND.lime), color: BRAND.ink }}>
-          {CONTACT_EMAIL}
-        </a>
+    <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-10 pb-10" style={F.body}>
+      <div className="rounded-2xl px-5 py-5 flex flex-wrap items-center justify-between gap-4" style={{ border: `1px solid ${BRAND.cyan}33`, backgroundColor: "rgba(11,28,36,0.85)" }}>
+        <div>
+          <p className="text-lg" style={{ ...F.display, color: BRAND.ink }}>¿Querés sumar tu torneo o tu complejo?</p>
+          <p className="text-sm text-slate-400">Te ayudamos a cargar la primera fecha. Escribinos.</p>
+        </div>
+        <a href={`mailto:${CONTACT_EMAIL}`} className="px-4 py-2 rounded-xl text-sm font-semibold break-all" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{CONTACT_EMAIL}</a>
       </div>
-      {onGoLogin && (
-        <p className="mt-4 text-xs text-teal-600">
-          <button type="button" onClick={onGoLogin} className="hover:text-lime-400 underline decoration-teal-800">{conCuentas ? "Ingresar o crear cuenta" : "Acceso organizadores"}</button>
-          {" · "}
-          <a href="#privacidad" className="hover:text-lime-400 underline decoration-teal-800">Privacidad</a>
-        </p>
-      )}
+      <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+        <div className="col-span-2 sm:col-span-1">
+          <p className="flex items-center gap-2"><Logo size={26} /><span style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</span></p>
+          <p className="mt-1 text-slate-500">Pádel en vivo.</p>
+        </div>
+        {onNav && (
+          <div>
+            <p className="text-slate-200 mb-1">Plataforma</p>
+            {[["todos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"]].map(([k, l]) => <button key={k} type="button" onClick={() => onNav(k)} className={link}>{l}</button>)}
+          </div>
+        )}
+        <div>
+          <p className="text-slate-200 mb-1">Ayuda</p>
+          {onNav && <button type="button" onClick={() => onNav("para-organizadores")} className={link}>Para organizadores</button>}
+          {onNav && <button type="button" onClick={() => onNav("para-complejos")} className={link}>Para complejos</button>}
+          <a href={`mailto:${CONTACT_EMAIL}`} className={link}>Contacto</a>
+        </div>
+        <div>
+          <p className="text-slate-200 mb-1">Cuenta</p>
+          {onGoLogin && <button type="button" onClick={onGoLogin} className={link}>{conCuentas ? "Ingresar o crear cuenta" : "Acceso organizadores"}</button>}
+          <a href="#privacidad" className={link}>Privacidad</a>
+        </div>
+      </div>
     </footer>
   );
 }
 
-/* Encabezado público: arriba a la derecha "Ingresar" o "Mi cuenta", el logo al medio y debajo las
-   pestañas Torneos · Complejos · Entrenamientos */
-function SiteHeader({ tab, onTab, cuenta, campanita = null }) {
+/* Encabezado público: el logo a la izquierda, el menú (en el celular, una fila que se desliza abajo)
+   y a la derecha "Ingresar" o "Mi cuenta". actual: la sección elegida; onNav(clave) la abre. */
+function SiteHeader({ actual, onNav, cuenta, campanita = null }) {
+  const item = (key, label, compacto) => (
+    <button key={key} type="button" onClick={() => onNav(key)} aria-current={actual === key ? "page" : undefined}
+      className={compacto ? "shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap" : "text-sm whitespace-nowrap hover:text-lime-400 transition"}
+      style={compacto ? (actual === key ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1", border: "1px solid #1f3a44" }) : { color: actual === key ? BRAND.lime : "#cbd5e1" }}>
+      {label}
+    </button>
+  );
   return (
-    <header className="max-w-5xl mx-auto px-4 sm:px-6 pt-3 pb-3">
-      {cuenta && (
-        <div className="flex justify-end items-center gap-1 mb-1">
+    <header className="sticky top-0 z-30 border-b" style={{ ...F.body, borderColor: `${BRAND.cyan}22`, backgroundColor: "rgba(7,19,25,0.94)", backdropFilter: "blur(6px)" }}>
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-2.5 flex items-center gap-4">
+        <button type="button" onClick={() => onNav("inicio")} className="flex items-center gap-2 shrink-0" aria-label="Inicio">
+          <Logo size={32} />
+          <span className="leading-none text-base sm:text-lg whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</span>
+        </button>
+        <nav className="hidden lg:flex items-center gap-5 flex-1 min-w-0" aria-label="Secciones">{PUBLIC_NAV.map(([k, l]) => item(k, l, false))}</nav>
+        <div className="ml-auto flex items-center gap-1 shrink-0">
           {campanita}
-          <button type="button" onClick={cuenta.onClick} className="px-3 py-1 rounded-full text-xs font-semibold border hover:border-lime-400" style={{ ...F.body, borderColor: `${BRAND.cyan}66`, color: cuenta.logueado ? BRAND.lime : "#cbd5e1" }}>{cuenta.logueado ? "Mi cuenta" : "Ingresar"}</button>
-        </div>
-      )}
-      <div className="flex items-center justify-center gap-2">
-        <Logo size={44} />
-        <div>
-          <p className="leading-none text-lg sm:text-2xl whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</p>
-          <p className="text-[9px] sm:text-[11px] mt-1 whitespace-nowrap tracking-[3px]" style={{ ...F.body, color: BRAND.logoLime }}>EVENTOS DE PADEL</p>
+          {cuenta && (
+            <button type="button" onClick={cuenta.onClick} className="px-4 py-1.5 rounded-xl text-sm font-semibold" style={cuenta.logueado ? { border: `1px solid ${BRAND.lime}99`, color: BRAND.lime } : { backgroundColor: BRAND.lime, color: "#14181f" }}>
+              {cuenta.logueado ? "Mi cuenta" : "Ingresar ›"}
+            </button>
+          )}
         </div>
       </div>
-      <nav className="mt-4 flex items-center gap-2 max-w-xl mx-auto" aria-label="Secciones">
-        {/* La tercera pestaña es más ancha: "ENTRENAMIENTOS" tiene que entrar entero en el celular */}
-        <div className="flex-1 min-w-0 grid grid-cols-[0.85fr_1fr_1.4fr] gap-0.5 sm:gap-1 p-1 rounded-full" style={{ border: `1px solid ${BRAND.cyan}55`, backgroundColor: "rgba(8,18,24,0.7)" }}>
-          {PUBLIC_TABS.map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onTab(key)}
-              aria-current={tab === key ? "page" : undefined}
-              className="py-2 px-1 rounded-full text-[10px] sm:text-sm font-semibold sm:tracking-wide transition truncate"
-              style={tab === key ? { ...F.body, backgroundColor: BRAND.lime, color: "#14181f", boxShadow: `0 0 12px ${BRAND.lime}66` } : { ...F.body, color: "#cbd5e1" }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </nav>
+      <nav className="lg:hidden flex gap-1.5 overflow-x-auto px-4 pb-2.5" style={{ scrollbarWidth: "none" }} aria-label="Secciones">{PUBLIC_NAV.map(([k, l]) => item(k, l, true))}</nav>
     </header>
   );
 }
@@ -5855,45 +5867,6 @@ function homeStats(tournaments) {
   return { active: active.length, players, matchesToday };
 }
 
-function HomeHero({ tournaments }) {
-  const stats = useMemo(() => homeStats(tournaments), [tournaments]);
-  const items = [
-    [<TrophyIcon size={22} />, stats.active, stats.active === 1 ? "Torneo activo" : "Torneos activos"],
-    [<PeopleIcon size={22} />, stats.players, "Jugadores"],
-    [<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={BRAND.lime} strokeWidth="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M5.5 6.5c3 2.5 3 8.5 0 11M18.5 6.5c-3 2.5-3 8.5 0 11" /></svg>, stats.matchesToday, "Partidos hoy"],
-  ];
-  return (
-    <section className="relative overflow-hidden" style={{ borderTop: `1px solid ${BRAND.cyan}33`, borderBottom: `1px solid ${BRAND.cyan}33` }}>
-      {/* El jugador está a la izquierda de la foto y abajo a la izquierda trae texto propio: en el
-          celular el texto va abajo (tapando ese texto) y en la compu va a la derecha, sobre la reja */}
-      <img src={portadaUrl} alt="" className="absolute inset-0 w-full h-full object-cover object-[25%_15%] sm:object-[20%_30%]" />
-      <div className="absolute inset-0 sm:hidden" style={{ background: "linear-gradient(0deg, rgba(8,18,24,1) 0%, rgba(8,18,24,0.96) 34%, rgba(8,18,24,0.35) 58%, rgba(8,18,24,0.15) 80%, rgba(8,18,24,0.55) 100%)" }} />
-      <div className="absolute inset-0 hidden sm:block" style={{ background: "linear-gradient(270deg, rgba(8,18,24,0.95) 0%, rgba(8,18,24,0.8) 42%, rgba(8,18,24,0.1) 70%), linear-gradient(0deg, rgba(8,18,24,0.97) 0%, rgba(8,18,24,0.6) 22%, transparent 45%)" }} />
-      <div className="relative max-w-5xl mx-auto px-4 sm:px-6 pt-5 pb-6 sm:py-14 flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-4 sm:gap-8 min-h-[420px] sm:min-h-[380px]">
-        <div className="min-w-0 max-w-md sm:text-right mt-auto sm:mt-0">
-          <div className="flex items-center gap-2 mb-3 sm:justify-end">
-            <Logo size={56} />
-            <span className="leading-[0.85] text-3xl sm:text-5xl" style={{ ...F.display, color: BRAND.ink, fontStyle: "italic" }}>SMASH<br />POINT</span>
-          </div>
-          <p className="text-lg sm:text-2xl leading-snug" style={{ ...F.body, color: BRAND.ink }}>
-            Elegí un organizador para ver sus torneos, resultados y llaves <span className="font-bold" style={{ color: BRAND.lime }}>en vivo.</span>
-          </p>
-        </div>
-        <div className="shrink-0 self-end sm:self-auto rounded-xl px-3 py-2 w-[8.5rem] sm:w-44 divide-y" style={{ ...neonStyle(BRAND.cyan), backgroundColor: "rgba(8,18,24,0.72)", backdropFilter: "blur(6px)", borderColor: BRAND.cyan + "66" }}>
-          {items.map(([icon, value, label]) => (
-            <div key={label} className="flex items-center gap-2 py-2" style={{ borderColor: BRAND.cyan + "33" }}>
-              <span className="shrink-0">{icon}</span>
-              <div className="min-w-0">
-                <p className="text-xl sm:text-2xl font-bold leading-none" style={{ ...F.body, color: BRAND.ink }}>{value}</p>
-                <p className="text-[10px] sm:text-xs text-teal-300 leading-tight mt-0.5" style={F.body}>{label}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 /* Tarjeta de organizador: su foto de portada de fondo (o una cancha genérica), el logo en un
    círculo con aro de neón, el nombre, la cantidad de torneos y la flecha para entrar */
@@ -7585,6 +7558,131 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 /* Parte pública de entrada. Arriba el encabezado con las pestañas Torneos · Complejos · Entrenamientos.
    En Torneos: portada, carrusel "Próximos torneos", publicidad y organizadores; desde ahí se entra
    a los torneos de un organizador o a "Ver todos" (todos los organizadores y los informativos). */
+/* ---------- Portada (inicio público) ---------- */
+
+// Tarjeta de la portada: fondo oscuro, borde turquesa suave
+const tarjetaPortada = { backgroundColor: "rgba(11,28,36,0.85)", border: "1px solid #1f3a44" };
+
+/* Presentación: título, botones y los números del momento (torneos activos, jugadores, partidos de
+   hoy y complejos), más el acceso al ranking del circuito si hay alguno */
+function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking }) {
+  const stats = useMemo(() => homeStats(tournaments), [tournaments]);
+  const numeros = [
+    ["Torneos activos", stats.active, BRAND.lime],
+    ["Jugadores", stats.players, BRAND.ink],
+    ["Partidos hoy", stats.matchesToday, BRAND.ink],
+    ["Complejos", venues.length, BRAND.cyan],
+  ];
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.3fr_1fr] lg:items-center" style={F.body}>
+      <div className="min-w-0">
+        <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>Pádel en Entre Ríos, en vivo</span>
+        <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
+          Torneos, turnos y cantina.<br /><span style={{ color: BRAND.lime }}>Todo en una sola app.</span>
+        </h1>
+        <p className="mt-4 text-base sm:text-lg text-slate-300 max-w-xl">
+          Seguí los resultados en vivo, inscribite a torneos, reservá cancha y llevá tu ranking. Para jugadores, organizadores y complejos.
+        </p>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button type="button" onClick={onVerTorneos} className="px-5 py-2.5 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Ver torneos</button>
+          <button type="button" onClick={onReservar} className="px-5 py-2.5 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Reservar cancha</button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {numeros.map(([label, valor, color]) => (
+          <div key={label} className="rounded-2xl px-4 py-3" style={tarjetaPortada}>
+            <p className="text-xs text-slate-400">{label}</p>
+            <p className="text-2xl sm:text-3xl font-bold leading-tight" style={{ color }}>{valor}</p>
+          </div>
+        ))}
+        {onRanking && (
+          <button type="button" onClick={onRanking} className="col-span-2 rounded-2xl px-4 py-3 flex items-center justify-between gap-2 text-left" style={tarjetaPortada}>
+            <span className="flex items-center gap-2 text-slate-200"><TrophyIcon size={18} /> Ranking del circuito</span>
+            <span className="text-sm font-semibold" style={{ color: BRAND.cyan }}>Ver ranking ›</span>
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* "Elegí cómo usás Smash Point": jugador, organizador o complejo */
+function PortadaPerfiles({ onJugador, onOrganizador, onComplejo }) {
+  const perfiles = [
+    ["Soy jugador", "Inscribite a torneos, seguí tus partidos en vivo y reservá cancha desde el celular.", "Ver torneos", onJugador],
+    ["Organizo torneos", "Grupos, llaves FAP, horarios automáticos, cobros y circuitos con ranking.", "Ver qué incluye", onOrganizador],
+    ["Tengo un complejo", "Turnos online, cantina, clientes, caja y reportes en un solo panel.", "Ver qué incluye", onComplejo],
+  ];
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pb-2" style={F.body} aria-labelledby="perfiles-portada">
+      <p id="perfiles-portada" className="text-xs uppercase tracking-[2px] text-slate-400 mb-3">Elegí cómo usás Smash Point</p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        {perfiles.map(([titulo, texto, accion, onClick]) => (
+          <button key={titulo} type="button" onClick={onClick} className="rounded-2xl p-4 text-left hover:brightness-125 transition" style={tarjetaPortada}>
+            <p className="text-base font-semibold text-slate-100">{titulo}</p>
+            <p className="mt-1 text-sm text-slate-400">{texto}</p>
+            <p className="mt-3 text-sm font-semibold" style={{ color: BRAND.lime }}>{accion} ›</p>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* "Reservá cancha": los complejos con reserva online (hasta 4), para entrar directo a reservar */
+function PortadaComplejos({ venues, complejos, onReservar, onVerTodos }) {
+  const conReserva = venues.filter((v) => complejos.some((c) => c.id === v.id && c.reservas_habilitadas && c.modulo_reservas !== false));
+  if (conReserva.length === 0) return null;
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8" style={F.body} aria-labelledby="reservar-portada">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <h2 id="reservar-portada" className="text-base sm:text-lg uppercase" style={{ ...F.display, color: BRAND.ink }}>Reservá cancha</h2>
+        <button type="button" onClick={onVerTodos} className="text-sm font-semibold shrink-0" style={{ color: BRAND.cyan }}>Ver complejos ›</button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {conReserva.slice(0, 4).map((v) => (
+          <button key={v.id} type="button" onClick={() => onReservar(v.id)} className="rounded-2xl px-3 py-3 flex items-center gap-3 text-left hover:brightness-125 transition min-w-0" style={tarjetaPortada}>
+            <DirectoryAvatar url={v.logoUrl} name={v.name} color={BRAND.cyan} size={44} />
+            <span className="flex-1 min-w-0">
+              <span className="block font-semibold text-slate-100 truncate">{v.name}</span>
+              <span className="block text-xs text-slate-400 truncate">{v.address || "Reserva online"}</span>
+            </span>
+            <span className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Reservar</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* Para organizadores y para complejos: qué incluye cada uno y cómo sumarse (por mail, hasta tener
+   las páginas propias y los planes públicos) */
+function PortadaParaQuien() {
+  const lista = (items) => (
+    <ul className="mt-3 space-y-1.5 text-sm text-slate-300">
+      {items.map((x) => <li key={x} className="flex gap-2"><span style={{ color: BRAND.lime }}>✓</span><span>{x}</span></li>)}
+    </ul>
+  );
+  const contacto = (asunto) => `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(asunto)}`;
+  return (
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-10 grid gap-4 lg:grid-cols-2" style={F.body}>
+      <div id="para-organizadores" className="rounded-2xl p-5 scroll-mt-28" style={tarjetaPortada}>
+        <p className="text-xs uppercase tracking-[2px] text-slate-400">Para organizadores</p>
+        <h2 className="mt-1 text-xl" style={{ ...F.display, color: BRAND.ink }}>Tu torneo se arma solo, vos te ocupás del juego</h2>
+        {lista(["Grupos y llaves FAP en un toque", "Horarios automáticos, también pasada la medianoche", "Resultados en vivo e imágenes del fixture para redes", "Cobro de inscripciones y circuitos con ranking"])}
+        <a href={contacto("Quiero organizar torneos con Smash Point")} className="mt-4 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Quiero organizar</a>
+      </div>
+      <div id="para-complejos" className="rounded-2xl p-5 scroll-mt-28" style={tarjetaPortada}>
+        <p className="text-xs uppercase tracking-[2px] text-slate-400">Para complejos</p>
+        <h2 className="mt-1 text-xl" style={{ ...F.display, color: BRAND.ink }}>Tu complejo en orden, desde el celular</h2>
+        {lista(["Reservas online las 24 horas y agenda por cancha", "Mostrador, cantina y cuentas de clientes", "Caja del día, arqueo y reportes", "Clases y profes, con sus cuotas"])}
+        <p className="mt-3 text-sm text-slate-400">Planes según la cantidad de canchas. Consultanos.</p>
+        <a href={contacto("Quiero sumar mi complejo a Smash Point")} className="mt-3 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.cyan}99`, color: BRAND.cyan }}>Consultar planes</a>
+      </div>
+    </section>
+  );
+}
+
 function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
   const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
@@ -7610,6 +7708,17 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const openAll = () => { setFilter(defaultStatusFilter(tournaments)); setShowAll(true); window.scrollTo(0, 0); };
   const openOrganizer = (id) => { setSelectedOrgId(id); setSection("torneos"); setFilter(defaultStatusFilter(tournaments.filter((t) => t.organizerId === id))); window.scrollTo(0, 0); };
   const backHome = () => { setSelectedOrgId(null); setShowAll(false); };
+  // Menú de arriba: secciones de la portada (scroll hasta ellas), todos los torneos o las pestañas
+  const onNav = (key) => {
+    if (key === "canchas" || key === "profes") { goTab(key); return; }
+    goTab("torneos");
+    if (key === "todos") openAll();
+    else if (key !== "inicio") setTimeout(() => document.getElementById(key)?.scrollIntoView({ behavior: "smooth" }), 60);
+  };
+  const navActual = tab !== "torneos" ? tab : showAll ? "todos" : selectedOrgId || selectedEventId ? null : "inicio";
+  // Ranking: los circuitos del primer organizador que tenga alguno
+  const circuitoRanking = circuits.find((c) => organizers.some((o) => o.id === c.organizerId));
+  const verRanking = circuitoRanking ? () => { openOrganizer(circuitoRanking.organizerId); setSection("circuitos"); } : null;
   const backLink = (
     <button type="button" onClick={backHome} className="text-sm text-teal-400 hover:text-lime-400" style={F.body}>← Volver al inicio</button>
   );
@@ -7697,10 +7806,12 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     const visible = organizers.filter((o) => o.role !== "creador");
     body = (
       <>
-        <HomeHero tournaments={tournaments} />
+        <PortadaHero tournaments={tournaments} venues={venues} onVerTorneos={openAll} onReservar={() => goTab("canchas")} onRanking={verRanking} />
+        <PortadaPerfiles onJugador={openAll} onOrganizador={() => onNav("para-organizadores")} onComplejo={() => onNav("para-complejos")} />
         <UpcomingTournamentsCarousel tournaments={tournaments} events={events} onOpenEvent={openEvent} organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} onSeeAll={openAll} />
         <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-6" />
-        <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+        <PortadaComplejos venues={venues} complejos={complejos} onVerTodos={() => goTab("canchas")} onReservar={(id) => { goTab("canchas"); setReservarId(id); setReservarInicial(null); }} />
+        <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-8">
           <h2 className="text-base sm:text-lg uppercase mb-3" style={{ ...F.display, color: BRAND.ink }}>Organizadores</h2>
           {visible.length === 0 ? (
             <p className="opacity-60" style={F.body}>Todavía no hay organizadores con torneos cargados.</p>
@@ -7718,6 +7829,7 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
             </div>
           )}
         </main>
+        <PortadaParaQuien />
       </>
     );
   }
@@ -7726,14 +7838,14 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
-      <SiteHeader tab={tab} onTab={goTab} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }}
+      <SiteHeader actual={navActual} onNav={onNav} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }}
         campanita={jugadorApi?.jugador ? <Campanita token={jugadorApi.token} onIr={(d) => {
           if (d.ir === "mis-reservas") { goTab("canchas"); setMisReservas(true); }
           else if (d.ir === "torneo-publico" && d.torneo) onOpen(d.torneo);
         }} /> : null} />
       {body}
       {showBottomAds && <AdBanner ads={ads} className="max-w-5xl mx-auto px-4 sm:px-6 pt-4" />}
-      <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} />
+      <ContactFooter onGoLogin={onGoLogin} conCuentas={conCuentas} onNav={onNav} />
       {registering && (
         <RegistrationSheet tournament={registering} organizer={organizers.find((o) => o.id === registering.organizerId)} onClose={() => setRegisteringId(null)} jugadorApi={jugadorApi} />
       )}
