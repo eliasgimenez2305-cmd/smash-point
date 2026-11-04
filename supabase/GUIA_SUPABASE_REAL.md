@@ -110,6 +110,8 @@ Y [`migrations/20261051_devolver_venta.sql`](migrations/20261051_devolver_venta.
 
 Y [`migrations/20261054_dos_medios_y_bonificado.sql`](migrations/20261054_dos_medios_y_bonificado.sql) (cobrar un turno en dos medios —también desde el Mostrador— y el medio "Bonificado" en turnos, inscripciones, cuentas y cuotas de clases: queda pagado pero no entra a la caja ni al libro; la caja del día lo muestra aparte). **Correrla antes de publicar la app:** la app nueva pide columnas que agrega esta migración → **Run** → **Success**.
 
+Y [`migrations/20261055_planes_publicos.sql`](migrations/20261055_planes_publicos.sql) (planes en las páginas públicas "Para organizadores" y "Para complejos": casillas "Mostrar en la web" y "Destacado" en cada plan, y la función que deja ver a cualquiera nombre, precio y qué incluye de esos planes). **Correrla antes de publicar la app:** sin ella el creador no puede guardar planes y las páginas muestran solo "Consultar" → **Run** → **Success**. Debe terminar con `PLANES_PUBLICOS_OK`.
+
 > **Función para crear organizadores:** `supabase/functions/admin-organizers` no está en las migraciones. En el proyecto real ya existe; en cualquier proyecto nuevo (como el de PRUEBA) hay que crearla a mano en **Edge Functions** con ese código, o "Crear organizador" da "Failed to fetch".
 > **Actualizarla en el real (21/10):** ahora también muestra y cambia el mail de entrada y la contraseña de cada organizador (botón "Mail y contraseña" en el panel del creador). En el real hay que abrir **Edge Functions › admin-organizers › Code**, pegar el código nuevo y **Deploy**; si no, ese botón da error (crear y borrar siguen andando igual).
 

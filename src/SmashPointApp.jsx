@@ -7655,31 +7655,272 @@ function PortadaComplejos({ venues, complejos, onReservar, onVerTodos }) {
   );
 }
 
-/* Para organizadores y para complejos: qué incluye cada uno y cómo sumarse (por mail, hasta tener
-   las páginas propias y los planes públicos) */
-function PortadaParaQuien() {
+/* Para organizadores y para complejos: qué incluye cada uno y el botón a su página */
+function PortadaParaQuien({ onNav }) {
   const lista = (items) => (
     <ul className="mt-3 space-y-1.5 text-sm text-slate-300">
       {items.map((x) => <li key={x} className="flex gap-2"><span style={{ color: BRAND.lime }}>✓</span><span>{x}</span></li>)}
     </ul>
   );
-  const contacto = (asunto) => `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(asunto)}`;
   return (
     <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-10 grid gap-4 lg:grid-cols-2" style={F.body}>
       <div id="para-organizadores" className="rounded-2xl p-5 scroll-mt-28" style={tarjetaPortada}>
         <p className="text-xs uppercase tracking-[2px] text-slate-400">Para organizadores</p>
         <h2 className="mt-1 text-xl" style={{ ...F.display, color: BRAND.ink }}>Tu torneo se arma solo, vos te ocupás del juego</h2>
         {lista(["Grupos y llaves FAP en un toque", "Horarios automáticos, también pasada la medianoche", "Resultados en vivo e imágenes del fixture para redes", "Cobro de inscripciones y circuitos con ranking"])}
-        <a href={contacto("Quiero organizar torneos con Smash Point")} className="mt-4 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Quiero organizar</a>
+        <button type="button" onClick={() => onNav("para-organizadores")} className="mt-4 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Ver qué incluye y planes</button>
       </div>
       <div id="para-complejos" className="rounded-2xl p-5 scroll-mt-28" style={tarjetaPortada}>
         <p className="text-xs uppercase tracking-[2px] text-slate-400">Para complejos</p>
         <h2 className="mt-1 text-xl" style={{ ...F.display, color: BRAND.ink }}>Tu complejo en orden, desde el celular</h2>
         {lista(["Reservas online las 24 horas y agenda por cancha", "Mostrador, cantina y cuentas de clientes", "Caja del día, arqueo y reportes", "Clases y profes, con sus cuotas"])}
-        <p className="mt-3 text-sm text-slate-400">Planes según la cantidad de canchas. Consultanos.</p>
-        <a href={contacto("Quiero sumar mi complejo a Smash Point")} className="mt-3 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.cyan}99`, color: BRAND.cyan }}>Consultar planes</a>
+        <button type="button" onClick={() => onNav("para-complejos")} className="mt-4 inline-block px-4 py-2 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.cyan}99`, color: BRAND.cyan }}>Ver qué incluye y planes</button>
       </div>
     </section>
+  );
+}
+
+/* ---------- Páginas "Para organizadores" y "Para complejos" ---------- */
+
+// Íconos de línea para las funciones de las páginas (24x24, del color del texto)
+const ICONOS_LANDING = {
+  parejas: "M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 20c0-3 3-5 6-5s6 2 6 5M14 15.5c.6-.3 1.3-.5 2-.5 3 0 6 2 6 5",
+  llave: "M3 5h5v4H3zM3 15h5v4H3zM8 7h3v10H8M11 12h4M15 10h6v4h-6z",
+  reloj: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2",
+  vivo: "M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2",
+  foto: "M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15.5 9.5h.01",
+  plata: "M3 6h18v12H3zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 9v.01M18 15v.01",
+  calendario: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4M9 15l2 2 4-4",
+  grilla: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  carrito: "M3 4h2l2.5 11h11L21 7H6.5M9 20h.01M18 20h.01",
+  agenda: "M6 3h12v18H6zM10 9a2 2 0 1 0 4 0 2 2 0 0 0-4 0M8.5 16c.5-1.8 2-2.8 3.5-2.8s3 1 3.5 2.8M3 7h3M3 12h3M3 17h3",
+  caja: "M4 11h16v9H4zM7 11V5h10v6M9 8h6M8 15h2M14 15h2",
+  barras: "M4 20h16M7 17V11M12 17V6M17 17v-4",
+};
+function IconoLanding({ nombre, size = 22 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={ICONOS_LANDING[nombre]} />
+    </svg>
+  );
+}
+
+const LANDINGS = {
+  organizadores: {
+    para: "organizador",
+    etiqueta: "Para organizadores",
+    titulo: ["Tu torneo se arma solo.", "Vos disfrutás el fin de semana."],
+    bajada: "Inscripciones, grupos, llaves FAP, horarios y resultados en vivo, desde el celular. Sin planillas ni mensajes sueltos.",
+    cta: "Quiero organizar",
+    asunto: "Quiero organizar torneos con Smash Point",
+    dolores: [
+      ["Rehacés todo por un cambio", "Una pareja que no puede un horario y se te cae la grilla."],
+      ["Cruces a mano", "Armar grupos y llaves te lleva horas."],
+      ["Las mismas preguntas", "¿A qué hora juego? ¿Contra quién? Todo el día por WhatsApp."],
+      ["Cobros desordenados", "No sabés quién pagó la inscripción."],
+    ],
+    funciones: [
+      ["parejas", "Inscripción online", "Las parejas se anotan con su disponibilidad y vos aprobás."],
+      ["llave", "Grupos y llaves FAP", "Sorteo por disponibilidad y cuadro FAP con un toque."],
+      ["reloj", "Horarios automáticos", "Por cancha y sede, también pasada la medianoche."],
+      ["vivo", "Resultados en vivo", "Los jugadores siguen todo desde su celular."],
+      ["foto", "Fixture para redes", "Imágenes listas para Instagram por sede y día."],
+      ["plata", "Cobros y circuitos", "Quién pagó, a cuenta, bonificados y ranking por fecha."],
+    ],
+    pasos: ["Nos contás cómo es tu torneo", "Cargamos juntos la primera fecha", "Abrís las inscripciones", "La próxima fecha la duplicás en un toque"],
+    preguntas: [
+      ["¿Cuánto cuesta?", "Depende del plan: por mes o por torneo. Los precios están arriba y los primeros 20 días son sin cargo, para que lo pruebes con un torneo de verdad."],
+      ["¿Sirve para Súper 8 y Americanos?", "Sí. Además de los torneos con grupos y llaves, podés armar Súper 8 (por parejas o individual) y Americanos, con su tabla que se actualiza sola con cada resultado."],
+      ["¿Los jugadores necesitan cuenta?", "Para ver horarios, grupos y resultados, no: entran al link del torneo y listo. Para inscribirse completan el formulario desde ese mismo link."],
+      ["¿Puedo usar mis propias canchas y sedes?", "Sí. Cargás tus sedes y canchas con sus horarios de cada día, y la grilla se arma con eso. Si jugás en varios complejos, cada partido sale con su sede."],
+    ],
+  },
+  complejos: {
+    para: "complejo",
+    etiqueta: "Para complejos",
+    titulo: ["Tu complejo en orden,", "desde el celular."],
+    bajada: "Turnos online, agenda por cancha, mostrador y cantina, cuentas de clientes, caja y reportes en un solo panel.",
+    cta: "Probalo en mi complejo",
+    asunto: "Quiero sumar mi complejo a Smash Point",
+    dolores: [
+      ["Agenda en papel", "Turnos superpuestos y nadie sabe qué está libre."],
+      ["Fiado en un cuaderno", "No sabés cuánto te deben ni quién."],
+      ["La caja no cierra", "Efectivo, transferencias y Mercado Pago mezclados."],
+      ["Clientes que no vuelven", "No sabés a quién invitar a jugar de nuevo."],
+    ],
+    funciones: [
+      ["calendario", "Reservas online", "Los jugadores reservan las 24 horas; vos confirmás."],
+      ["grilla", "Agenda por cancha", "Turnos fijos, bloqueos y cobro en uno o dos medios."],
+      ["carrito", "Mostrador y cantina", "Productos, stock, talles y venta en segundos."],
+      ["agenda", "Clientes y cuentas", "Quién viene, quién no vuelve y quién debe."],
+      ["caja", "Caja del día y arqueo", "Cada empleado con su caja, cierre y diferencias."],
+      ["barras", "Reportes", "Ocupación, ingresos y gastos mes a mes."],
+    ],
+    pasos: ["Cargamos tus canchas y precios", "Sumás a tus empleados con sus permisos", "Compartís el link de reservas", "Cobrás y mirás la caja desde el celular"],
+    preguntas: [
+      ["¿Necesito instalar algo?", "No. Funciona en el navegador del celular, la tablet o la compu. Entrás con tu usuario y listo."],
+      ["¿Puedo empezar solo con reservas?", "Sí. Elegís el plan con lo que necesitás hoy y después sumás cantina, caja o torneos cuando quieras."],
+      ["¿Cómo pagan los jugadores la cancha?", "En el complejo, como siempre: efectivo, transferencia, Mercado Pago o repartido en dos medios. La reserva online no cobra por adelantado."],
+      ["¿Mis empleados ven la plata?", "Solo lo que vos les habilitás. Cada empleado tiene su usuario, sus permisos y su caja; el total y los reportes los ves vos."],
+    ],
+  },
+};
+
+const DIAS_PRUEBA_PLAN = 20;
+
+/* Qué incluye un plan, armado con sus módulos (para la tarjeta de la página pública) */
+function incluyePlanPublico(p) {
+  const items = [];
+  if (p.para === "organizador") {
+    items.push("Torneos y circuitos", "Inscripción online y cobros", "Horarios, grupos y llaves", "Imágenes del fixture para redes");
+    if (p.tipo_cobro === "por_torneo") items.push("Pagás solo cuando organizás");
+    if (p.tipo_cobro === "por_torneo_corto") items.push("Para Americanos y Súper 8");
+  } else {
+    if (p.modulo_reservas) items.push("Reservas online y agenda por cancha", "Turnos fijos y clases");
+    if (p.modulo_cantina) items.push("Mostrador, stock y cuentas", "Caja del día y arqueo");
+    if (p.modulo_torneos) items.push("Torneos y circuitos");
+    if (p.reportes) items.push("Reportes");
+    if (p.empleados == null) items.push("Empleados sin límite");
+    else if (p.empleados > 0) items.push(`${p.empleados} ${p.empleados === 1 ? "empleado" : "empleados"}`);
+  }
+  return items;
+}
+
+/* Tarjetas de planes: los que el creador marcó "Mostrar en la web" (planes_publicos). Si todavía no
+   hay planes (o no se pueden leer), un recuadro para consultar. */
+function LandingPlanes({ para, contacto }) {
+  const [planes, setPlanes] = useState(null); // null = cargando
+  useEffect(() => {
+    let vivo = true;
+    supabaseRpc("planes_publicos", {})
+      .then((r) => { if (vivo) setPlanes((r || []).filter((p) => p.para === para)); })
+      .catch(() => { if (vivo) setPlanes([]); });
+    return () => { vivo = false; };
+  }, [para]);
+  const lista = (items) => (
+    <ul className="mt-3 space-y-1.5 text-sm text-slate-300 flex-1">
+      {items.map((x) => <li key={x} className="flex gap-2"><span style={{ color: BRAND.lime }}>✓</span><span>{x}</span></li>)}
+    </ul>
+  );
+  if (planes === null) return <p className="text-sm text-slate-400">Cargando planes…</p>;
+  if (planes.length === 0) {
+    return (
+      <div className="rounded-2xl p-5 flex flex-wrap items-center justify-between gap-3" style={tarjetaPortada}>
+        <p className="text-slate-300">Armamos el plan según lo que necesites. Los primeros {DIAS_PRUEBA_PLAN} días son sin cargo.</p>
+        <a href={contacto("Consulta por los planes de Smash Point")} className="px-4 py-2 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Consultar</a>
+      </div>
+    );
+  }
+  return (
+    <div className={`grid gap-3 ${planes.length >= 4 ? "sm:grid-cols-2 lg:grid-cols-4" : planes.length === 3 ? "sm:grid-cols-2 lg:grid-cols-3" : planes.length === 2 ? "sm:grid-cols-2" : "max-w-md"}`}>
+      {planes.map((p) => (
+        <div key={p.id} className="rounded-2xl p-5 flex flex-col" style={{ ...tarjetaPortada, ...(p.destacado ? { borderColor: BRAND.lime } : {}) }}>
+          <div className="flex flex-wrap items-center gap-2 min-h-[22px]">
+            {p.destacado && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Más elegido</span>}
+            <span className="px-2 py-0.5 rounded-full text-[11px]" style={{ border: `1px solid ${BRAND.cyan}66`, color: BRAND.cyan }}>{DIAS_PRUEBA_PLAN} días gratis</span>
+          </div>
+          <h3 className="mt-2 text-lg font-semibold text-slate-100">{p.nombre}</h3>
+          {p.precio != null && Number(p.precio) > 0
+            ? <p className="mt-1"><span className="text-2xl font-bold tabular-nums" style={{ color: BRAND.lime }}>{formatoPrecio(p.precio)}</span> <span className="text-sm text-slate-400">{p.tipo_cobro === "mensual" ? "por mes" : "por torneo"}</span></p>
+            : <p className="mt-1 text-lg font-semibold" style={{ color: BRAND.lime }}>A convenir</p>}
+          {lista(incluyePlanPublico(p))}
+          <a href={contacto(`Quiero el plan ${p.nombre} de Smash Point`)} className="mt-4 px-4 py-2 rounded-xl font-semibold text-center" style={p.destacado ? { backgroundColor: BRAND.lime, color: "#14181f" } : { border: `1px solid ${BRAND.lime}99`, color: BRAND.lime }}>Consultar</a>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Página "Para organizadores" o "Para complejos": presentación, problemas comunes, funciones, cómo
+   se empieza, planes, preguntas frecuentes y contacto */
+function LandingPublica({ tipo }) {
+  const d = LANDINGS[tipo];
+  const [abierta, setAbierta] = useState(null);
+  const contacto = (asunto) => `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(asunto)}`;
+  const etiqueta = (texto) => <p className="text-xs uppercase tracking-[2px] text-slate-400 mb-3">{texto}</p>;
+  const seccion = "max-w-5xl mx-auto px-4 sm:px-6 pt-10";
+  return (
+    <div style={F.body}>
+      <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12">
+        <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>{d.etiqueta}</span>
+        <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
+          {d.titulo[0]}<br /><span style={{ color: BRAND.lime }}>{d.titulo[1]}</span>
+        </h1>
+        <p className="mt-4 text-base sm:text-lg text-slate-300 max-w-2xl">{d.bajada}</p>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <a href={contacto(d.asunto)} className="px-5 py-2.5 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{d.cta}</a>
+          <button type="button" onClick={() => document.getElementById("planes-landing")?.scrollIntoView({ behavior: "smooth" })} className="px-5 py-2.5 rounded-xl font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Ver planes</button>
+        </div>
+      </section>
+
+      <section className={seccion}>
+        {etiqueta("¿Te pasa esto?")}
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+          {d.dolores.map(([t, x]) => (
+            <div key={t} className="rounded-2xl p-4" style={tarjetaPortada}>
+              <p className="font-semibold text-slate-100">{t}</p>
+              <p className="mt-1 text-sm text-slate-400">{x}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className={seccion}>
+        {etiqueta("Todo en un solo lugar")}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {d.funciones.map(([icono, t, x]) => (
+            <div key={t} className="rounded-2xl p-4" style={tarjetaPortada}>
+              <span style={{ color: BRAND.lime }}><IconoLanding nombre={icono} /></span>
+              <p className="mt-2 font-semibold text-slate-100">{t}</p>
+              <p className="mt-1 text-sm text-slate-400">{x}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className={seccion}>
+        {etiqueta("Así empezás")}
+        <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+          {d.pasos.map((p, i) => (
+            <div key={p} className="rounded-2xl p-4" style={tarjetaPortada}>
+              <p className="text-2xl font-bold" style={{ color: BRAND.lime }}>{i + 1}</p>
+              <p className="mt-1 text-sm text-slate-200">{p}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section id="planes-landing" className={`${seccion} scroll-mt-24`}>
+        {etiqueta("Planes")}
+        <LandingPlanes para={d.para} contacto={contacto} />
+      </section>
+
+      <section className={seccion}>
+        {etiqueta("Preguntas frecuentes")}
+        <div className="rounded-2xl overflow-hidden" style={tarjetaPortada}>
+          {d.preguntas.map(([q, r], i) => (
+            <div key={q} className={i > 0 ? "border-t border-[#12303a]" : ""}>
+              <button type="button" onClick={() => setAbierta(abierta === i ? null : i)} aria-expanded={abierta === i}
+                className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left text-slate-100">
+                <span className="font-medium">{q}</span>
+                <span className="text-slate-400 transition" style={{ transform: abierta === i ? "rotate(180deg)" : "none" }}>⌄</span>
+              </button>
+              {abierta === i && <p className="px-4 pb-4 -mt-1 text-sm text-slate-300">{r}</p>}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className={seccion}>
+        <div className="rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4" style={{ ...tarjetaPortada, borderColor: `${BRAND.lime}55` }}>
+          <div>
+            <h2 className="text-xl" style={{ ...F.display, color: BRAND.ink }}>¿Lo vemos juntos?</h2>
+            <p className="mt-1 text-sm text-slate-400">Te mostramos cómo quedaría con tus datos.</p>
+          </div>
+          <a href={contacto(d.asunto)} className="px-5 py-2.5 rounded-xl font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Escribinos</a>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -7896,11 +8137,12 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
   const [section, setSection] = useState("torneos"); // torneos | circuitos (dentro de un organizador)
   const [filter, setFilter] = useState(STATUS.EN_CURSO);
   const [registeringId, setRegisteringId] = useState(null);
+  const [landing, setLanding] = useState(null); // organizadores | complejos (sus páginas)
   const registering = tournaments.find((t) => t.id === registeringId);
   const onRegister = (t) => setRegisteringId(t.id);
   const organizerLabel = (t) => (isInfoOnly(t) ? t.organizerName || null : organizers.find((o) => o.id === t.organizerId)?.name || null);
 
-  const goTab = (key) => { setTab(key); setReservarId(null); setMisReservas(false); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
+  const goTab = (key) => { setTab(key); setLanding(null); setReservarId(null); setMisReservas(false); setSelectedOrgId(null); setSelectedEventId(null); setShowAll(false); window.scrollTo(0, 0); };
   const openEvent = (id) => { setSelectedEventId(id); window.scrollTo(0, 0); };
   const selectedEvent = events.find((e) => e.id === selectedEventId);
   const eventTournaments = selectedEvent ? tournaments.filter((t) => t.eventId === selectedEvent.id).sort(compareByStart) : [];
@@ -7913,11 +8155,12 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     if (key === "canchas" || key === "profes") { goTab(key); return; }
     goTab("torneos");
     if (key === "todos") openAll();
+    else if (key === "para-organizadores" || key === "para-complejos") setLanding(key.slice(5));
     else if (key !== "inicio") setTimeout(() => document.getElementById(key)?.scrollIntoView({ behavior: "smooth" }), 60);
   };
   // Sección pedida desde otra página (por ejemplo, el menú de la página de un torneo)
   useEffect(() => { if (navInicial) { onNav(navInicial); onNavUsado?.(); } }, [navInicial]); // eslint-disable-line react-hooks/exhaustive-deps
-  const navActual = tab !== "torneos" ? tab : showAll ? "todos" : selectedOrgId || selectedEventId ? null : "inicio";
+  const navActual = tab !== "torneos" ? tab : landing ? `para-${landing}` : showAll ? "todos" : selectedOrgId || selectedEventId ? null : "inicio";
   // Ranking: los circuitos del primer organizador que tenga alguno
   const circuitoRanking = circuits.find((c) => organizers.some((o) => o.id === c.organizerId));
   const verRanking = circuitoRanking ? () => { openOrganizer(circuitoRanking.organizerId); setSection("circuitos"); } : null;
@@ -7937,6 +8180,8 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     body = <VenuesPublicView venues={venues} complejos={complejos} organizers={organizers} jugador={jugadorApi?.jugador} onReservar={(id, inicial = null) => { setReservarId(id); setReservarInicial(inicial); window.scrollTo(0, 0); }} onMisReservas={verMisReservas} />;
   } else if (tab === "profes") {
     body = <CoachesPublicView coaches={coaches} />;
+  } else if (landing) {
+    body = <LandingPublica key={landing} tipo={landing} />;
   } else if (selectedEvent && eventTournaments.length > 0) {
     // Un evento: sus torneos (categorías) juntos, cada uno con su tarjeta
     const organizer = organizers.find((o) => o.id === eventTournaments[0].organizerId);
@@ -8024,13 +8269,13 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
             </div>
           )}
         </main>
-        <PortadaParaQuien />
+        <PortadaParaQuien onNav={onNav} />
       </>
     );
   }
 
   // En la página de un evento la publicidad va entre la lista de torneos y el contacto
-  const showBottomAds = tab !== "torneos" || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
+  const showBottomAds = (tab !== "torneos" && !landing) || showAll || selectedOrgId || (selectedEvent && eventTournaments.length > 0);
   return (
     <div className="pb-10">
       <SiteHeader actual={navActual} onNav={onNav} cuenta={onCuenta && (conCuentas || jugadorApi?.jugador) && { logueado: !!jugadorApi?.jugador, onClick: onCuenta }}
@@ -15228,6 +15473,7 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
     modulo_torneos: !!inicial?.modulo_torneos, modulo_reservas: !!inicial?.modulo_reservas, modulo_cantina: !!inicial?.modulo_cantina, reportes: !!inicial?.reportes,
     empleados: inicial?.empleados != null ? String(inicial.empleados) : "", activo: inicial ? inicial.activo : true,
     tipo_cobro: inicial?.tipo_cobro || "mensual",
+    en_la_web: inicial ? inicial.en_la_web !== false : true, destacado: !!inicial?.destacado,
   }));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -15243,6 +15489,7 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
         nombre: f.nombre.trim(), para: f.para, precio: leerPrecio(f.precio),
         modulo_torneos: f.modulo_torneos, modulo_reservas: f.modulo_reservas, modulo_cantina: f.modulo_cantina, reportes: f.reportes,
         empleados: emp, activo: f.activo, tipo_cobro: f.para === "organizador" ? f.tipo_cobro : "mensual",
+        ...(f.para !== "publicidad" ? { en_la_web: f.en_la_web, destacado: f.destacado } : {}),
       });
     } catch (e) { setError(reservaErrorText(e)); setBusy(false); }
   };
@@ -15282,6 +15529,12 @@ function PlanForm({ inicial, onGuardar, onCancelar }) {
         </div>
       )}
       <label className="flex items-center gap-2 text-sm text-teal-200"><input type="checkbox" checked={f.activo} onChange={(e) => set("activo", e.target.checked)} /> Se ofrece (si lo apagás, los que ya lo tienen lo siguen teniendo)</label>
+      {f.para !== "publicidad" && (
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {tilde("en_la_web", "Mostrar en la web (páginas Para organizadores / Para complejos)")}
+          {tilde("destacado", "Destacado (\"Más elegido\")")}
+        </div>
+      )}
       {error && <p className="text-red-400">{error}</p>}
       <div className="flex gap-3 items-center">
         <button type="button" disabled={busy} onClick={guardar} className="px-4 py-2 rounded font-semibold disabled:opacity-50" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>{busy ? "Guardando…" : inicial ? "Guardar plan" : "Agregar plan"}</button>
@@ -15314,7 +15567,7 @@ function PlanesEditor({ planes, clientes, accessToken, onChanged }) {
           {planes.map((p) => (
             <li key={p.id} className={`rounded-lg border border-teal-900 p-3 flex flex-wrap items-center gap-3 ${p.activo ? "" : "opacity-60"}`}>
               <div className="flex-1 min-w-[12rem]">
-                <p className="text-teal-100 font-semibold">{p.nombre} <span className="text-xs font-normal text-teal-500">· {PARA_PLAN.find(([k]) => k === p.para)?.[1]}</span>{!p.activo && <span className="text-xs font-normal text-slate-400"> · no se ofrece</span>}</p>
+                <p className="text-teal-100 font-semibold">{p.nombre} <span className="text-xs font-normal text-teal-500">· {PARA_PLAN.find(([k]) => k === p.para)?.[1]}</span>{!p.activo && <span className="text-xs font-normal text-slate-400"> · no se ofrece</span>}{p.activo && p.para !== "publicidad" && p.en_la_web === false && <span className="text-xs font-normal text-slate-400"> · oculto en la web</span>}{p.destacado && <span className="text-xs font-normal text-lime-400"> · destacado</span>}</p>
                 <p className="text-xs text-teal-400">{incluyePlan(p)} · {usan(p)} cliente{usan(p) === 1 ? "" : "s"}</p>
               </div>
               <span className="text-base font-semibold text-lime-400 tabular-nums">{p.precio != null ? `${formatoPrecio(p.precio)}${(p.tipo_cobro || "mensual") === "mensual" ? "/mes" : " por torneo"}` : "sin precio"}</span>
