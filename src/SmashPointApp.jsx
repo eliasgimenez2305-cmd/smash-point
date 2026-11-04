@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import logoMarkUrl from "./assets/logo-mark.png";
 import heroPortadaCompu from "./assets/hero/portada-compu.jpg";
 import heroPortadaTablet from "./assets/hero/portada-tablet.jpg";
@@ -5791,6 +5792,7 @@ function PrivacidadView({ onBack }) {
 /* Pie público: franja de contacto y columnas Plataforma (con onNav, las secciones del menú), Ayuda
    y Legal */
 function ContactFooter({ onGoLogin, conCuentas = true, onNav = null }) {
+  const { modo: instalable, instalar } = useInstalarApp();
   const link = "block py-0.5 text-slate-400 hover:text-lime-400 text-left";
   return (
     <footer className="max-w-5xl mx-auto px-4 sm:px-6 pt-10 pb-10" style={F.body}>
@@ -5821,6 +5823,7 @@ function ContactFooter({ onGoLogin, conCuentas = true, onNav = null }) {
         <div>
           <p className="text-slate-200 mb-1">Cuenta</p>
           {onGoLogin && <button type="button" onClick={onGoLogin} className={link}>{conCuentas ? "Ingresar o crear cuenta" : "Acceso organizadores"}</button>}
+          {instalable && <button type="button" onClick={instalar} className={link}>Instalar la app</button>}
           <a href="#privacidad" className={link}>Privacidad</a>
         </div>
       </div>
@@ -5828,9 +5831,108 @@ function ContactFooter({ onGoLogin, conCuentas = true, onNav = null }) {
   );
 }
 
+/* ---------- Instalar la app ---------- */
+
+const appInstalada = () => typeof window !== "undefined" && (window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true);
+const esIphone = () => typeof navigator !== "undefined" && (/iphone|ipad|ipod/i.test(navigator.userAgent) || (/macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1));
+
+/* Si se puede instalar desde acá: "pedido" (Android y compu: la ventana del navegador, guardada en
+   main.jsx), "iphone" (hay que hacerlo a mano: mostramos los pasos) o null (ya instalada, o el
+   navegador no deja). instalar() hace lo que corresponde. */
+function useInstalarApp() {
+  const calcular = () => (appInstalada() ? null : window.__pedidoInstalar ? "pedido" : esIphone() ? "iphone" : null);
+  const [modo, setModo] = useState(calcular);
+  useEffect(() => {
+    const alCambiar = () => setModo(calcular());
+    window.addEventListener("smashpoint-instalar", alCambiar);
+    return () => window.removeEventListener("smashpoint-instalar", alCambiar);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const instalar = async () => {
+    const pedido = window.__pedidoInstalar;
+    if (pedido) {
+      try { await pedido.prompt(); const r = await pedido.userChoice; if (r?.outcome === "accepted") window.__pedidoInstalar = null; } catch {}
+      window.dispatchEvent(new Event("smashpoint-instalar"));
+    } else if (esIphone()) window.dispatchEvent(new Event("smashpoint-pasos-iphone"));
+  };
+  return { modo, instalar };
+}
+
+/* Los dos pasos para agregar Smash Point al inicio del iPhone */
+function PasosIphone() {
+  const paso = (n, icono, texto) => (
+    <p className="flex items-center gap-2.5"><span className="font-bold w-4" style={{ color: BRAND.lime }}>{n}</span><span style={{ color: BRAND.lime }}><IconoLanding nombre={icono} size={20} /></span><span>{texto}</span></p>
+  );
+  return (
+    <div className="mt-2 space-y-2 text-sm text-slate-200">
+      {paso(1, "compartir", <>Tocá <b>Compartir</b> (abajo en Safari)</>)}
+      {paso(2, "agregar", <>Elegí <b>Agregar a inicio</b> y después <b>Agregar</b></>)}
+    </div>
+  );
+}
+
+/* Lo que va con el menú público: el recuadro con los pasos del iPhone (se abre desde "Instalar la
+   app") y, en el celular con Android, un cartel abajo para instalar ("Ahora no" lo esconde 14 días). */
+const INSTALAR_CARTEL_KEY = "smashpoint:instalar-cartel-hasta";
+function InstalarAppAvisos() {
+  const { modo, instalar } = useInstalarApp();
+  const [pasos, setPasos] = useState(false);
+  const [cartel, setCartel] = useState(() => {
+    try { return Date.now() > Number(localStorage.getItem(INSTALAR_CARTEL_KEY) || 0); } catch { return true; }
+  });
+  useEffect(() => {
+    const abrir = () => setPasos(true);
+    window.addEventListener("smashpoint-pasos-iphone", abrir);
+    return () => window.removeEventListener("smashpoint-pasos-iphone", abrir);
+  }, []);
+  const cerrarCartel = () => {
+    try { localStorage.setItem(INSTALAR_CARTEL_KEY, String(Date.now() + 14 * 86400000)); } catch {}
+    setCartel(false);
+  };
+  const movil = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches;
+  const caja = "max-w-md mx-auto rounded-2xl p-4";
+  const estiloCaja = { backgroundColor: "#0b1c24", border: `1px solid ${BRAND.lime}66` };
+  const abajo = { paddingBottom: "max(1rem, env(safe-area-inset-bottom))" };
+  if (pasos) {
+    return (
+      <div role="dialog" aria-label="Instalá Smash Point en tu iPhone" className="fixed inset-0 z-[70] flex items-end sm:items-center px-4 pt-4" style={{ ...abajo, backgroundColor: "rgba(0,0,0,0.55)" }} onClick={() => setPasos(false)}>
+        <div className={`${caja} w-full`} style={{ ...F.body, ...estiloCaja }} onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center gap-3">
+            <img src="/icono-192.png" alt="" className="w-10 h-10 rounded-lg shrink-0" />
+            <p className="font-semibold text-slate-100 flex-1">Instalá Smash Point en tu iPhone</p>
+          </div>
+          <PasosIphone />
+          <p className="mt-3 text-xs text-slate-400">Queda un ícono en tu pantalla de inicio y abre como una app.</p>
+          <div className="mt-3 text-right">
+            <button type="button" onClick={() => setPasos(false)} className="px-4 py-1.5 rounded-xl text-sm font-semibold border" style={{ borderColor: `${BRAND.lime}99`, color: BRAND.lime }}>Entendido</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (modo !== "pedido" || !movil || !cartel) return null;
+  return (
+    <div role="dialog" aria-label="Instalá Smash Point" className="fixed inset-x-0 bottom-0 z-[60] px-4" style={abajo}>
+      <div className={caja} style={{ ...F.body, ...estiloCaja }}>
+        <div className="flex items-center gap-3">
+          <img src="/icono-192.png" alt="" className="w-10 h-10 rounded-lg shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-slate-100">Tené Smash Point a mano</p>
+            <p className="text-xs text-slate-400">Instalala en tu celular: abre como una app.</p>
+          </div>
+        </div>
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" onClick={cerrarCartel} className="px-3 py-1.5 text-sm text-slate-400">Ahora no</button>
+          <button type="button" onClick={() => { cerrarCartel(); instalar(); }} className="px-4 py-1.5 rounded-xl text-sm font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Instalar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* Encabezado público: el logo a la izquierda, el menú (en el celular, una fila que se desliza abajo)
    y a la derecha "Ingresar" o "Mi cuenta". actual: la sección elegida; onNav(clave) la abre. */
 function SiteHeader({ actual, onNav, cuenta, campanita = null }) {
+  const { modo: instalable, instalar } = useInstalarApp();
   const item = (key, label, compacto) => (
     <button key={key} type="button" onClick={() => onNav(key)} aria-current={actual === key ? "page" : undefined}
       className={compacto ? "shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap" : "text-sm whitespace-nowrap hover:text-lime-400 transition"}
@@ -5846,7 +5948,12 @@ function SiteHeader({ actual, onNav, cuenta, campanita = null }) {
           <span className="leading-none text-base sm:text-lg whitespace-nowrap" style={{ ...F.display, color: BRAND.logoLime }}>SMASH POINT</span>
         </button>
         <nav className="hidden lg:flex items-center gap-5 flex-1 min-w-0" aria-label="Secciones">{PUBLIC_NAV.map(([k, l]) => item(k, l, false))}</nav>
-        <div className="ml-auto flex items-center gap-1 shrink-0">
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {instalable && (
+            <button type="button" onClick={instalar} title="Instalar la app" aria-label="Instalar la app" className="p-1.5 rounded-xl inline-flex items-center border" style={{ borderColor: `${BRAND.lime}66`, color: BRAND.lime }}>
+              <IconoLanding nombre="descargar" size={18} />
+            </button>
+          )}
           {campanita}
           {cuenta && (
             <button type="button" onClick={cuenta.onClick} className="px-4 py-1.5 rounded-xl text-sm font-semibold" style={cuenta.logueado ? { border: `1px solid ${BRAND.lime}99`, color: BRAND.lime } : { backgroundColor: BRAND.lime, color: "#14181f" }}>
@@ -5856,6 +5963,7 @@ function SiteHeader({ actual, onNav, cuenta, campanita = null }) {
         </div>
       </div>
       <nav className="lg:hidden flex gap-1.5 overflow-x-auto px-4 pb-2.5" style={{ scrollbarWidth: "none" }} aria-label="Secciones">{PUBLIC_NAV.map(([k, l]) => item(k, l, true))}</nav>
+      {typeof document !== "undefined" && createPortal(<InstalarAppAvisos />, document.body)}
     </header>
   );
 }
@@ -7689,6 +7797,9 @@ const ICONOS_LANDING = {
   agenda: "M6 3h12v18H6zM10 9a2 2 0 1 0 4 0 2 2 0 0 0-4 0M8.5 16c.5-1.8 2-2.8 3.5-2.8s3 1 3.5 2.8M3 7h3M3 12h3M3 17h3",
   caja: "M4 11h16v9H4zM7 11V5h10v6M9 8h6M8 15h2M14 15h2",
   barras: "M4 20h16M7 17V11M12 17V6M17 17v-4",
+  descargar: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  compartir: "M12 3v12M8 7l4-4 4 4M7 11H5v10h14V11h-2",
+  agregar: "M5 5h14v14H5zM12 9v6M9 12h6",
   trofeo: "M8 4h8v5a4 4 0 0 1-8 0zM8 6H5.5a2.5 2.5 0 0 0 3 3.5M16 6h2.5a2.5 2.5 0 0 1-3 3.5M12 13v4M9 20h6M10 17h4v3h-4z",
 };
 function IconoLanding({ nombre, size = 22 }) {
@@ -10918,7 +11029,8 @@ function InstalarEnIphone() {
           <img src="/icono-192.png" alt="" className="w-10 h-10 rounded-lg shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="font-semibold">Instalá Smash Point</p>
-            <p className="text-xs text-teal-300 mt-0.5">Para recibir los avisos en el iPhone: tocá <b>Compartir</b> <span aria-hidden="true">(el cuadrado con la flecha)</span> › <b>Agregar a inicio</b> y entrá desde ese ícono.</p>
+            <p className="text-xs text-teal-300 mt-0.5">Para recibir los avisos en el iPhone, agregala al inicio y entrá desde ese ícono:</p>
+            <PasosIphone />
           </div>
           <button type="button" onClick={cerrar} className="text-teal-300 shrink-0" aria-label="Cerrar">✕</button>
         </div>
