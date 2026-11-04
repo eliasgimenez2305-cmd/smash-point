@@ -5717,7 +5717,7 @@ function ChevronCircle({ color }) {
 }
 
 // Menú público: Inicio, todos los torneos, complejos, entrenamientos y las secciones para organizadores y complejos de la portada
-const PUBLIC_NAV = [["inicio", "Inicio"], ["todos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["para-organizadores", "Para organizadores"], ["para-complejos", "Para complejos"]];
+const PUBLIC_NAV = [["inicio", "Inicio"], ["todos", "Explorar"], ["canchas", "Complejos"], ["profes", "Entrenamientos"], ["para-organizadores", "Para organizadores"], ["para-complejos", "Para complejos"]];
 const CONTACT_EMAIL = "smashpoint.arg@gmail.com";
 
 /* Política de privacidad (se llega con #privacidad en la dirección). Ley 25.326 de Protección de
@@ -5803,7 +5803,7 @@ function ContactFooter({ onGoLogin, conCuentas = true, onNav = null }) {
         {onNav && (
           <div>
             <p className="text-slate-200 mb-1">Plataforma</p>
-            {[["todos", "Torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"]].map(([k, l]) => <button key={k} type="button" onClick={() => onNav(k)} className={link}>{l}</button>)}
+            {[["todos", "Explorar torneos"], ["canchas", "Complejos"], ["profes", "Entrenamientos"]].map(([k, l]) => <button key={k} type="button" onClick={() => onNav(k)} className={link}>{l}</button>)}
           </div>
         )}
         <div>
@@ -7683,6 +7683,206 @@ function PortadaParaQuien() {
   );
 }
 
+/* ---------- Explorar (público) ---------- */
+
+/* Estado de un torneo para Explorar: en juego, inscripción abierta, cupo completo, próximamente o
+   terminado. clave sirve para filtrar. */
+function estadoExplorar(t) {
+  const st = tournamentStatusOf(t);
+  if (st === STATUS.EN_CURSO) return { clave: "en_juego", texto: "● En juego", fondo: `${BRAND.lime}26`, color: BRAND.lime };
+  if (st === STATUS.FINALIZADO) return { clave: "terminado", texto: "Terminado", fondo: "#64748b33", color: "#94a3b8" };
+  const ins = registrationStatus(t);
+  if (ins === "abierto") return { clave: "abierto", texto: "Inscripción abierta", fondo: `${BRAND.cyan}26`, color: BRAND.cyan };
+  if (ins === "completo") return { clave: "proximo", texto: "Cupo completo", fondo: "#f59e0b26", color: "#fbbf24" };
+  return { clave: "proximo", texto: "Próximamente", fondo: "#94a3b826", color: "#cbd5e1" };
+}
+
+/* Fecha corta de un torneo: "Sáb 14/11" o, si se juega varios días, "Vie 6/11 al Dom 8/11" */
+function fechasCortas(t) {
+  const dias = [...new Set((t.playDates || []).map((d) => d.date).filter(Boolean))].sort();
+  return dias.length > 1 ? `${formatDateShort(dias[0])} al ${formatDateShort(dias[dias.length - 1])}` : formatDateShort(dias[0] || t.date);
+}
+
+/* Lugares que quedan en las categorías con cupo que todavía aceptan inscripciones (null si ninguna
+   tiene cupo) */
+function lugaresQueQuedan(t) {
+  const conCupo = (t.categories || []).filter((c) => categoryAcceptsRegistrations(c) && categorySpotsLeft(c) != null);
+  return conCupo.length ? conCupo.reduce((s, c) => s + categorySpotsLeft(c), 0) : null;
+}
+
+/* Tarjeta de un torneo en Explorar: tipo y estado, circuito, nombre, fecha y sede, lugares que
+   quedan (o los campeones si terminó), y abajo categorías, inscriptos, precio e Inscribirme */
+function ExplorarTorneoCard({ t, circuito, onOpen, onRegister }) {
+  const est = estadoExplorar(t);
+  const { type } = tournamentConfig(t);
+  const colorTipo = TOURNAMENT_TYPE_COLOR[type];
+  const cats = t.categories || [];
+  const individual = cats.length > 0 && cats.every((c) => c.format === "super8_individual");
+  const inscriptos = cats.reduce((s, c) => s + categoryPairsCount(c), 0);
+  const precios = [...new Set(cats.map((c) => precioJugador(t, c)).filter((p) => p != null))];
+  const quedan = est.clave === "abierto" ? lugaresQueQuedan(t) : null;
+  const pocoLugar = est.clave === "abierto" && cats.some((c) => categoryAcceptsRegistrations(c) && categorySpotsLeft(c) != null && categorySpotsLeft(c) > 0 && categorySpotsLeft(c) <= 2);
+  const campeones = est.clave === "terminado" && cats.length === 1 ? (cats[0]._placements || []).find((p) => p.tier === "campeon")?.name : null;
+  return (
+    <article className="rounded-2xl p-3.5 flex flex-col gap-1.5 min-w-0" style={tarjetaPortada}>
+      <div className="flex flex-wrap gap-1.5">
+        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ border: `1px solid ${colorTipo}88`, color: colorTipo }}>{TOURNAMENT_TYPE_LABEL[type]}</span>
+        <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: est.fondo, color: est.color }}>{est.texto}</span>
+        {pocoLugar && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: "#f59e0b26", color: "#fbbf24" }}>Queda poco</span>}
+      </div>
+      {circuito && <p className="text-xs truncate" style={{ color: BRAND.cyan }}>{circuito}</p>}
+      <button type="button" onClick={() => onOpen(t)} className="text-left">
+        <h3 className="text-base font-semibold text-slate-100 leading-snug hover:text-lime-400">{t.name}</h3>
+      </button>
+      <p className="text-sm text-slate-400">{fechasCortas(t)}</p>
+      {t.venue && <p className="text-sm text-slate-400 truncate">{t.venue}</p>}
+      {quedan != null && quedan > 0 && <p className="text-xs" style={{ color: "#fbbf24" }}>{quedan === 1 ? "Queda 1 lugar" : `Quedan ${quedan} lugares`}</p>}
+      {campeones && <p className="text-xs" style={{ color: BRAND.lime }}>Campeones: {campeones}</p>}
+      <div className="mt-auto pt-2 border-t flex items-center justify-between gap-2" style={{ borderColor: "#12303a" }}>
+        <span className="text-xs text-slate-400 min-w-0">
+          {cats.length} {cats.length === 1 ? "categoría" : "categorías"} · {inscriptos} {individual ? "jugadores" : "parejas"}{precios.length === 1 ? ` · ${formatoPrecio(precios[0])}` : ""}
+        </span>
+        {est.clave === "abierto"
+          ? <button type="button" onClick={() => onRegister(t)} className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Inscribirme</button>
+          : <button type="button" onClick={() => onOpen(t)} className="shrink-0 text-xs font-semibold" style={{ color: BRAND.lime }}>Ver ›</button>}
+      </div>
+    </article>
+  );
+}
+
+const ESTADOS_EXPLORAR = [["", "Estado: todos"], ["abierto", "Inscripción abierta"], ["en_juego", "En juego"], ["proximo", "Próximamente"]];
+const PESTANAS_EXPLORAR = [["torneos", "Torneos"], ["circuitos", "Circuitos"], ["complejos", "Complejos"], ["organizadores", "Organizadores"]];
+const AYUDA_EXPLORAR = {
+  torneos: "Buscá torneos abiertos, en juego o terminados. Filtrá por categoría, tipo, sede o circuito.",
+  circuitos: "Mirá los circuitos con sus fechas y el ranking de cada categoría.",
+  complejos: "Encontrá dónde jugar y reservá cancha online.",
+  organizadores: "Entrá a cada organizador para ver sus torneos y circuitos.",
+};
+
+/* Explorar: torneos con buscador y filtros (estado, tipo, categoría, sede, circuito y terminados),
+   y las pestañas Circuitos, Complejos y Organizadores con su buscador */
+function ExplorarPublico({ tournaments, events, circuits, organizers, venues, complejos, organizerLabel, onOpen, onRegister, onOpenEvent, onOpenOrganizer, onReservar, onVerComplejos }) {
+  const [pestana, setPestana] = useState("torneos");
+  const [buscar, setBuscar] = useState("");
+  const [estado, setEstado] = useState("");
+  const [tipo, setTipo] = useState("");
+  const [categoria, setCategoria] = useState("");
+  const [sede, setSede] = useState("");
+  const [circuito, setCircuito] = useState("");
+  const [terminados, setTerminados] = useState(false);
+  const texto = normalizeName(buscar);
+  const coincide = (nombre) => !texto || normalizeName(nombre).includes(texto);
+  const nombreCircuito = (id) => circuits.find((c) => c.id === id)?.name || null;
+  const sinInfo = tournaments.filter((t) => !isInfoOnly(t));
+  const unicos = (lista) => [...new Set(lista.filter(Boolean))].sort((a, b) => a.localeCompare(b, "es"));
+  const categorias = unicos(sinInfo.flatMap((t) => (t.categories || []).map((c) => c.name)));
+  const sedes = unicos(sinInfo.map((t) => t.venue));
+  const circuitosConTorneos = circuits.filter((c) => sinInfo.some((t) => t.circuitId === c.id));
+
+  const torneos = sinInfo
+    .filter((t) => {
+      const est = estadoExplorar(t).clave;
+      if (est === "terminado") { if (!terminados) return false; } // los terminados, solo con el tilde
+      else if (estado && est !== estado) return false;
+      if (tipo && tournamentConfig(t).type !== tipo) return false;
+      if (categoria && !(t.categories || []).some((c) => c.name === categoria)) return false;
+      if (sede && t.venue !== sede) return false;
+      if (circuito && t.circuitId !== circuito) return false;
+      return coincide(t.name) || (t.categories || []).some((c) => coincide(c.name));
+    })
+    .sort((a, b) => {
+      const orden = { en_juego: 0, abierto: 1, proximo: 2, terminado: 3 };
+      const d = orden[estadoExplorar(a).clave] - orden[estadoExplorar(b).clave];
+      if (d) return d;
+      return estadoExplorar(a).clave === "terminado" ? (b.date || "").localeCompare(a.date || "") : (a.date || "").localeCompare(b.date || "");
+    });
+  const items = groupTournamentsByEvent(torneos, events);
+  const selector = (valor, onChange, opciones, etiqueta) => (
+    <select value={valor} onChange={(e) => onChange(e.target.value)} aria-label={etiqueta} className="px-2.5 py-2 rounded-lg border text-sm min-w-0" style={{ backgroundColor: "#0b1c24", color: "#e2e8f0", borderColor: "#1f3a44" }}>
+      {opciones.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+    </select>
+  );
+  const visiblesOrg = organizers.filter((o) => o.role !== "creador" && coincide(o.name));
+  const visiblesCompl = venues.filter((v) => coincide(v.name));
+  const conReserva = (id) => complejos.some((c) => c.id === id && c.reservas_habilitadas && c.modulo_reservas !== false);
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 pb-4" style={F.body}>
+      <p className="text-xs uppercase tracking-[2px] text-slate-400">Explorá Smash Point</p>
+      <h1 className="mt-1 text-3xl sm:text-4xl" style={{ ...F.display, color: BRAND.ink }}>Explorar <span style={{ color: BRAND.lime }}>{PESTANAS_EXPLORAR.find(([k]) => k === pestana)[1].toLowerCase()}</span></h1>
+      <p className="mt-2 text-slate-400">{AYUDA_EXPLORAR[pestana]}</p>
+
+      <div className="mt-4 flex flex-wrap gap-1.5" role="tablist">
+        {PESTANAS_EXPLORAR.map(([k, l]) => (
+          <button key={k} type="button" role="tab" aria-selected={pestana === k} onClick={() => setPestana(k)} className="px-3.5 py-1.5 rounded-full text-sm font-semibold"
+            style={pestana === k ? { backgroundColor: BRAND.lime, color: "#14181f" } : { color: "#cbd5e1", border: "1px solid #1f3a44" }}>{l}</button>
+        ))}
+      </div>
+      <input value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder={pestana === "torneos" ? "Buscá un torneo o una categoría…" : "Buscá por nombre…"} aria-label="Buscar"
+        className="mt-3 w-full px-3 py-2.5 rounded-xl border text-base" style={{ backgroundColor: "#0b1c24", color: "#e2e8f0", borderColor: "#1f3a44" }} />
+
+      {pestana === "torneos" && (
+        <>
+          <div className="mt-2 flex flex-wrap gap-2 items-center">
+            {selector(estado, setEstado, ESTADOS_EXPLORAR, "Estado")}
+            {selector(tipo, setTipo, [["", "Tipo: todos"], ...Object.entries(TOURNAMENT_TYPE_LABEL)], "Tipo")}
+            {categorias.length > 1 && selector(categoria, setCategoria, [["", "Categoría: todas"], ...categorias.map((c) => [c, c])], "Categoría")}
+            {sedes.length > 1 && selector(sede, setSede, [["", "Sede: todas"], ...sedes.map((s) => [s, s])], "Sede")}
+            {circuitosConTorneos.length > 0 && selector(circuito, setCircuito, [["", "Circuito: todos"], ...circuitosConTorneos.map((c) => [c.id, c.name])], "Circuito")}
+            <label className="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" checked={terminados} onChange={(e) => setTerminados(e.target.checked)} /> Incluir terminados</label>
+          </div>
+          <p className="mt-3 text-sm text-slate-400">{torneos.length === 1 ? "1 torneo encontrado" : `${torneos.length} torneos encontrados`}</p>
+          {torneos.length === 0 ? (
+            <p className="mt-4 text-slate-400">{sinInfo.length === 0 ? "Todavía no hay torneos cargados." : "No hay torneos con esos filtros."}</p>
+          ) : (
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {items.map((item) => (item.kind === "event"
+                ? <EventCard key={`ev-${item.event.id}`} event={item.event} tournaments={item.tournaments} compact organizerLabel={organizerLabel?.(item.tournaments[0])} onOpenEvent={onOpenEvent} />
+                : <ExplorarTorneoCard key={item.t.id} t={item.t} circuito={nombreCircuito(item.t.circuitId)} onOpen={onOpen} onRegister={onRegister} />))}
+            </div>
+          )}
+        </>
+      )}
+
+      {pestana === "circuitos" && (
+        <div className="mt-4">
+          <CircuitsPublicView circuits={circuits.filter((c) => coincide(c.name))} tournaments={tournaments} organizers={organizers} />
+        </div>
+      )}
+
+      {pestana === "complejos" && (
+        visiblesCompl.length === 0 ? <p className="mt-4 text-slate-400">No hay complejos con ese nombre.</p> : (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {visiblesCompl.map((v) => (
+              <div key={v.id} className="rounded-2xl px-3 py-3 flex items-center gap-3 min-w-0" style={tarjetaPortada}>
+                <DirectoryAvatar url={v.logoUrl} name={v.name} color={BRAND.cyan} size={44} />
+                <span className="flex-1 min-w-0">
+                  <span className="block font-semibold text-slate-100 truncate">{v.name}</span>
+                  <span className="block text-xs text-slate-400 truncate">{v.address || (conReserva(v.id) ? "Reserva online" : "Consultá por WhatsApp")}</span>
+                </span>
+                {conReserva(v.id)
+                  ? <button type="button" onClick={() => onReservar(v.id)} className="shrink-0 px-3 py-1.5 rounded-lg text-sm font-semibold" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Reservar</button>
+                  : <button type="button" onClick={onVerComplejos} className="shrink-0 text-sm font-semibold" style={{ color: BRAND.cyan }}>Ver ›</button>}
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {pestana === "organizadores" && (
+        visiblesOrg.length === 0 ? <p className="mt-4 text-slate-400">No hay organizadores con ese nombre.</p> : (
+          <div className="mt-4 grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-3">
+            {visiblesOrg.map((o, i) => (
+              <OrganizerCard key={o.id} organizer={o} count={tournaments.filter((t) => t.organizerId === o.id).length}
+                color={(Math.floor(i / 2) + i) % 2 === 0 ? BRAND.lime : BRAND.cyan} onSelect={() => onOpenOrganizer(o.id)} />
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, events = [], onOpen, onGoLogin, onCuenta, complejos = [], jugadorApi }) {
   const { cuentas: conCuentas } = React.useContext(FuncionesContext);
   const [tab, setTab] = useState("torneos"); // torneos | canchas | profes
@@ -7763,16 +7963,9 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
     );
   } else if (showAll) {
     body = (
-      <>
-        <header className="px-4 sm:px-6 pt-2 pb-6 border-b border-teal-900 max-w-5xl mx-auto">
-          {backLink}
-          <h1 className="text-xl mt-5" style={F.display}>TODOS LOS TORNEOS</h1>
-          <TournamentFilterChips tournaments={tournaments} filter={filter} onFilter={setFilter} />
-        </header>
-        <div className="max-w-5xl mx-auto">
-          <TournamentsGrid tournaments={tournaments} events={events} onOpenEvent={openEvent} filter={filter} emptyText="Todavía no hay torneos cargados." organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} />
-        </div>
-      </>
+      <ExplorarPublico tournaments={tournaments} events={events} circuits={circuits} organizers={organizers} venues={venues} complejos={complejos}
+        organizerLabel={organizerLabel} onOpen={onOpen} onRegister={onRegister} onOpenEvent={openEvent} onOpenOrganizer={(id) => { setShowAll(false); openOrganizer(id); }}
+        onReservar={(id) => { goTab("canchas"); setReservarId(id); setReservarInicial(null); }} onVerComplejos={() => goTab("canchas")} />
     );
   } else if (selectedOrgId) {
     const selectedOrg = organizers.find((o) => o.id === selectedOrgId);
