@@ -36,9 +36,10 @@ begin
     insert into resultados (caso, ok) values ('Si los pagos no suman el total, no cobra', false);
   exception when others then insert into resultados (caso, ok, detalle) values ('Si los pagos no suman el total, no cobra', sqlerrm = 'monto_no_coincide', sqlerrm); end;
   begin
-    perform cobrar_turno_mostrador(r, '[{"medio": "efectivo", "monto": 5000}, {"medio": "mercado_pago", "monto": 8000}]');
-    insert into resultados (caso, ok) values ('La cancha no se puede partir entre dos medios', false);
-  exception when others then insert into resultados (caso, ok, detalle) values ('La cancha no se puede partir entre dos medios', sqlerrm = 'dividir_cancha', sqlerrm); end;
+    -- Desde 20261054 la cancha va en hasta dos medios; en tres no
+    perform cobrar_turno_mostrador(r, '[{"medio": "efectivo", "monto": 4000}, {"medio": "mercado_pago", "monto": 4000}, {"medio": "transferencia", "monto": 5000}]');
+    insert into resultados (caso, ok) values ('La cancha no se puede partir en tres medios', false);
+  exception when others then insert into resultados (caso, ok, detalle) values ('La cancha no se puede partir en tres medios', sqlerrm = 'dividir_cancha', sqlerrm); end;
 
   x := cobrar_turno_mostrador(r, '[{"medio": "mercado_pago", "monto": 10000}, {"medio": "efectivo", "monto": 3000}]');
   insert into resultados (caso, ok, detalle) values ('Turno + consumos: cancha con MP y consumos en efectivo',

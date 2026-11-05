@@ -70,3 +70,15 @@ test("la llave no usa canchas de una sede cerrada", () => {
   assert.equal(all.filter(Boolean).length, 7);
   all.forEach((s) => assert.ok(courtIsOpen(tournament, s.court, s.date, min(s.time)), `${s.date} ${s.time} cancha ${s.court}`));
 });
+
+test("un día que termina pasada la medianoche: la sede abre hasta la 1 y los turnos de las 23 y las 00 existen", () => {
+  const t = {
+    matchDurationMinutes: 60, courtsCount: 2, playDates: [{ date: VIE, from: "18:00", to: "01:00" }],
+    venues: [{ id: "b", name: "BLACK", courts: 1 }, { id: "u", name: "MUNDO", courts: 1, days: [{ date: VIE, from: "20:00", to: "00:00" }] }],
+  };
+  assert.equal(courtIsOpen(t, 2, VIE, min("23:00")), true, "MUNDO hasta medianoche: el de las 23 entra");
+  assert.equal(courtIsOpen(t, 2, VIE, min("24:00")), false, "a las 00 MUNDO ya cerró");
+  const closed = closedCourtSlots(t);
+  assert.ok(closed.has(`${VIE}|24:00|2`) && !closed.has(`${VIE}|24:00|1`), "el turno de las 00 es del viernes");
+  assert.ok(!closed.has(`${VIE}|23:00|2`));
+});

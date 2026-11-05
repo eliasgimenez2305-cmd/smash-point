@@ -10,14 +10,13 @@
 // Igual que DEFAULT_MATCH_DURATION de la app
 const DEFAULT_DURATION = 60;
 
-const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
-const toTime = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+import { toMin, toTime, dayEndMin } from "./horas.js";
 const durationOf = (t) => t?.matchDurationMinutes || DEFAULT_DURATION;
 
 /* Horarios de arranque de un día de juego */
 function dayTimes(day, duration) {
   const times = [];
-  for (let m = toMin(day.from); m + duration <= toMin(day.to); m += duration) times.push(toTime(m));
+  for (let m = toMin(day.from); m + duration <= dayEndMin(day); m += duration) times.push(toTime(m));
   return times;
 }
 
@@ -37,7 +36,7 @@ export function courtIsOpen(t, court, date, minutes, duration = durationOf(t)) {
   const venue = (t?.venues || [])[courtVenueIndex(t, court)];
   if (!venue?.days) return true;
   const d = venue.days.find((x) => x.date === date);
-  return !!d && minutes >= toMin(d.from) && minutes + duration <= toMin(d.to);
+  return !!d && minutes >= toMin(d.from) && minutes + duration <= dayEndMin(d);
 }
 
 /* Turnos de la grilla ("fecha|hora|cancha") en que la cancha no se usa porque su sede no juega ese

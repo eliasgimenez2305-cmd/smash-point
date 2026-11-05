@@ -3,7 +3,7 @@
    games a favor, games en contra, resultado entre sí y sorteo (ver standings.js). */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete, isByeMatch, isSuperTiebreakSet } from "./standings.js";
+import { computeStandings, DEFAULT_MATCH_FORMAT, walkBracket, matchIsPlayed, matchWinnerId, matchHasScore, setIsComplete, isByeMatch, isSuperTiebreakSet, effectiveSets, bracketFormat, formatForMatch } from "./standings.js";
 
 const CLASICO = DEFAULT_MATCH_FORMAT; // al mejor de 3, sets a 6, super tie-break en el tercero
 const SUPER8_4 = { type: "super8", setsToPlay: 1, gamesPerSet: 4, setTiebreak: true, finalSuperTiebreak: false };
@@ -448,4 +448,64 @@ test("2 sets directos con el tilde de super tie-break prendido: el 2.º set es u
   assert.equal(isSuperTiebreakSet(1, f), false);
   assert.equal(setIsComplete({ a: 6, b: 3 }, 1, f), true);
   assert.equal(isSuperTiebreakSet(2, { ...f, setsToPlay: 3 }), true);
+});
+
+test("super tie-break a 11: 11-9 cierra, 10-8 todavía no", () => {
+  const f = { ...CLASICO, superTiebreakPoints: 11 };
+  assert.equal(setIsComplete({ a: 11, b: 9 }, 2, f), true);
+  assert.equal(setIsComplete({ a: 10, b: 8 }, 2, f), false, "a 11 no alcanza con 10");
+  assert.equal(setIsComplete({ a: 11, b: 10 }, 2, f), false, "11-10 sigue: hace falta diferencia de 2");
+  assert.equal(setIsComplete({ a: 13, b: 11 }, 2, f), true);
+  assert.equal(setIsComplete({ a: 10, b: 8 }, 2, CLASICO), true, "a 10 (lo de siempre) no cambia");
+  assert.equal(matchWinnerId(m("A", "B", [6, 4], [3, 6], [9, 11]), f), "B");
+});
+
+test("super tie-break a 11: con retiro se completa a 11", () => {
+  const f = { ...CLASICO, superTiebreakPoints: 11 };
+  const sets = effectiveSets({ pairA: "A", pairB: "B", retired: "B", sets: [{ a: 6, b: 4 }, { a: 4, b: 6 }, { a: 5, b: 7 }] }, f);
+  assert.deepEqual(sets[2], { a: 11, b: 7 });
+});
+
+test("llave con formato propio: zonas con super tie-break, llave al mejor de 3 completos", () => {
+  const f = { ...CLASICO, bracket: { ...CLASICO, finalSuperTiebreak: false } };
+  assert.equal(bracketFormat(f).finalSuperTiebreak, false);
+  assert.equal(bracketFormat(bracketFormat(f)), bracketFormat(f), "aplicarlo dos veces da lo mismo");
+  assert.equal(bracketFormat(CLASICO), CLASICO, "sin formato propio, la llave usa el de las zonas");
+  // En la zona el tercer set es super tie-break: 10-8 cierra
+  assert.equal(matchWinnerId(m("A", "B", [6, 4], [3, 6], [10, 8]), f), "A");
+  // En la llave se juega el set completo: 7-5 cierra y 10-8 no es un set posible
+  const { winners } = walkBracket([[bm("A", "B", [6, 4], [3, 6], [7, 5]), bm("C", "D", [6, 4], [3, 6], [10, 8])], [empty()]], f);
+  assert.deepEqual(winners[0], ["A", null]);
+  // En la lista de horarios el partido dice de dónde es
+  const deLlave = { ...m("A", "B", [6, 4], [3, 6], [7, 5]), location: { type: "bracket", roundIndex: 0 } };
+  const deZona = { ...m("A", "B", [6, 4], [3, 6], [7, 5]), location: { type: "group", groupId: "g1" } };
+  assert.equal(matchIsPlayed(deLlave, f), true);
+  assert.equal(matchIsPlayed(deZona, f), false, "en la zona 7-5 no es un super tie-break terminado");
+  assert.equal(formatForMatch(f, deZona), f);
+});
+
+test("formato propio solo para la final: cuartos y semis igual que las zonas", () => {
+  const f = { ...CLASICO, bracket: { ...CLASICO, finalSuperTiebreak: false, lastRounds: 1 } };
+  assert.equal(bracketFormat(f, 0, 3), f, "cuartos: como las zonas");
+  assert.equal(bracketFormat(f, 1, 3), f, "semis: como las zonas");
+  assert.equal(bracketFormat(f, 2, 3), f.bracket, "final: su formato");
+  assert.equal(bracketFormat(bracketFormat(f, 1, 3), 1, 3), f, "aplicarlo dos veces con la misma ronda da lo mismo");
+  // Cuartos con super tie-break (10-8 cierra) y final con el tercer set completo (7-5 cierra)
+  const { winners } = walkBracket([
+    [bm("A", "B", [6, 4], [3, 6], [10, 8]), bm("C", "D", [6, 1], [6, 1]), bm("E", "F", [6, 1], [6, 1]), bm("G", "H", [6, 1], [6, 1])],
+    [bm("A", "C", [6, 1], [6, 1]), bm("E", "G", [6, 1], [6, 1])],
+    [bm("A", "E", [6, 4], [3, 6], [7, 5])],
+  ], f);
+  assert.deepEqual(winners.map((r) => r.join(",")), ["A,C,E,G", "A,E", "A"]);
+  const finalLista = { ...m("A", "E", [6, 4], [3, 6], [10, 8]), location: { type: "bracket", roundIndex: 2, rounds: 3 } };
+  const semiLista = { ...m("A", "C", [6, 4], [3, 6], [10, 8]), location: { type: "bracket", roundIndex: 1, rounds: 3 } };
+  assert.equal(matchIsPlayed(finalLista, f), false, "en la final 10-8 no es un set completo");
+  assert.equal(matchIsPlayed(semiLista, f), true);
+});
+
+test("formato propio para semis y final", () => {
+  const f = { ...CLASICO, bracket: { ...CLASICO, finalSuperTiebreak: false, lastRounds: 2 } };
+  assert.equal(bracketFormat(f, 0, 3), f);
+  assert.equal(bracketFormat(f, 1, 3), f.bracket);
+  assert.equal(bracketFormat(f, 0, 2), f.bracket, "en una llave de 2 rondas, la primera ya es semi");
 });

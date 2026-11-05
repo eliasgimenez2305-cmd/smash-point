@@ -4,6 +4,33 @@
 
 export const DEFAULT_MATCH_FORMAT = { setsToPlay: 3, gamesPerSet: 6, setTiebreak: true, finalSuperTiebreak: true };
 
+/* Formato de un partido de la llave, en la ronda roundIndex de una llave de totalRounds rondas. El
+   del torneo puede traer uno propio para la llave en format.bracket (por ejemplo zonas con super
+   tie-break y llaves al mejor de 3 sets completos), para toda la llave o solo para las últimas
+   rondas (format.bracket.lastRounds: 2 = semis y final, 1 = solo la final); las demás rondas, y
+   toda la llave si no hay formato propio, se juegan igual que las zonas. Se puede aplicar dos
+   veces con la misma ronda: el de la llave no trae otro y el de las zonas da lo mismo. */
+export function bracketFormat(format, roundIndex, totalRounds) {
+  const f = format || DEFAULT_MATCH_FORMAT;
+  const b = f.bracket;
+  if (!b) return f;
+  if (!b.lastRounds || roundIndex == null || !totalRounds) return b;
+  return totalRounds - roundIndex <= b.lastRounds ? b : f;
+}
+
+/* Formato de un partido: los de la lista de horarios llevan location ("group", o "bracket" con su
+   ronda y cuántas tiene la llave) y con eso se sabe cuál le toca; los demás (los de los grupos, o
+   los de la llave cuando ya se les pasa el formato de su ronda) usan el que reciben. */
+export function formatForMatch(format, match) {
+  const loc = match && match.location;
+  return loc && loc.type === "bracket" ? bracketFormat(format, loc.roundIndex, loc.rounds) : format || DEFAULT_MATCH_FORMAT;
+}
+
+/* Puntos del super tie-break: a 10 (lo común) o a 11, como se juega en algunas zonas */
+export function superTiebreakPoints(format) {
+  return (format || DEFAULT_MATCH_FORMAT).superTiebreakPoints === 11 ? 11 : 10;
+}
+
 /* Cuenta sets ganados por cada lado a partir de los games/puntos cargados set por set, tal como
    están (para mostrar). Para saber si el partido terminó y quién ganó, ver matchIsPlayed y
    matchWinnerId, que solo cuentan sets terminados. */
@@ -30,7 +57,8 @@ export function isSuperTiebreakSet(i, format) {
 }
 
 /* ¿El set cargado es un resultado final posible? Un set en juego (3-2) o mal tipeado (7-3) no:
-   - Super tie-break: 10 con 8 o menos del otro lado, o más de 10 con dos de diferencia.
+   - Super tie-break: 10 con 8 o menos del otro lado, o más de 10 con dos de diferencia (a 11:
+     11 con 9 o menos, o más de 11 con dos de diferencia).
    - Set único (Súper 8, Americano): llegar a los games del set (en el empate se juega tie break).
    - Set común con tie break: 6-4 o menos, 7-5 o 7-6 (con sets a 6).
    - Set común sin tie break: llegar a los games con dos de diferencia (8-6, 9-7...). */
@@ -39,7 +67,10 @@ export function setIsComplete(set, i, format) {
   if (!set || set.a == null || set.b == null || set.a === set.b) return false;
   const hi = Math.max(set.a, set.b), lo = Math.min(set.a, set.b);
   const g = f.gamesPerSet || 6;
-  if (isSuperTiebreakSet(i, f)) return (hi === 10 && lo <= 8) || (hi > 10 && hi - lo === 2);
+  if (isSuperTiebreakSet(i, f)) {
+    const p = superTiebreakPoints(f);
+    return (hi === p && lo <= p - 2) || (hi > p && hi - lo === 2);
+  }
   if (f.setsToPlay === 1) return hi === g && lo <= g - 1;
   if (f.setTiebreak) return (hi === g && lo <= g - 2) || (hi === g + 1 && (lo === g - 1 || lo === g));
   return (hi === g && lo <= g - 2) || (hi > g && hi - lo === 2);
@@ -49,7 +80,7 @@ export function setIsComplete(set, i, format) {
    se cargue después no cuenta). decided: alguien ganó; complete: no queda nada por jugar (ganó
    alguien o se jugaron todos los sets, por ejemplo un 1-1 en "2 sets directos"). */
 function finishedSets(match, format) {
-  const f = format || DEFAULT_MATCH_FORMAT;
+  const f = formatForMatch(format, match);
   const need = setsNeeded(f);
   const total = f.setsToPlay || 3;
   let a = 0, b = 0, played = 0;
@@ -68,6 +99,7 @@ function finishedSets(match, format) {
    completados (ver effectiveSets); si no, los que definieron el partido, sin un set cargado de más
    después. Con el partido a medias devuelve lo cargado, tal cual. */
 export function countedSets(match, format) {
+  format = formatForMatch(format, match);
   if (match.walkover || match.retired) return effectiveSets(match, format);
   const fin = finishedSets(match, format);
   return fin.complete ? (match.sets || []).slice(0, fin.played) : match.sets || [];
@@ -128,7 +160,7 @@ export function walkBracket(rounds, format) {
     byes[r] = next[r].map((m, i) => ({ pairA: slotDead(m, i, "pairA"), pairB: slotDead(m, i, "pairB") }));
     const dead = byes[r].map((b) => b.pairA && b.pairB);
     winners[r] = next[r].map((m, i) => {
-      if (m.pairA && m.pairB) return matchWinnerId(m, format);
+      if (m.pairA && m.pairB) return matchWinnerId(m, bracketFormat(format, r, next.length));
       const lone = m.pairA || m.pairB;
       if (!lone) return null;
       return slotDead(m, i, m.pairA ? "pairB" : "pairA") ? lone : null;
@@ -151,7 +183,7 @@ export function isByeMatch(byes, r, i) {
    sets a cero (6-0 6-0 con sets de 6 games); en un set único (Americano), un set a cero con los
    games del torneo (7-0 o 9-0). Los sets quedan del lado de cada pareja (a = pairA). */
 export function walkoverSets(match, format) {
-  const f = format || DEFAULT_MATCH_FORMAT;
+  const f = formatForMatch(format, match);
   const games = f.gamesPerSet || 6;
   const count = f.setsToPlay === 1 ? 1 : 2;
   const presentIsA = match.walkover === match.pairB;
@@ -161,10 +193,11 @@ export function walkoverSets(match, format) {
 /* Retiro por lesión (RET): se respeta el marcador hasta donde se jugó y se completa el resto a
    favor del rival. El set cortado lo termina ganando el rival (con 5 o 6 games del que se retira
    queda 7-5 o 7-6; en set único, el rival llega a los games del set; en el super tie-break, a 10
-   o a dos puntos de diferencia) y los sets que faltan se cuentan enteros para el rival (6-0, o
-   10-0 el super tie-break). Los sets quedan del lado de cada pareja (a = pairA). */
+   (u 11) o a dos puntos de diferencia) y los sets que faltan se cuentan enteros para el rival
+   (6-0, o 10-0 / 11-0 el super tie-break). Los sets quedan del lado de cada pareja (a = pairA). */
 export function retiredSets(match, format) {
-  const f = format || DEFAULT_MATCH_FORMAT;
+  const f = formatForMatch(format, match);
+  const stbPoints = superTiebreakPoints(f);
   const games = f.gamesPerSet || 6;
   const total = f.setsToPlay || 3;
   const single = total === 1;
@@ -180,21 +213,21 @@ export function retiredSets(match, format) {
     const isStb = i === stbIndex;
     const started = s && (s.a != null || s.b != null);
     if (!started) {
-      out.push(side(isStb ? 10 : games, 0));
+      out.push(side(isStb ? stbPoints : games, 0));
       rivalSets++;
       continue;
     }
     const r = (rivalIsA ? s.a : s.b) || 0;
     const q = (rivalIsA ? s.b : s.a) || 0;
     const hi = Math.max(r, q), lo = Math.min(r, q);
-    const complete = isStb ? hi >= 10 && hi - lo >= 2
+    const complete = isStb ? hi >= stbPoints && hi - lo >= 2
       : single ? hi === games && lo < games
       : (hi >= games && hi - lo >= 2) || (hi === games + 1 && lo === games);
     if (complete) {
       out.push(side(r, q));
       if (r > q) rivalSets++; else retiredWon++;
     } else {
-      const rivalFinal = isStb ? Math.max(10, q + 2) : single ? games : q >= games - 1 ? games + 1 : games;
+      const rivalFinal = isStb ? Math.max(stbPoints, q + 2) : single ? games : q >= games - 1 ? games + 1 : games;
       out.push(side(rivalFinal, q));
       rivalSets++;
     }
@@ -224,7 +257,7 @@ const gameDiff = (r) => r.gamesF - r.gamesC;
 /* Suma a las filas de cada pareja lo que dejó un partido: sets y games (con el super tie-break
    del set decisivo contando como un set y un game para quien lo ganó) */
 function tallySetsAndGames(match, rowA, rowB, format) {
-  const f = format || DEFAULT_MATCH_FORMAT;
+  const f = formatForMatch(format, match);
   const stbIndex = f.finalSuperTiebreak && f.setsToPlay > 1 ? f.setsToPlay - 1 : -1;
   // Sin W.O. ni retiro, solo los sets que definieron el partido (no un set de más cargado después)
   countedSets(match, f).forEach((s, i) => {

@@ -13,6 +13,7 @@ export const TIPOS_MOVIMIENTO = {
 export const ORIGENES_LIBRO = {
   inscripcion: "una inscripción",
   turno: "un turno",
+  turno2: "un turno (segundo medio)",
   cuenta: "un cobro de cuenta",
   venta: "una venta del mostrador",
   caja_dia: "la caja del día",

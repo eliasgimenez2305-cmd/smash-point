@@ -2,7 +2,7 @@
 
 Aprobado el 23/10/2026. Lienzo: https://claude.ai/artifact/2mThq1rHXifPdAvtsMFaMq
 (pantalla "6 · DISEÑO FINAL (4 + 5)"; copia en `diseno-horarios-en-vivo.dc.html`).
-Se construye después del torneo, en la tanda de publicación.
+Construido el 26/10 en la rama horarios-en-vivo (sin publicar).
 
 ## Arriba de los horarios
 

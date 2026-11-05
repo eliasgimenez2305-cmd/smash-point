@@ -72,3 +72,16 @@ test("un turno de hoy que todavía no empezó cuenta como próximo, no como juga
   assert.equal(cs[0].proximos, 1);
   assert.equal(cs[0].ultimaVisita, hoy);
 });
+
+test("gastado en turnos: cuenta los dos medios y no lo bonificado", () => {
+  const [c] = armarClientes({
+    hoy,
+    reservas: [
+      turno({ nombre: "Ana", fecha: "2026-10-01", precio: 35000, medio_pago: "efectivo", medio_pago2: "mercado_pago", monto_pago2: 15000 }),
+      turno({ nombre: "Ana", fecha: "2026-10-02", precio: 20000, medio_pago: "transferencia", medio_pago2: "bonificado", monto_pago2: 5000 }),
+      turno({ nombre: "Ana", fecha: "2026-10-03", precio: 20000, medio_pago: "bonificado" }),
+    ],
+  });
+  assert.equal(c.turnos, 3);
+  assert.equal(c.gastado, 35000 + 15000);
+});

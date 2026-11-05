@@ -15,8 +15,8 @@
 
    Sin React, para poder probarlo: ver bracketSchedule.test.js. */
 
-const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
-const toTime = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+import { toMin, toTime, dayEndMin } from "./horas.js";
+
 // Minutos absolutos, para comparar horarios de días distintos
 const absOf = (date, minutes) => Date.parse(`${date}T00:00:00Z`) / 60000 + minutes;
 
@@ -45,7 +45,7 @@ export function scheduleKnockouts(opts) {
 
   const slots = days.flatMap((d) => {
     const list = [];
-    for (let t = toMin(d.from); t + duration <= toMin(d.to); t += duration) list.push({ date: d.date, minutes: t, abs: absOf(d.date, t), bracket: !!d.bracket });
+    for (let t = toMin(d.from); t + duration <= dayEndMin(d); t += duration) list.push({ date: d.date, minutes: t, abs: absOf(d.date, t), bracket: !!d.bracket });
     return list;
   });
   const bracketDays = days.filter((d) => d.bracket);
