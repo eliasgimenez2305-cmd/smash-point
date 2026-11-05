@@ -13754,6 +13754,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
   const [resultMatchInfo, setResultMatch] = useState(null);
   // "Reiniciar llave" borra la llave entera, con sus resultados y horarios: siempre se confirma
   const [confirmingBracketReset, setConfirmingBracketReset] = useState(false);
+  const angosta = usePantallaAngosta(); // en el celular, la llave va de a una ronda (LlaveRondas)
   const bracketResultsCount = (category.bracket || []).flat().filter(matchHasScore).length;
   const [swapA, setSwapA] = useState("");
   const [swapB, setSwapB] = useState("");
@@ -14207,11 +14208,17 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
             const origins = bracketOrigins(category, format);
             const total = category.bracket.length;
             const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
+            // En el celular, como en la pública: una ronda por pantalla, abriendo en la que se está jugando
+            const enJuego = walked.rounds.findIndex((r, ri) => r.some((m, mi) => !isByeMatch(walked.byes, ri, mi) && !walked.winners[ri][mi]));
+            const Llave = angosta ? LlaveRondas : BracketGrid;
             return (
               <>
-                <BracketGrid
+                <Llave
                   rounds={walked.rounds}
                   colWidth={250}
+                  inicial={enJuego >= 0 ? enJuego : total}
+                  titulo={(ri) => `${ri === total - 1 ? "🏆 " : ""}${roundStageLabel(total, ri)}`}
+                  colorDe={colorOf}
                   champion={<BracketChampion name={pairsById[walked.winners[total - 1]?.[0]]?.name} />}
                   header={(ri) => (
                     <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
