@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import logoMarkUrl from "./assets/logo-mark.png";
+import portadaUrl from "./assets/portada.jpg";
 import heroPortadaCompu from "./assets/hero/portada-compu.jpg";
 import heroPortadaTablet from "./assets/hero/portada-tablet.jpg";
 import heroOrgCompu from "./assets/hero/organizadores-compu.jpg";
@@ -7710,8 +7711,16 @@ const tarjetaPortada = { backgroundColor: "rgba(11,28,36,0.85)", border: "1px so
    números del momento (partidos jugados, torneos activos y jugadores) */
 function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking }) {
   const stats = useMemo(() => homeStats(tournaments), [tournaments]);
+  // Foto de fondo espejada (el jugador queda a la derecha, detrás de la imagen de la app); se funde
+  // con el fondo por los bordes, y abajo tapa el texto que trae la foto. A la izquierda va oscura
+  // para que el título se lea.
+  const fundido = "linear-gradient(0deg, transparent 0%, #000 38%, #000 88%, transparent 100%)";
   return (
-    <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-center" style={F.body}>
+    <div className="relative overflow-hidden">
+      <img src={portadaUrl} alt="" aria-hidden="true" className="absolute inset-0 w-full h-full object-cover -scale-x-100 object-[40%_20%] opacity-50 lg:opacity-60 pointer-events-none select-none"
+        style={{ WebkitMaskImage: fundido, maskImage: fundido }} />
+      <div className="absolute inset-0 pointer-events-none" style={{ background: "linear-gradient(90deg, rgba(8,18,24,0.9) 0%, rgba(8,18,24,0.7) 38%, rgba(8,18,24,0.15) 70%, rgba(8,18,24,0.35) 100%)" }} />
+    <section className="relative max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-center" style={F.body}>
       <div className="min-w-0">
         <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>Pádel en Entre Ríos, en vivo</span>
         <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
@@ -7732,6 +7741,7 @@ function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking 
         ["parejas", "Jugadores", stats.players.toLocaleString("es-AR")],
       ]} />
     </section>
+    </div>
   );
 }
 
