@@ -3200,6 +3200,110 @@ function BracketGrid({ rounds, header, renderMatch, champion = null, colWidth = 
   );
 }
 
+/* Pantalla angosta (celular): true por debajo de 640 px de ancho, y se actualiza al girar o achicar */
+function usePantallaAngosta() {
+  const consulta = "(max-width: 639px)";
+  const [angosta, setAngosta] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(consulta).matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.(consulta);
+    if (!mq) return;
+    const alCambiar = () => setAngosta(mq.matches);
+    mq.addEventListener?.("change", alCambiar);
+    return () => mq.removeEventListener?.("change", alCambiar);
+  }, []);
+  return angosta;
+}
+
+/* Llave en el celular: una ronda por pantalla, con flechas (y deslizando con el dedo) para pasar a la
+   anterior o la siguiente, puntitos de ronda y, al final, el campeón. Los partidos de a dos van unidos
+   con la línea que sale hacia la ronda siguiente. Abre en la ronda "inicial" (la que se está jugando). */
+function LlaveRondas({ rounds, titulo, colorDe, renderMatch, champion = null, inicial = 0 }) {
+  const pantallas = rounds.length + (champion ? 1 : 0);
+  const [i, setI] = useState(() => Math.min(Math.max(inicial, 0), pantallas - 1));
+  const barraRef = useRef(null);
+  const toque = useRef(null);
+  const ir = (n) => {
+    const k = Math.min(Math.max(n, 0), pantallas - 1);
+    if (k === i) return;
+    setI(k);
+    // Si la barra quedó arriba, fuera de la pantalla, se vuelve a ella para ver la ronda desde el principio
+    const top = barraRef.current?.getBoundingClientRect().top;
+    if (top != null && top < 0) barraRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const esCampeon = champion && i === rounds.length;
+  const color = esCampeon ? BRAND.lime : colorDe(i);
+  const flecha = (dir) => {
+    const apagada = dir < 0 ? i === 0 : i === pantallas - 1;
+    return (
+      <button type="button" onClick={() => ir(i + dir)} disabled={apagada} aria-label={dir < 0 ? "Ronda anterior" : "Ronda siguiente"}
+        className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center text-xl leading-none border-2 transition"
+        style={apagada ? { borderColor: "#1f3a44", color: "#335b66" } : { borderColor: BRAND.lime, color: BRAND.lime }}>
+        {dir < 0 ? "‹" : "›"}
+      </button>
+    );
+  };
+  const linea = "rgba(148,163,184,0.55)";
+  return (
+    <div style={F.body}>
+      <div ref={barraRef} className="flex items-center gap-2 scroll-mt-24">
+        {flecha(-1)}
+        <div className="flex-1 min-w-0 text-center rounded-full py-2 text-xs font-bold uppercase tracking-wide truncate" style={{ backgroundColor: color, color: "#14181f" }}>
+          {esCampeon ? "🏆 Campeón" : titulo(i)}
+        </div>
+        {flecha(1)}
+      </div>
+      <div className="flex justify-center gap-1.5 mt-2 mb-3" aria-hidden="true">
+        {Array.from({ length: pantallas }, (_, k) => (
+          <span key={k} className="h-1.5 rounded-full transition-all" style={{ width: k === i ? 18 : 6, backgroundColor: k === i ? BRAND.lime : "#1f3a44" }} />
+        ))}
+      </div>
+      <div className="overflow-hidden"
+        onTouchStart={(e) => { toque.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }}
+        onTouchEnd={(e) => {
+          const t = toque.current; toque.current = null;
+          if (!t) return;
+          const dx = e.changedTouches[0].clientX - t.x, dy = e.changedTouches[0].clientY - t.y;
+          if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) ir(i + (dx < 0 ? 1 : -1));
+        }}>
+        <div className="flex items-start transition-transform duration-300 ease-out" style={{ transform: `translateX(-${i * 100}%)` }}>
+          {rounds.map((round, ri) => {
+            const conSalida = ri < rounds.length - 1;
+            const pares = [];
+            for (let k = 0; k < round.length; k += 2) pares.push(round.slice(k, k + 2).map((m, j) => [m, k + j]));
+            return (
+              <div key={ri} className={`w-full shrink-0 pl-3 pr-4 ${ri === i ? "" : "h-0 overflow-hidden"}`} aria-hidden={ri !== i}>
+                <div className="space-y-4">
+                  {pares.map((par) => (
+                    <div key={par[0][1]} className="relative space-y-2">
+                      {par.map(([m, mi]) => (
+                        <div key={m.id} className="relative">
+                          {/* La línea que llega de la ronda anterior */}
+                          {ri > 0 && <span aria-hidden="true" className="absolute top-1/2 -left-3 w-3" style={{ borderTop: `1.5px solid ${linea}` }} />}
+                          {renderMatch(m, ri, mi)}
+                        </div>
+                      ))}
+                      {/* La que une a los dos y sale hacia la ronda siguiente */}
+                      {conSalida && par.length === 2 && (
+                        <>
+                          <span aria-hidden="true" className="absolute -right-3 w-3" style={{ top: "25%", bottom: "25%", borderTop: `1.5px solid ${linea}`, borderRight: `1.5px solid ${linea}`, borderBottom: `1.5px solid ${linea}` }} />
+                          <span aria-hidden="true" className="absolute top-1/2 -right-4 w-1" style={{ borderTop: `1.5px solid ${linea}` }} />
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {champion && (
+            <div className={`w-full shrink-0 px-3 ${i === rounds.length ? "" : "h-0 overflow-hidden"}`} aria-hidden={i !== rounds.length}>{champion}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* Recuadro del campeón al final de la llave (el ganador de la final, o "A definir") */
 function BracketChampion({ name }) {
   return (
@@ -8644,6 +8748,7 @@ function CategoryBracketPublicView({ category, format }) {
   const walked = useMemo(() => (category.bracket ? walkBracket(category.bracket, format) : null), [category.bracket, format]);
   const nums = useMemo(() => categoryMatchNumbers(category), [category]);
   const origins = useMemo(() => bracketOrigins(category, format), [category, format]);
+  const angosta = usePantallaAngosta();
 
   return (
     <section className="mt-6">
@@ -8651,10 +8756,18 @@ function CategoryBracketPublicView({ category, format }) {
       {category.bracket && category.bracketPublished && (() => {
         const total = category.bracket.length;
         const colorOf = (ri) => GROUP_COLORS[(total - 1 - ri) % GROUP_COLORS.length];
+        const campeon = <BracketChampion name={pairsById[walked.winners[total - 1]?.[0]]?.name} />;
+        // En el celular: una ronda por pantalla, abriendo en la que se está jugando (la primera con un
+        // partido sin ganador); si ya terminó, en el campeón
+        const enJuego = walked.rounds.findIndex((r, ri) => r.some((m, mi) => !isByeMatch(walked.byes, ri, mi) && !walked.winners[ri][mi]));
+        const Llave = angosta ? LlaveRondas : BracketGrid;
         return (
-          <BracketGrid
+          <Llave
             rounds={walked.rounds}
-            champion={<BracketChampion name={pairsById[walked.winners[total - 1]?.[0]]?.name} />}
+            champion={campeon}
+            inicial={enJuego >= 0 ? enJuego : total}
+            titulo={(ri) => `${ri === total - 1 ? "🏆 " : ""}${roundStageLabel(total, ri)}`}
+            colorDe={colorOf}
             header={(ri) => (
               <span className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide" style={{ backgroundColor: colorOf(ri), color: "#14181f" }}>
                 {ri === total - 1 ? "🏆 " : ""}{roundStageLabel(total, ri)}
