@@ -7707,19 +7707,27 @@ function EventRegistrationPicker({ tournaments, onPick, onClose }) {
 // Tarjeta de la portada: fondo oscuro, borde turquesa suave
 const tarjetaPortada = { backgroundColor: "rgba(11,28,36,0.85)", border: "1px solid #1f3a44" };
 
+/* Foto de fondo de las presentaciones (portada y páginas Para organizadores / Para complejos):
+   espejada (el jugador queda a la derecha, detrás de la imagen de la app), fundida con el fondo
+   arriba y abajo (abajo tapa el texto que trae la foto) y oscura del lado del título. */
+const FUNDIDO_FOTO = "linear-gradient(0deg, transparent 0%, #000 38%, #000 88%, transparent 100%)";
+function FondoFoto({ children }) {
+  return (
+    <div className="relative overflow-hidden">
+      <img src={portadaUrl} alt="" aria-hidden="true" className="absolute inset-0 w-full h-full object-cover -scale-x-100 object-[40%_20%] opacity-50 lg:opacity-60 pointer-events-none select-none"
+        style={{ WebkitMaskImage: FUNDIDO_FOTO, maskImage: FUNDIDO_FOTO }} />
+      <div className="absolute inset-0 pointer-events-none" style={{ background: "linear-gradient(90deg, rgba(8,18,24,0.9) 0%, rgba(8,18,24,0.7) 38%, rgba(8,18,24,0.15) 70%, rgba(8,18,24,0.35) 100%)" }} />
+      {children}
+    </div>
+  );
+}
+
 /* Presentación: título, botones, el ranking del circuito si hay alguno y la imagen de la app con los
    números del momento (partidos jugados, torneos activos y jugadores) */
 function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking }) {
   const stats = useMemo(() => homeStats(tournaments), [tournaments]);
-  // Foto de fondo espejada (el jugador queda a la derecha, detrás de la imagen de la app); se funde
-  // con el fondo por los bordes, y abajo tapa el texto que trae la foto. A la izquierda va oscura
-  // para que el título se lea.
-  const fundido = "linear-gradient(0deg, transparent 0%, #000 38%, #000 88%, transparent 100%)";
   return (
-    <div className="relative overflow-hidden">
-      <img src={portadaUrl} alt="" aria-hidden="true" className="absolute inset-0 w-full h-full object-cover -scale-x-100 object-[40%_20%] opacity-50 lg:opacity-60 pointer-events-none select-none"
-        style={{ WebkitMaskImage: fundido, maskImage: fundido }} />
-      <div className="absolute inset-0 pointer-events-none" style={{ background: "linear-gradient(90deg, rgba(8,18,24,0.9) 0%, rgba(8,18,24,0.7) 38%, rgba(8,18,24,0.15) 70%, rgba(8,18,24,0.35) 100%)" }} />
+    <FondoFoto>
     <section className="relative max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-8 grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-center" style={F.body}>
       <div className="min-w-0">
         <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>Pádel en Entre Ríos, en vivo</span>
@@ -7741,7 +7749,7 @@ function PortadaHero({ tournaments, venues, onVerTorneos, onReservar, onRanking 
         ["parejas", "Jugadores", stats.players.toLocaleString("es-AR")],
       ]} />
     </section>
-    </div>
+    </FondoFoto>
   );
 }
 
@@ -8010,10 +8018,11 @@ function LandingPublica({ tipo }) {
   const [abierta, setAbierta] = useState(null);
   const contacto = (asunto) => `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(asunto)}`;
   const etiqueta = (texto) => <p className="text-xs uppercase tracking-[2px] text-slate-400 mb-3">{texto}</p>;
-  const seccion = "max-w-5xl mx-auto px-4 sm:px-6 pt-10";
+  const seccion = "max-w-5xl mx-auto px-4 sm:px-6 pt-8";
   return (
     <div style={F.body}>
-      <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 grid gap-4 lg:grid-cols-[1.05fr_1fr] lg:items-center">
+      <FondoFoto>
+      <section className="relative max-w-5xl mx-auto px-4 sm:px-6 pt-8 sm:pt-12 pb-6 grid gap-4 lg:grid-cols-[1.05fr_1fr] lg:items-center">
         <div className="min-w-0">
         <span className="inline-block px-3 py-1 rounded-full text-xs" style={{ border: `1px solid ${BRAND.lime}66`, color: BRAND.lime }}>{d.etiqueta}</span>
         <h1 className="mt-4 text-3xl sm:text-5xl leading-[1.05]" style={{ ...F.display, color: BRAND.ink }}>
@@ -8027,6 +8036,7 @@ function LandingPublica({ tipo }) {
         </div>
         <HeroDispositivos {...d.imagen} />
       </section>
+      </FondoFoto>
 
       <section className={seccion}>
         {etiqueta("¿Te pasa esto?")}
