@@ -509,3 +509,17 @@ test("formato propio para semis y final", () => {
   assert.equal(bracketFormat(f, 1, 3), f.bracket);
   assert.equal(bracketFormat(f, 0, 2), f.bracket, "en una llave de 2 rondas, la primera ya es semi");
 });
+
+test("set único a 4: tie break / gana el primero (4-3) y seguir hasta 5 (5-3, 5-4)", async () => {
+  const { setIsComplete } = await import("./standings.js");
+  const tb = { setsToPlay: 1, gamesPerSet: 4 };
+  assert.equal(setIsComplete({ a: 4, b: 3 }, 0, tb), true);
+  assert.equal(setIsComplete({ a: 4, b: 2 }, 0, tb), true);
+  assert.equal(setIsComplete({ a: 5, b: 3 }, 0, tb), false);
+  const seguir = { setsToPlay: 1, gamesPerSet: 4, alEmpate: "seguir" };
+  assert.equal(setIsComplete({ a: 4, b: 3 }, 0, seguir), false);
+  assert.equal(setIsComplete({ a: 5, b: 3 }, 0, seguir), true);
+  assert.equal(setIsComplete({ a: 4, b: 5 }, 0, seguir), true);
+  assert.equal(setIsComplete({ a: 4, b: 2 }, 0, seguir), true);
+  assert.equal(setIsComplete({ a: 5, b: 2 }, 0, seguir), false);
+});

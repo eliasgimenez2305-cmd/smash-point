@@ -17,6 +17,7 @@ import { scheduleKnockout, scheduleKnockouts } from "./bracketSchedule.js";
 import { mergeTournament, isStaleRemote, matchChanges, applyMatchChanges } from "./merge.js";
 import { courtVenueIndex, courtIsOpen, closedCourtSlots, courtsOfDay, matchesAtClosedCourts } from "./venueDays.js";
 import { duplicarTorneo, nombreSiguiente } from "./duplicar.js";
+import { claveEquipo, leerFixture, revisarFixture, todosContraTodos, armarSemis, cruceFinal } from "./liga.js";
 import { armarClientes, noVienenHace, claveNombre, yaEmpezo } from "./clientes.js";
 import { estadoCliente, ESTADOS_PLAN, incluyePlan, motivoPublicidadOculta } from "./planes.js";
 import { separarNombre, nombreJugador, nombrePareja, jugadoresConPerfil, perfilesEnTorneo, rankingPorJugador } from "./jugadores.js";
@@ -572,7 +573,7 @@ function formatArPhone(normalized) {
 
 /* Cupo de una categoría (el Súper 8 es siempre de 8); null = sin límite */
 function categoryCupo(category) {
-  if (isSuper8(category)) return SUPER8_SIZE;
+  if (isSuper8(category) && !esLiga(category)) return SUPER8_SIZE;
   return Number.isInteger(category.cupo) && category.cupo > 0 ? category.cupo : null;
 }
 
@@ -688,12 +689,18 @@ const STATUS = {
    En los formatos de set único, si llegan a N-1 iguales se define con un tie break a 7 puntos con
    diferencia de 2 y el set queda N a N-1 (7-6 jugando a 7, 9-8 jugando a 9). */
 const TOURNAMENT_TYPE_LABEL = { clasico: "Clásico", super8: "Súper 8", americano: "Americano" };
-const SUPER8_MODE_LABEL = { individual: "Individual", parejas: "Por Parejas" };
+const SUPER8_MODE_LABEL = { individual: "Individual", parejas: "Por Parejas", liga: "Liga + semis" };
+/* Qué pasa si el set único queda empatado un game antes del final (en un set a 4: 3-3) */
+const AL_EMPATE = {
+  tiebreak: (g) => [`Tie break`, `En ${g - 1}-${g - 1} se juega tie break a 7 y queda ${g}-${g - 1}.`],
+  seguir: (g) => [`Se sigue hasta ${g + 1}`, `En ${g - 1}-${g - 1} se sigue: puede terminar ${g + 1}-${g - 1} o ${g + 1}-${g}.`],
+  primero: (g) => [`Gana el primero a ${g}`, `En ${g - 1}-${g - 1} se juega un game más y queda ${g}-${g - 1}.`],
+};
 const SUPER8_GAMES_OPTIONS = [4, 5, 6, 7, 8, 9];
 const AMERICANO_GAMES_OPTIONS = [7, 9];
 
-function singleSetMatchFormat(type, games) {
-  return { type, setsToPlay: 1, gamesPerSet: games, setTiebreak: true, finalSuperTiebreak: false };
+function singleSetMatchFormat(type, games, alEmpate = "tiebreak") {
+  return { type, setsToPlay: 1, gamesPerSet: games, setTiebreak: true, finalSuperTiebreak: false, alEmpate: AL_EMPATE[alEmpate] ? alEmpate : "tiebreak" };
 }
 
 function isSingleSetFormat(format) {
@@ -713,7 +720,7 @@ function tournamentUsesSchedule(t) {
 /* Configuración elegible del tipo de torneo: { type, super8Mode, games } */
 function tournamentConfig(t) {
   const type = tournamentType(t);
-  return { type, super8Mode: type === "super8" ? t.super8Mode : null, games: isSingleSetFormat(t.matchFormat) ? t.matchFormat.gamesPerSet : null };
+  return { type, super8Mode: type === "super8" ? t.super8Mode : null, games: isSingleSetFormat(t.matchFormat) ? t.matchFormat.gamesPerSet : null, alEmpate: isSingleSetFormat(t.matchFormat) ? t.matchFormat.alEmpate || "tiebreak" : null };
 }
 
 function tournamentConfigIsComplete(config) {
@@ -737,7 +744,7 @@ function newCategory(name, categoryFormat) {
 function withTournamentConfig(t, config) {
   const matchFormat = config.type === "clasico"
     ? (isSingleSetFormat(t.matchFormat) ? { ...DEFAULT_MATCH_FORMAT } : t.matchFormat || { ...DEFAULT_MATCH_FORMAT })
-    : singleSetMatchFormat(config.type, config.games);
+    : singleSetMatchFormat(config.type, config.games, config.alEmpate);
   const prev = tournamentConfig(t);
   const categoriesChange = prev.type !== config.type || prev.super8Mode !== config.super8Mode;
   const categoryFormat = categoryFormatForConfig(config);
@@ -794,6 +801,10 @@ function tournamentFinished(t) {
   const cats = t.categories || [];
   if (t._light || cats.length === 0) return false;
   return cats.every((c) => {
+    if (esLiga(c)) {
+      const fin = c.playoff?.final;
+      return !!fin && matchIsPlayed(fin, t.matchFormat);
+    }
     if (isSuper8(c)) {
       const ms = (c.groups || []).flatMap((g) => g.matches || []);
       return ms.length > 0 && ms.every((m) => matchIsPlayed(m, t.matchFormat));
@@ -861,8 +872,9 @@ function instagramLink(input) {
 
 /* Un set único a N games está completo y bien cargado si el ganador llegó a N y el otro quedó
    en N-1 o menos (N a N-1 solo se da ganando el tie break en N-1 iguales). */
-function singleSetIsValid(a, b, games) {
+function singleSetIsValid(a, b, games, alEmpate) {
   const hi = Math.max(a, b), lo = Math.min(a, b);
+  if (alEmpate === "seguir") return (hi === games && lo <= games - 2) || (hi === games + 1 && lo >= games - 1);
   return hi === games && lo <= games - 1;
 }
 const WEEKDAY_LABEL = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
@@ -1033,17 +1045,22 @@ const CATEGORY_FORMAT_LABEL = {
   zonas: "Zonas + llave",
   super8_individual: "Súper 8 Individual",
   super8_parejas: "Súper 8 por Parejas Fijas",
+  super8_liga: "Liga por parejas + semis y final",
 };
 /* Duración predeterminada de un partido de torneo clásico, en minutos (arma la grilla de horarios) */
 const DEFAULT_MATCH_DURATION = 60;
 const SUPER8_SIZE = 8;
 /* Canchas del Súper 8: con 8 jugadores entran hasta 2 partidos a la vez y con 8 parejas hasta 4.
    Al crearlo se propone 1 cancha para el Individual y 2 para el de Parejas. */
-const super8MaxCourts = (mode) => (mode === "individual" ? 2 : 4);
-const super8DefaultCourts = (mode) => (mode === "individual" ? 1 : 2);
+const super8MaxCourts = (mode) => (mode === "individual" ? 2 : mode === "liga" ? 8 : 4);
+const super8DefaultCourts = (mode) => (mode === "individual" ? 1 : mode === "liga" ? 3 : 2);
 
 function isSuper8(category) {
-  return category?.format === "super8_individual" || category?.format === "super8_parejas";
+  return category?.format === "super8_individual" || category?.format === "super8_parejas" || category?.format === "super8_liga";
+}
+/* Liga por parejas + semis y final: cualquier cantidad de parejas, fixture propio y semis (ver liga.js) */
+function esLiga(category) {
+  return category?.format === "super8_liga";
 }
 
 /* Turnos de juego de un Súper 8 con varias canchas: los partidos de una misma ronda pueden ir a
@@ -1636,6 +1653,8 @@ function formatSummary(format) {
   if (isSingleSetFormat(f)) {
     const tie = f.gamesPerSet - 1;
     const set = f.type === "americano" ? `set único a ${f.gamesPerSet} games, sin ventaja` : `un solo set a ${f.gamesPerSet} games`;
+    if (f.alEmpate === "seguir") return `${set} · en ${tie}-${tie} se sigue hasta ${f.gamesPerSet + 1}`;
+    if (f.alEmpate === "primero") return `${set} · en ${tie}-${tie} gana el primero a ${f.gamesPerSet}`;
     return `${set} · en ${tie}-${tie} tie break a 7 puntos (diferencia de 2)`;
   }
   const parts = [
@@ -3335,11 +3354,11 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
   const { a: setA, b: setB } = rows[0];
   const singleSetLoaded = singleSet && setA != null && setB != null;
   // Con retiro (partial) el set puede haber quedado cortado: no se avisa como resultado inválido
-  const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet);
+  const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet, format.alEmpate);
   const tieAt = format?.gamesPerSet - 1;
   const singleSetNote = !singleSetLoaded || partial ? null
-    : singleSetInvalid ? `Revisá el resultado: el set termina cuando alguien llega a ${format.gamesPerSet} (en ${tieAt}-${tieAt} se juega tie break y queda ${format.gamesPerSet}-${tieAt}). Hasta corregirlo, el partido no cuenta.`
-    : Math.min(setA, setB) === tieAt ? "Definido en tie break" : null;
+    : singleSetInvalid ? `Revisá el resultado: ${(AL_EMPATE[format.alEmpate] || AL_EMPATE.tiebreak)(format.gamesPerSet)[1]} Hasta corregirlo, el partido no cuenta.`
+    : Math.min(setA, setB) === tieAt && Math.max(setA, setB) === format.gamesPerSet && (format.alEmpate || "tiebreak") === "tiebreak" ? "Definido en tie break" : null;
   // A sets (Clásico): avisa del set que todavía no es un resultado final (en juego o mal tipeado) y
   // del que se cargó de más cuando el partido ya estaba definido. Esos sets no cuentan.
   let multiSetNote = null;
@@ -3426,7 +3445,7 @@ function ChoiceCard({ selected, onClick, title, description, compact = false }) 
 
 const TOURNAMENT_TYPE_DESCRIPTION = {
   clasico: "Zonas + llave final, partidos por sets y grilla de horarios.",
-  super8: "8 jugadores u 8 parejas por categoría, a un solo set. Termina en tabla de posiciones.",
+  super8: "8 jugadores u 8 parejas (o una liga con las parejas que quieras + semis y final), a un solo set.",
   americano: "Zonas + llave final en un solo día, con un set único a 7 o a 9 games.",
 };
 
@@ -3438,7 +3457,7 @@ function TournamentTypeChoice({ config, onChange }) {
         <ChoiceCard
           key={type}
           selected={config.type === type}
-          onClick={() => { if (config.type !== type) onChange({ type, super8Mode: null, games: null }); }}
+          onClick={() => { if (config.type !== type) onChange({ type, super8Mode: null, games: null, alEmpate: "tiebreak" }); }}
           title={TOURNAMENT_TYPE_LABEL[type]}
           description={TOURNAMENT_TYPE_DESCRIPTION[type]}
         />
@@ -3462,6 +3481,17 @@ function TournamentTypeOptions({ config, onChange }) {
       En {config.games - 1}-{config.games - 1} se define con tie break a 7 puntos (diferencia de 2) y el set queda {config.games}-{config.games - 1}.
     </p>
   );
+  // Súper 8: qué pasa si el set queda empatado un game antes del final
+  const empateChoice = config.games && (
+    <div className="mt-4">
+      <p className={label} style={F.body}>Si quedan {config.games - 1}-{config.games - 1}, ¿cómo se define?</p>
+      <div className="grid sm:grid-cols-3 gap-2">
+        {Object.entries(AL_EMPATE).map(([k, fn]) => (
+          <ChoiceCard key={k} compact selected={(config.alEmpate || "tiebreak") === k} onClick={() => onChange({ ...config, alEmpate: k })} title={fn(config.games)[0]} description={fn(config.games)[1]} />
+        ))}
+      </div>
+    </div>
+  );
 
   if (config.type === "super8") {
     return (
@@ -3473,12 +3503,13 @@ function TournamentTypeOptions({ config, onChange }) {
         <div className="grid sm:grid-cols-2 gap-2 mb-4">
           <ChoiceCard selected={config.super8Mode === "individual"} onClick={() => onChange({ ...config, super8Mode: "individual" })} title="Individual" description="8 jugadores sueltos: cada uno juega una vez con cada otro como compañero." />
           <ChoiceCard selected={config.super8Mode === "parejas"} onClick={() => onChange({ ...config, super8Mode: "parejas" })} title="Por Parejas" description="8 parejas armadas, todas contra todas." />
+          <ChoiceCard selected={config.super8Mode === "liga"} onClick={() => onChange({ ...config, super8Mode: "liga" })} title="Liga por parejas + semis y final" description="Las parejas que quieras: todos contra todos o un fixture que pegás. Pasan los 4 primeros: semis 1° vs 4° y 2° vs 3°, 3er puesto y final." />
         </div>
         {config.super8Mode && (
           <div>
             <p className={label} style={F.body}>¿A cuántos games se juega cada partido?</p>
             {gamesChoice(SUPER8_GAMES_OPTIONS, (g) => `${g} games`)}
-            {tiebreakNote}
+            {empateChoice}
           </div>
         )}
       </div>
@@ -3629,6 +3660,7 @@ function formatChangeImpact(tournament, next) {
 /* Nombre del tipo de torneo: "Clásico", "Súper 8 Individual", "Americano"... */
 function tournamentTypeName(t) {
   const { type, super8Mode } = tournamentConfig(t);
+  if (type === "super8" && super8Mode === "liga") return "Liga + semis";
   return type === "super8" && super8Mode ? `${TOURNAMENT_TYPE_LABEL.super8} ${SUPER8_MODE_LABEL[super8Mode]}` : TOURNAMENT_TYPE_LABEL[type];
 }
 
@@ -3866,7 +3898,7 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
       : super8 ? { courtsCount: super8Courts } : null;
     onCreate({
       name: name.trim(), date, circuitId: config.type === "clasico" ? circuitId || null : null, config, schedule,
-      categories: finalNames.map((n) => ({ name: n, cupo: super8 ? null : parseCupo(cupos[n] ?? "") })),
+      categories: finalNames.map((n) => ({ name: n, cupo: super8 && config.super8Mode !== "liga" ? null : parseCupo(cupos[n] ?? "") })),
       inscripcionesAbiertas: registrationOpen,
     });
     onClose();
@@ -3912,7 +3944,7 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
           <TournamentTypeOptions config={config} onChange={setConfig} />
           {super8 && config.super8Mode && (
             <div className="mt-4">
-              <Super8CourtsField courts={super8Courts} individual={config.super8Mode === "individual"} onChange={setSuper8CourtsChosen} />
+              <Super8CourtsField courts={super8Courts} mode={config.super8Mode} onChange={setSuper8CourtsChosen} />
               <p className="text-[11px] text-teal-600 -mt-2" style={F.body}>Se puede cambiar después en los partidos del torneo.</p>
             </div>
           )}
@@ -3947,7 +3979,7 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
         <div>
           <p className="text-sm text-teal-300 mb-1" style={F.body}>¿Qué categorías va a tener el torneo?</p>
           <p className="text-xs text-teal-500 mb-3" style={F.body}>
-            {super8
+            {super8 && config.super8Mode !== "liga"
               ? `Cada categoría admite exactamente 8 ${config.super8Mode === "individual" ? "jugadores" : "parejas"}. `
               : ""}
             {super8 ? "Los inscriptos" : "Las parejas"} se cargan después, a medida que se anotan. Más adelante también podés agregar o quitar categorías.
@@ -3979,7 +4011,7 @@ function CreateTournamentWizard({ circuits, onCreate, onClose }) {
             <RegistrationSettings
               open={registrationOpen}
               onOpenChange={setRegistrationOpen}
-              rows={categoryNames.map((n) => ({ key: n, name: n, fixed: super8 ? "8 (Súper 8)" : null, value: cupos[n] ?? "" }))}
+              rows={categoryNames.map((n) => ({ key: n, name: n, fixed: super8 && config.super8Mode !== "liga" ? "8 (Súper 8)" : null, value: cupos[n] ?? "" }))}
               onCupoChange={(key, text) => setCupos({ ...cupos, [key]: text })}
             />
           </div>
@@ -8584,6 +8616,202 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
 
 /* ---------- Vista pública: detalle de torneo ---------- */
 
+/* ---------- Liga por parejas + semis y final (ver liga.js) ---------- */
+
+/* Un partido de la liga con su hora y cancha (m.schedule: { time, court }) */
+const horaDe = (m) => m.schedule?.time || "";
+const ordenLiga = (a, b) => (a.round || 0) - (b.round || 0) || horaDe(a).localeCompare(horaDe(b)) || String(a.schedule?.court || "").localeCompare(String(b.schedule?.court || ""), "es", { numeric: true });
+
+/* Editor de un partido de la fase (cambiar parejas, hora o cancha) o de uno nuevo */
+function LigaPartidoEditor({ inicial, pairs, onGuardar, onCancelar, onBorrar }) {
+  const [f, setF] = useState({ round: String(inicial?.round || 1), pairA: inicial?.pairA || "", pairB: inicial?.pairB || "", time: inicial?.schedule?.time || "", court: inicial?.schedule?.court || "" });
+  const [error, setError] = useState("");
+  const campo = "px-2 py-1.5 rounded border text-sm";
+  const guardar = () => {
+    const round = Number.parseInt(f.round, 10);
+    if (!f.pairA || !f.pairB || f.pairA === f.pairB) { setError("Elegí dos parejas distintas."); return; }
+    if (!Number.isInteger(round) || round < 1) { setError("La ronda tiene que ser un número."); return; }
+    onGuardar({ round, pairA: f.pairA, pairB: f.pairB, schedule: f.time || f.court ? { time: f.time || null, court: f.court.trim() || null } : null });
+  };
+  const opciones = (valor, cambiar, etiqueta) => (
+    <select value={valor} onChange={(e) => cambiar(e.target.value)} className={`${campo} min-w-0 flex-1`} style={adminInput} aria-label={etiqueta}>
+      <option value="">Pareja…</option>
+      {pairs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+    </select>
+  );
+  return (
+    <div className="px-3 py-2 space-y-2 text-sm" style={{ ...F.body, backgroundColor: "rgba(34,211,238,0.05)" }}>
+      <div className="flex flex-wrap gap-2 items-center">
+        {opciones(f.pairA, (v) => setF({ ...f, pairA: v }), "Pareja A")}
+        <span className="text-xs text-teal-500">vs</span>
+        {opciones(f.pairB, (v) => setF({ ...f, pairB: v }), "Pareja B")}
+      </div>
+      <div className="flex flex-wrap gap-2 items-center">
+        <label className="text-xs text-teal-400">Ronda <input inputMode="numeric" value={f.round} onChange={(e) => setF({ ...f, round: e.target.value })} className={`${campo} w-14 ml-1`} style={adminInput} /></label>
+        <label className="text-xs text-teal-400">Hora <input type="time" value={f.time} onChange={(e) => setF({ ...f, time: e.target.value })} className={`${campo} ml-1`} style={adminInput} /></label>
+        <label className="text-xs text-teal-400">Cancha <input value={f.court} onChange={(e) => setF({ ...f, court: e.target.value })} placeholder="Cancha 1" className={`${campo} w-28 ml-1`} style={adminInput} /></label>
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <div className="flex gap-3 items-center">
+        <button type="button" onClick={guardar} className="px-3 py-1.5 rounded font-semibold text-xs" style={{ backgroundColor: BRAND.lime, color: "#14181f" }}>Guardar</button>
+        <button type="button" onClick={onCancelar} className="text-xs text-teal-400">Cancelar</button>
+        {onBorrar && <button type="button" onClick={onBorrar} className="text-xs text-red-400 ml-auto">Borrar partido</button>}
+      </div>
+    </div>
+  );
+}
+
+/* Semis, 3er puesto y final. playoff: { semis: [{ id, pairA, pairB, sets, schedule }], tercero: { id,
+   sets, schedule }, final: { id, sets, schedule } }. La final y el 3er puesto se completan solos con
+   los ganadores y perdedores de las semis. onChange(playoff | null) solo para el organizador. */
+function LigaPlayoff({ category, format, onChange, standings }) {
+  const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
+  const [confirmando, setConfirmando] = useState(false);
+  const group = category.groups[0];
+  const playoff = category.playoff;
+  const editable = !!onChange;
+  const nameOf = (id) => (id ? pairsById[id]?.name || "—" : null);
+  const faltan = group ? group.matches.filter((m) => !matchIsPlayed(m, format)).length : 0;
+  const titulo = <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Semifinales y final</h3>;
+
+  if (!playoff) {
+    if (!editable) return group ? <>{titulo}<p className="text-sm text-teal-500" style={F.body}>Al terminar la fase juegan los 4 primeros: 1° vs 4° y 2° vs 3°, y después el 3er puesto y la final.</p></> : null;
+    const primeros = (standings || []).filter((r) => !r.eliminated).map((r) => r.pairId);
+    const armar = () => {
+      const semis = armarSemis(primeros);
+      if (!semis) return;
+      onChange({ semis: semis.map((x) => ({ id: uid(), pairA: x.a, pairB: x.b, sets: [], schedule: null })), tercero: { id: uid(), sets: [], schedule: null }, final: { id: uid(), sets: [], schedule: null } });
+      setConfirmando(false);
+    };
+    return (
+      <>
+        {titulo}
+        <div className="border border-lime-800 rounded-lg p-4" style={{ backgroundColor: "rgba(163,230,53,0.05)", ...F.body }}>
+          <p className="text-sm text-teal-200">Con la tabla de ahora: <b>{nameOf(primeros[0]) || "1°"}</b> vs <b>{nameOf(primeros[3]) || "4°"}</b> y <b>{nameOf(primeros[1]) || "2°"}</b> vs <b>{nameOf(primeros[2]) || "3°"}</b>.</p>
+          {faltan > 0 && <p className="text-xs text-amber-300 mt-1">Faltan {faltan} partido{faltan === 1 ? "" : "s"} de la fase: la tabla todavía puede cambiar.</p>}
+          {primeros.length < 4 ? <p className="text-xs text-amber-300 mt-2">Hacen falta al menos 4 parejas.</p> : faltan > 0 && !confirmando ? (
+            <button type="button" onClick={() => setConfirmando(true)} className="mt-3 px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400">Armar las semis igual</button>
+          ) : (
+            <button type="button" onClick={armar} className="mt-3 px-4 py-2 rounded font-semibold text-sm" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Armar semifinales</button>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  const ganador = (m) => (m.pairA && m.pairB && matchIsPlayed(m, format) ? matchWinnerId(m, format) : null);
+  const { final: [fa, fb], tercero: [ta, tb] } = cruceFinal(playoff.semis, ganador);
+  const finalM = { ...playoff.final, pairA: fa, pairB: fb };
+  const terceroM = { ...playoff.tercero, pairA: ta, pairB: tb };
+  const campeon = ganador(finalM);
+  const algunResultado = [...playoff.semis, playoff.final, playoff.tercero].some((m) => matchHasScore(m));
+  const cambiar = (clave, i, cambio) => {
+    if (clave === "semis") onChange({ ...playoff, semis: playoff.semis.map((s, j) => (j === i ? { ...s, ...cambio } : s)) });
+    else onChange({ ...playoff, [clave]: { ...playoff[clave], ...cambio } });
+  };
+  const fila = (etiqueta, m, clave, i) => {
+    const listo = m.pairA && m.pairB;
+    const w = ganador(m);
+    const side = (id, n) => <span className={w && w === id ? "text-lime-400 font-semibold" : id ? "" : "text-teal-600"}>{nameOf(id) || n}</span>;
+    return (
+      <div key={etiqueta} className="px-3 py-2.5 text-sm space-y-1.5" style={F.body}>
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 uppercase" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>{etiqueta}</span>
+          {(m.schedule?.time || m.schedule?.court) && <span className="text-xs text-teal-400">{[m.schedule?.time, m.schedule?.court].filter(Boolean).join(" · ")}</span>}
+          {side(m.pairA, clave === "final" ? "Ganador semi 1" : clave === "tercero" ? "Perdedor semi 1" : "—")}
+          <span className="text-xs text-teal-500">vs</span>
+          {side(m.pairB, clave === "final" ? "Ganador semi 2" : clave === "tercero" ? "Perdedor semi 2" : "—")}
+          {!editable && w && <span className="font-mono text-xs text-teal-300"><MatchResultLabel format={format} match={m} winnerIsA={w === m.pairA} /></span>}
+        </div>
+        {editable && (
+          <div className="flex flex-wrap items-center gap-2">
+            <input type="time" value={m.schedule?.time || ""} onChange={(e) => cambiar(clave, i, { schedule: { ...(m.schedule || {}), time: e.target.value || null } })} aria-label={`Hora de ${etiqueta}`} className="px-2 py-1 rounded border text-xs" style={adminInput} />
+            <input value={m.schedule?.court || ""} onChange={(e) => cambiar(clave, i, { schedule: { ...(m.schedule || {}), court: e.target.value || null } })} placeholder="Cancha" aria-label={`Cancha de ${etiqueta}`} className="w-24 px-2 py-1 rounded border text-xs" style={adminInput} />
+            {listo && <MatchSetsEditor sets={m.sets} format={format} onSetScore={(setIndex, s, value) => cambiar(clave, i, { sets: withSetScore(m.sets, setIndex, s, value) })} />}
+          </div>
+        )}
+      </div>
+    );
+  };
+  return (
+    <>
+      {titulo}
+      {campeon && <p className="mb-3 px-3 py-2 rounded-lg text-sm font-semibold" style={{ ...F.body, color: "#14181f", backgroundColor: BRAND.lime }}>Campeones: {nameOf(campeon)}</p>}
+      <div className="rounded-xl border border-teal-800 divide-y divide-teal-900 min-w-0">
+        {playoff.semis.map((m, i) => fila(`Semi ${i + 1}`, m, "semis", i))}
+        {fila("3er puesto", terceroM, "tercero")}
+        {fila("Final", finalM, "final")}
+      </div>
+      {editable && !algunResultado && <button type="button" onClick={() => onChange(null)} className="mt-2 text-xs text-red-400">Deshacer las semis (vuelve a la tabla)</button>}
+    </>
+  );
+}
+
+/* Armar la fase de la liga: todos contra todos o pegando un fixture ("ronda; cancha; hora; A; B") */
+function LigaArmado({ category, onGenerar }) {
+  const [modo, setModo] = useState(null); // null | "pegar"
+  const [texto, setTexto] = useState("");
+  const [crear, setCrear] = useState(true);
+  const leido = useMemo(() => (texto.trim() ? leerFixture(texto, category.pairs) : null), [texto, category.pairs]);
+  const nombreDe = (id) => category.pairs.find((p) => p.id === id)?.name || id;
+  const avisos = useMemo(() => {
+    if (!leido || leido.nuevas.length) return [];
+    return revisarFixture(leido.partidos, nombreDe);
+  }, [leido]); // eslint-disable-line react-hooks/exhaustive-deps
+  const todos = () => {
+    const ids = category.pairs.map((p) => p.id);
+    onGenerar(category.pairs, todosContraTodos(ids).map((p) => ({ id: uid(), pairA: p.a, pairB: p.b, sets: [], round: p.ronda })));
+  };
+  const cargar = () => {
+    if (!leido || leido.errores.length || !leido.partidos.length) return;
+    let pairs = category.pairs;
+    const idPorNombre = {};
+    if (leido.nuevas.length) {
+      if (!crear) return;
+      const nuevas = leido.nuevas.map((n) => {
+        const players = n.split(/\s*[-/]\s*/).filter(Boolean).slice(0, 2).map((x) => ({ id: null, name: x }));
+        const p = { id: uid(), name: players.length === 2 ? nombrePareja(players) : n, availability: [], players };
+        idPorNombre[claveEquipo(n)] = p.id;
+        return p;
+      });
+      pairs = [...pairs, ...nuevas];
+    }
+    const id = (x, nombre) => x || idPorNombre[claveEquipo(nombre)];
+    onGenerar(pairs, leido.partidos.map((p) => ({ id: uid(), pairA: id(p.a, p.nombreA), pairB: id(p.b, p.nombreB), sets: [], round: p.ronda, schedule: { time: p.hora, court: p.cancha } })));
+  };
+  return (
+    <div className="border border-lime-800 rounded-lg p-4 space-y-3" style={{ backgroundColor: "rgba(163,230,53,0.05)", ...F.body }}>
+      <p className="text-sm font-semibold">Armar los partidos de la fase</p>
+      <div className="flex gap-2 flex-wrap">
+        <button type="button" disabled={category.pairs.length < 4} onClick={todos} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Todos contra todos</button>
+        <button type="button" onClick={() => setModo(modo === "pegar" ? null : "pegar")} className="px-4 py-2 rounded font-semibold text-sm border border-lime-400 text-lime-400">Pegar un fixture</button>
+      </div>
+      {category.pairs.length < 4 && modo !== "pegar" && <p className="text-xs text-amber-300">Para todos contra todos hacen falta al menos 4 parejas (hay {category.pairs.length}).</p>}
+      {modo === "pegar" && (
+        <div className="space-y-2">
+          <p className="text-xs text-teal-400">Un partido por renglón: <b>ronda; cancha; hora; pareja A; pareja B</b>. Ej: <span className="font-mono">1; 1; 10:00; Priolo-Acosta; Pino-Daiman</span>. Los nombres se reconocen aunque cambien mayúsculas, tildes o guiones.</p>
+          <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={10} className="w-full px-3 py-2 rounded border text-sm font-mono" style={adminInput} placeholder="1; 1; 10:00; Priolo-Acosta; Pino-Daiman" aria-label="Fixture" />
+          {leido && (
+            <div className="text-xs space-y-1">
+              <p className="text-teal-300">{leido.partidos.length} partido{leido.partidos.length === 1 ? "" : "s"} en {new Set(leido.partidos.map((p) => p.ronda)).size} ronda(s).</p>
+              {leido.errores.map((e) => <p key={e} className="text-red-400">{e}</p>)}
+              {leido.nuevas.length > 0 && (
+                <label className="flex items-start gap-2 text-amber-200">
+                  <input type="checkbox" checked={crear} onChange={(e) => setCrear(e.target.checked)} className="mt-0.5" />
+                  <span>Crear {leido.nuevas.length} pareja{leido.nuevas.length === 1 ? "" : "s"} que no están anotadas: {leido.nuevas.join(", ")}.</span>
+                </label>
+              )}
+              {avisos.length > 0 && <div className="text-amber-300">{avisos.map((a) => <p key={a}>⚠ {a}</p>)}<p className="text-teal-500">Se puede cargar igual y corregir cada partido después.</p></div>}
+            </div>
+          )}
+          <button type="button" disabled={!leido || leido.errores.length > 0 || !leido.partidos.length || (leido.nuevas.length > 0 && !crear)} onClick={cargar} className="px-4 py-2 rounded font-semibold text-sm disabled:opacity-40" style={{ backgroundColor: "#9fe022", color: "#14181f" }}>Cargar el fixture</button>
+        </div>
+      )}
+    </div>
+  );
+}
+const claveNombreLiga = (n) => String(n || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
 /* Súper 8: lista simple de todos los partidos, uno por renglón y en orden de juego
    ("Elías - Martín vs Juan - Negro"), y debajo la tabla de posiciones (se recalcula sola con cada
    resultado). Con más de una cancha, los partidos van agrupados en turnos con su cancha (ver
@@ -8591,10 +8819,13 @@ function PublicHome({ tournaments, ads, circuits, organizers, venues, coaches, e
    matchDisplayStatus). Con onSetScore/onWalkover/onToggleLive muestra la carga de resultados y el
    botón "En curso" para el organizador, con los partidos en curso repetidos arriba ("En cancha
    ahora") para cargar ahí el resultado; sin ellos es la vista de solo lectura para el público. */
-function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onToggleLive }) {
+function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onToggleLive, onEditMatch, onUpdatePlayoff }) {
   const pairsById = useMemo(() => categoryEntitiesById(category), [category]);
+  const [editando, setEditando] = useState(null); // id del partido de la liga que se está editando, o "nuevo"
   const group = category.groups[0];
   if (!group) return null;
+  const liga = esLiga(category);
+  const conHorario = liga || group.matches.some((m) => m.schedule?.time || m.schedule?.court);
   const editable = !!onSetScore;
   const individual = category.format === "super8_individual";
   const standingsGroup = individual ? super8IndividualStandingsGroup(category, group) : group;
@@ -8614,6 +8845,7 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
         <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
           {tag}
           <MatchStatusBadge status={status} />
+          {editable && liga && onEditMatch && !hasResult && <button type="button" onClick={() => setEditando(m.id)} className="text-[10px] text-teal-400 underline">Editar</button>}
           {side(m.pairA)}
           <span className="text-xs text-teal-500">vs</span>
           {side(m.pairB)}
@@ -8644,6 +8876,18 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
 
   const numberTag = (m) => <span className="text-[11px] text-teal-600 w-5 shrink-0 text-right">{group.matches.indexOf(m) + 1}.</span>;
   const courtTag = (m) => <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>Cancha {courtOf[m.id]}</span>;
+  // Liga o partidos con hora y cancha cargadas: por ronda, con su hora y cancha
+  const horaTag = (m) => (m.schedule?.time || m.schedule?.court
+    ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 whitespace-nowrap" style={{ color: BRAND.cyan, border: `1px solid ${BRAND.cyan}66` }}>{[m.schedule?.time, m.schedule?.court].filter(Boolean).join(" · ")}</span>
+    : numberTag(m));
+  const rondas = [];
+  [...group.matches].sort(ordenLiga).forEach((m) => {
+    const r = m.round || 1;
+    if (!rondas.length || rondas[rondas.length - 1][0] !== r) rondas.push([r, []]);
+    rondas[rondas.length - 1][1].push(m);
+  });
+  const parejasLiga = category.pairs;
+  const guardarPartido = (id, cambios) => { onEditMatch(id, cambios); setEditando(null); };
 
   return (
     <div>
@@ -8656,7 +8900,23 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
           </div>
         </div>
       )}
-      {simultaneous ? (
+      {conHorario ? (
+        <div className="space-y-3">
+          {rondas.map(([ronda, ms]) => (
+            <div key={ronda} className="rounded-xl border border-teal-800 min-w-0">
+              <p className="px-3 pt-2 text-[11px] font-bold uppercase tracking-wide text-teal-400" style={F.body}>Ronda {ronda}</p>
+              <div className="divide-y divide-teal-900">
+                {ms.map((m) => (editando === m.id
+                  ? <LigaPartidoEditor key={m.id} inicial={m} pairs={parejasLiga} onGuardar={(c) => guardarPartido(m.id, c)} onCancelar={() => setEditando(null)} onBorrar={() => guardarPartido(m.id, null)} />
+                  : row(m, horaTag(m))))}
+              </div>
+            </div>
+          ))}
+          {editable && liga && onEditMatch && (editando === "nuevo"
+            ? <div className="rounded-xl border border-teal-800"><LigaPartidoEditor inicial={{ round: rondas.length ? rondas[rondas.length - 1][0] : 1 }} pairs={parejasLiga} onGuardar={(c) => guardarPartido(null, c)} onCancelar={() => setEditando(null)} /></div>
+            : <button type="button" onClick={() => setEditando("nuevo")} className="text-sm text-cyan-300">+ Agregar un partido</button>)}
+        </div>
+      ) : simultaneous ? (
         // Varias canchas: los partidos de cada ronda se juegan a la vez, un turno abajo del otro
         <div className="space-y-3">
           {turns.map((turn, ti) => (
@@ -8674,8 +8934,9 @@ function Super8View({ category, format, courts = 1, onSetScore, onWalkover, onTo
         </div>
       )}
       <h3 className="text-sm uppercase tracking-wide text-teal-400 mt-8 mb-2" style={F.body}>Tabla de posiciones</h3>
-      <StandingsTable group={standingsGroup} pairsById={pairsById} format={format} highlightCount={3} />
+      <StandingsTable group={standingsGroup} pairsById={pairsById} format={format} highlightCount={liga ? 4 : 3} />
       <StandingsLegend />
+      {liga && <LigaPlayoff category={category} format={format} onChange={onUpdatePlayoff} standings={computeStandings(standingsGroup, pairsById, format)} />}
     </div>
   );
 }
@@ -10237,7 +10498,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
           <RegistrationSettings
             open={registrationOpen}
             onOpenChange={setRegistrationOpen}
-            rows={t.categories.map((c) => ({ key: c.id, name: c.name, fixed: isSuper8(c) ? "8 (Súper 8)" : null, value: cupoTexts[c.id] ?? "" }))}
+            rows={t.categories.map((c) => ({ key: c.id, name: c.name, fixed: isSuper8(c) && !esLiga(c) ? "8 (Súper 8)" : null, value: cupoTexts[c.id] ?? "" }))}
             onCupoChange={(key, text) => setCupoTexts({ ...cupoTexts, [key]: text })}
           />
         </div>
@@ -10249,7 +10510,7 @@ function TournamentRow({ t, circuits, onOpen, onUpdate, onDelete, onDuplicate, a
               // El Americano se juega en un solo día: si cambia la fecha del torneo, se mueve su día de juego
               const playDates = tournamentType(t) === "americano" && (t.playDates || []).length === 1 ? [{ ...t.playDates[0], date }] : t.playDates;
               const categories = t.categories.map((c) => {
-                if (isSuper8(c)) return c;
+                if (isSuper8(c) && !esLiga(c)) return c;
                 const { cupo, ...rest } = c;
                 const next = parseCupo(cupoTexts[c.id] ?? "");
                 return next ? { ...rest, cupo: next } : rest;
@@ -13249,7 +13510,7 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
               )}
               {category && left === 0 && (
                 <p className="text-xs text-amber-400 mt-2">
-                  {isSuper8(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
+                  {isSuper8(category) && !esLiga(category) ? "La categoría ya tiene sus 8 inscriptos: no se puede aceptar." : `Ojo: la categoría ya llegó al cupo (${categoryCupo(category)}). Si la aceptás, se supera.`}
                 </p>
               )}
               {conflict && <p className="text-xs text-amber-400 mt-1">{conflict}</p>}
@@ -13306,8 +13567,9 @@ function InscripcionesPanel({ tournament, update, inscripciones, onResolve }) {
    carga de resultados ronda por ronda con la tabla de posiciones debajo. */
 /* Canchas del Súper 8: con más de una, los partidos de cada ronda se juegan a la vez (hasta 2 en el
    Individual y hasta 4 por Parejas; más canchas no cambian nada) */
-function Super8CourtsField({ courts, individual, onChange }) {
-  const max = super8MaxCourts(individual ? "individual" : "parejas");
+function Super8CourtsField({ courts, individual, mode, onChange }) {
+  const modo = mode || (individual ? "individual" : "parejas");
+  const max = super8MaxCourts(modo);
   const used = Math.min(courts, max);
   const btn = "w-8 h-8 rounded-full border border-teal-700 text-teal-200 disabled:opacity-30";
   return (
@@ -13318,7 +13580,7 @@ function Super8CourtsField({ courts, individual, onChange }) {
       <button type="button" className={btn} disabled={courts >= max} onClick={() => onChange(courts + 1)} aria-label="Una cancha más">+</button>
       <span className="text-xs text-teal-500">
         {used === 1 ? "Un partido atrás del otro." : `${used} partidos a la vez en cada turno.`}
-        {courts > max ? ` Con ${individual ? "8 jugadores" : "8 parejas"} entran hasta ${max} a la vez.` : ""}
+        {courts > max ? ` Con ${modo === "individual" ? "8 jugadores" : "8 parejas"} entran hasta ${max} a la vez.` : ""}
       </span>
     </div>
   );
@@ -13347,9 +13609,19 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   };
 
   const reset = () => {
-    onUpdateCategory({ ...category, groups: [], teams: [] });
+    onUpdateCategory({ ...category, groups: [], teams: [], playoff: null });
     setConfirmingReset(false);
   };
+  const liga = esLiga(category);
+
+  if (!group && liga) {
+    return (
+      <LigaArmado category={category} onGenerar={(pairs, matches) => (onGroupsLocked || onUpdateCategory)({
+        ...category, pairs, teams: [], bracket: null, playoff: null,
+        groups: [{ id: uid(), name: "Liga", pairIds: pairs.map((p) => p.id), format: "super8", matches }],
+      })} />
+    );
+  }
 
   if (!group) {
     const ready = category.pairs.length === SUPER8_SIZE;
@@ -13379,7 +13651,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
   return (
     <div>
       <div className="border border-teal-800 rounded-lg p-4 mb-6">
-        <p className="text-xs text-teal-400 mb-2" style={F.body}>Numeración</p>
+        <p className="text-xs text-teal-400 mb-2" style={F.body}>{liga ? `Parejas (${group.pairIds.length}) · ${group.matches.length} partidos` : "Numeración"}</p>
         <ol className="flex flex-wrap gap-2 text-sm" style={F.body}>
           {group.pairIds.map((pid, i) => (
             <li key={pid} className="border border-teal-800 rounded px-2 py-1">
@@ -13391,7 +13663,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
           <div className="mt-3 text-xs" style={F.body}>
             {confirmingReset ? (
               <span>
-                <span className="text-teal-300 mr-2">Se borran los partidos y sus horarios. ¿Confirmás?</span>
+                <span className="text-teal-300 mr-2">Se borran los partidos{liga ? ", las semis" : ""} y sus horarios. ¿Confirmás?</span>
                 <button type="button" onClick={reset} className="text-red-400 font-semibold mr-2">Sí, reiniciar</button>
                 <button type="button" onClick={() => setConfirmingReset(false)} className="text-teal-400">Cancelar</button>
               </span>
@@ -13402,7 +13674,15 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
         )}
       </div>
       {onCourtsChange && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
-      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} onToggleLive={onToggleLive} />
+      <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} onToggleLive={onToggleLive}
+        onEditMatch={liga ? (id, cambios) => {
+          const matches = id == null
+            ? [...group.matches, { id: uid(), sets: [], ...cambios }]
+            : cambios == null ? group.matches.filter((m) => m.id !== id) : group.matches.map((m) => (m.id === id ? { ...m, ...cambios } : m));
+          const pairIds = [...new Set([...group.pairIds, ...matches.flatMap((m) => [m.pairA, m.pairB])])];
+          onUpdateCategory({ ...category, groups: [{ ...group, matches, pairIds }] });
+        } : null}
+        onUpdatePlayoff={liga ? (playoff) => onUpdateCategory({ ...category, playoff }) : null} />
     </div>
   );
 }
@@ -13536,7 +13816,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
     if (agregando) return;
     if (filasCarga.every((j) => !j.texto.trim())) return;
     if (super8Generated) { setPairError("Los partidos del Súper 8 ya están generados. Para cambiar la lista, reiniciá los partidos primero."); return; }
-    if (super8 && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
+    if (super8 && !esLiga(category) && category.pairs.length >= SUPER8_SIZE) { setPairError(`El Súper 8 es para exactamente ${SUPER8_SIZE} ${individual ? "jugadores" : "parejas"}.`); return; }
     const faltaNombre = filasCarga.findIndex((j) => !j.texto.trim());
     if (faltaNombre >= 0) { setPairError(`Falta el apellido y nombre del jugador ${faltaNombre + 1}.`); return; }
     const telMal = filasCarga.findIndex((j) => j.tel.trim() && !normalizeArPhone(j.tel));
@@ -13810,9 +14090,11 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
       )}
       {super8 && (
         <p className="text-xs text-teal-400 mb-4" style={F.body}>
-          Formato <span className="text-lime-400 font-semibold">{CATEGORY_FORMAT_LABEL[category.format]}</span>: {individual
+          Formato <span className="text-lime-400 font-semibold">{CATEGORY_FORMAT_LABEL[category.format]}</span>: {esLiga(category)
+            ? "las parejas que quieras, todos contra todos o con un fixture que pegás. Una sola tabla; los 4 primeros juegan semis (1° vs 4° y 2° vs 3°), 3er puesto y final."
+            : `${individual
             ? `${SUPER8_SIZE} jugadores sueltos. Cada uno juega una vez con cada otro como compañero y dos veces contra cada otro como rival.`
-            : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.
+            : `${SUPER8_SIZE} parejas armadas, todas contra todas.`} No hay llave: termina en tabla de posiciones.`}
         </p>
       )}
       {tab === "parejas" && (
@@ -13916,7 +14198,7 @@ function CategoryAdminView({ category, format, tournament, onUpdateCategory, onG
           </ul>
           {super8 && (
             <p className="text-xs text-teal-500 mt-3" style={F.body}>
-              {category.pairs.length} de {SUPER8_SIZE} {individual ? "jugadores anotados" : "parejas anotadas"}.
+              {esLiga(category) ? `${category.pairs.length} parejas anotadas.` : `${category.pairs.length} de ${SUPER8_SIZE} ${individual ? "jugadores anotados" : "parejas anotadas"}.`}
             </p>
           )}
         </div>
@@ -14389,7 +14671,7 @@ function CategoriesSettings({ tournament, onAdd, onRename, onDelete, onCupo, onP
                 aria-label="Nombre de la categoría"
                 className="flex-1 min-w-[8rem] px-2 py-1.5 rounded border text-sm" style={input}
               />
-              {isSuper8(c) ? (
+              {isSuper8(c) && !esLiga(c) ? (
                 <span className="text-xs text-teal-500 w-28">{SUPER8_SIZE} {c.format === "super8_individual" ? "jugadores" : "parejas"}</span>
               ) : (
                 <input
