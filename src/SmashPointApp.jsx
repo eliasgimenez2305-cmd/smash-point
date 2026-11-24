@@ -3357,7 +3357,7 @@ function MatchSetsEditor({ sets, format, onSetScore, partial = false }) {
   const singleSetInvalid = singleSetLoaded && !partial && !singleSetIsValid(setA, setB, format.gamesPerSet, format.alEmpate);
   const tieAt = format?.gamesPerSet - 1;
   const singleSetNote = !singleSetLoaded || partial ? null
-    : singleSetInvalid ? `Revisá el resultado: ${(AL_EMPATE[format.alEmpate] || AL_EMPATE.tiebreak)(format.gamesPerSet)[1]} Hasta corregirlo, el partido no cuenta.`
+    : singleSetInvalid ? `Revisá el resultado: ${(AL_EMPATE[format.alEmpate] || AL_EMPATE.tiebreak)(format.gamesPerSet)[1].replace(/^En /, "en ")} Hasta corregirlo, el partido no cuenta.`
     : Math.min(setA, setB) === tieAt && Math.max(setA, setB) === format.gamesPerSet && (format.alEmpate || "tiebreak") === "tiebreak" ? "Definido en tie break" : null;
   // A sets (Clásico): avisa del set que todavía no es un resultado final (en juego o mal tipeado) y
   // del que se cargó de más cuando el partido ya estaba definido. Esos sets no cuentan.
@@ -13677,7 +13677,7 @@ function Super8AdminPanel({ category, format, scheduled, onUpdateCategory, onGro
           </div>
         )}
       </div>
-      {onCourtsChange && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
+      {onCourtsChange && !liga && <Super8CourtsField courts={courts} individual={individual} onChange={onCourtsChange} />}
       <Super8View category={category} format={format} courts={courts} onSetScore={onSetScore} onWalkover={onWalkover} onToggleLive={onToggleLive}
         onEditMatch={liga ? (id, cambios) => {
           const matches = id == null
