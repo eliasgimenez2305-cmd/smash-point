@@ -71,7 +71,12 @@ export function setIsComplete(set, i, format) {
     const p = superTiebreakPoints(f);
     return (hi === p && lo <= p - 2) || (hi > p && hi - lo === 2);
   }
-  if (f.setsToPlay === 1) return hi === g && lo <= g - 1;
+  // Set único: termina al llegar a los games (en el empate, tie break o "gana el primero": g a g-1).
+  // Con alEmpate "seguir", en el empate se sigue un game más: g+1 a g-1 o g+1 a g.
+  if (f.setsToPlay === 1) {
+    if (f.alEmpate === "seguir") return (hi === g && lo <= g - 2) || (hi === g + 1 && lo >= g - 1);
+    return hi === g && lo <= g - 1;
+  }
   if (f.setTiebreak) return (hi === g && lo <= g - 2) || (hi === g + 1 && (lo === g - 1 || lo === g));
   return (hi === g && lo <= g - 2) || (hi > g && hi - lo === 2);
 }
