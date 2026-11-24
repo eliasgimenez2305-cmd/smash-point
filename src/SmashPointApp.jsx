@@ -8754,9 +8754,13 @@ function LigaArmado({ category, onGenerar }) {
   const [crear, setCrear] = useState(true);
   const leido = useMemo(() => (texto.trim() ? leerFixture(texto, category.pairs) : null), [texto, category.pairs]);
   const nombreDe = (id) => category.pairs.find((p) => p.id === id)?.name || id;
+  // Avisos (misma hora, rival repetido, cantidades): las parejas nuevas se identifican por su nombre
   const avisos = useMemo(() => {
-    if (!leido || leido.nuevas.length) return [];
-    return revisarFixture(leido.partidos, nombreDe);
+    if (!leido) return [];
+    const nombres = {};
+    const clave = (id, nombre) => { if (id) return id; const k = "n:" + claveEquipo(nombre); nombres[k] = nombres[k] || nombre; return k; };
+    const ps = leido.partidos.map((p) => ({ ...p, a: clave(p.a, p.nombreA), b: clave(p.b, p.nombreB) }));
+    return revisarFixture(ps, (id) => nombres[id] || nombreDe(id));
   }, [leido]); // eslint-disable-line react-hooks/exhaustive-deps
   const todos = () => {
     const ids = category.pairs.map((p) => p.id);
