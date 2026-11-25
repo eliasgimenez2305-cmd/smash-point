@@ -683,7 +683,7 @@ const STATUS = {
    - Clásico: zonas + llave final, partidos por sets, con grilla de horarios.
    - Súper 8: cada categoría es un cuadro fijo de 8 jugadores sueltos (Individual) u 8 parejas
      (Por Parejas) que termina en tabla de posiciones. Un solo set a los games que elija el organizador.
-   - Americano: zonas + llave final en un solo día, con un set único a 7 o a 9 games. Usa la grilla
+   - Americano: zonas + llave final en un solo día, con un set único de 4 a 9 games. Usa la grilla
      de horarios (canchas, horario de arranque y tiempo entre partidos se piden al crearlo).
    El Súper 8 no usa la grilla de horarios: los partidos se juegan uno atrás del otro.
    En los formatos de set único, si llegan a N-1 iguales se define con un tie break a 7 puntos con
@@ -697,7 +697,7 @@ const AL_EMPATE = {
   primero: (g) => [`Gana el primero a ${g}`, `En ${g - 1}-${g - 1} se juega un game más y queda ${g}-${g - 1}.`],
 };
 const SUPER8_GAMES_OPTIONS = [4, 5, 6, 7, 8, 9];
-const AMERICANO_GAMES_OPTIONS = [7, 9];
+const AMERICANO_GAMES_OPTIONS = [4, 5, 6, 7, 9];
 
 function singleSetMatchFormat(type, games, alEmpate = "tiebreak") {
   return { type, setsToPlay: 1, gamesPerSet: games, setTiebreak: true, finalSuperTiebreak: false, alEmpate: AL_EMPATE[alEmpate] ? alEmpate : "tiebreak" };
@@ -2493,10 +2493,22 @@ function autoSchedule(tournament) {
   // primer día y las parejas que solo pueden ese día se quedan sin lugar. Los cruces de un grupo de
   // 4 van siempre después de su primera ronda (necesitan saber cuándo termina).
   const rank = (x) => (x.groupFormat === "bracket4" && x.stage !== "r1" ? 1 : 0);
+  // En los todos contra todos, a igual flexibilidad, primero la ronda 1 de todos los grupos, después
+  // la 2, etc. (método del círculo): así una pareja no juega todos sus partidos seguidos y los
+  // grupos se intercalan en las canchas en lugar de jugarse uno detrás del otro.
+  const roundByPair = {};
+  (tournament.categories || []).forEach((c) => (c.groups || []).forEach((g) => {
+    if ((g.format || "roundrobin") !== "roundrobin") return;
+    todosContraTodos(g.pairIds || []).forEach(({ ronda, a, b }) => {
+      roundByPair[`${c.id}:${g.id}:${a}|${b}`] = ronda;
+      roundByPair[`${c.id}:${g.id}:${b}|${a}`] = ronda;
+    });
+  }));
+  const roundOf = (m) => roundByPair[`${m.categoryId}:${m.location.groupId}:${m.pairA}|${m.pairB}`] || 0;
   const toSchedule = all
     .filter((m) => !m.schedule && m.location.type === "group")
-    .map((m) => ({ m, options: slotOptions(m) }))
-    .sort((a, b) => rank(a.m) - rank(b.m) || a.options - b.options)
+    .map((m) => ({ m, options: slotOptions(m), round: roundOf(m) }))
+    .sort((a, b) => rank(a.m) - rank(b.m) || a.options - b.options || a.round - b.round)
     .map((x) => x.m);
 
   // Solo se auto-programan partidos de grupos: las parejas únicamente informan disponibilidad
@@ -3446,7 +3458,7 @@ function ChoiceCard({ selected, onClick, title, description, compact = false }) 
 const TOURNAMENT_TYPE_DESCRIPTION = {
   clasico: "Zonas + llave final, partidos por sets y grilla de horarios.",
   super8: "8 jugadores u 8 parejas (o una liga con las parejas que quieras + semis y final), a un solo set.",
-  americano: "Zonas + llave final en un solo día, con un set único a 7 o a 9 games.",
+  americano: "Zonas + llave final en un solo día, con un set único a 4, 5, 6, 7 o 9 games.",
 };
 
 /* Paso 1: elegir el tipo de torneo. Al cambiar de tipo se limpian las opciones del anterior. */
@@ -3476,12 +3488,7 @@ function TournamentTypeOptions({ config, onChange }) {
       ))}
     </div>
   );
-  const tiebreakNote = config.games && (
-    <p className="text-[11px] text-teal-500 mt-2" style={F.body}>
-      En {config.games - 1}-{config.games - 1} se define con tie break a 7 puntos (diferencia de 2) y el set queda {config.games}-{config.games - 1}.
-    </p>
-  );
-  // Súper 8: qué pasa si el set queda empatado un game antes del final
+  // Súper 8 y Americano: qué pasa si el set queda empatado un game antes del final
   const empateChoice = config.games && (
     <div className="mt-4">
       <p className={label} style={F.body}>Si quedan {config.games - 1}-{config.games - 1}, ¿cómo se define?</p>
@@ -3520,7 +3527,7 @@ function TournamentTypeOptions({ config, onChange }) {
       <div>
         <p className={label} style={F.body}>¿A cuántos games se juega cada partido?</p>
         {gamesChoice(AMERICANO_GAMES_OPTIONS, (g) => `A${g}`)}
-        {tiebreakNote}
+        {empateChoice}
       </div>
     );
   }
